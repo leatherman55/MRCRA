@@ -1,0 +1,96 @@
+{
+  "absolute_target_hardware_throughput_tested": false,
+  "claim_boundary": "Relative timings are CPU regression sentinels for this source revision. Absolute RTX A4500 or other target-hardware throughput remains intentionally unclaimed.",
+  "device": "cpu",
+  "dtype": "float32",
+  "format_version": 3,
+  "passed": true,
+  "results": [
+    {
+      "direction": "at_most",
+      "measurement": "median ABBA-paired single-thread CPU-time overhead with event path dormant",
+      "metric": 0.11818849273839138,
+      "name": "dormant_cognitive_overhead",
+      "passed": true,
+      "repeats": 41,
+      "threshold": 5.0,
+      "unit": "percent"
+    },
+    {
+      "direction": "at_most",
+      "measurement": "median ABBA-paired single-thread CPU-time overhead at matched capacities",
+      "metric": 5.669573579873699,
+      "name": "ordinary_event_cycle_overhead",
+      "passed": true,
+      "repeats": 41,
+      "threshold": 25.0,
+      "unit": "percent"
+    },
+    {
+      "direction": "at_least",
+      "measurement": "requested support extent 32 versus 32768 with bounded local decoder",
+      "metric": 1.0,
+      "name": "reconstruction_locality",
+      "passed": true,
+      "repeats": 1,
+      "threshold": 1.0,
+      "unit": "boolean"
+    },
+    {
+      "direction": "at_most",
+      "measurement": "exact configured K_h*K_a*H bound",
+      "metric": 128.0,
+      "name": "bounded_planning_lattice",
+      "passed": true,
+      "repeats": 1,
+      "threshold": 256.0,
+      "unit": "hypothesis-action-horizon cells"
+    },
+    {
+      "direction": "at_most",
+      "measurement": "recursive runtime-state schema inspection",
+      "metric": 0.0,
+      "name": "checkpoint_duplicate_model_references",
+      "passed": true,
+      "repeats": 1,
+      "threshold": 0.0,
+      "unit": "references"
+    },
+    {
+      "direction": "at_least",
+      "measurement": "median alternating single-thread CPU time for vectorized prefill versus identical token transitions",
+      "metric": 6.561875215442462,
+      "name": "complete_state_prefill_speedup",
+      "passed": true,
+      "repeats": 7,
+      "threshold": 2.0,
+      "unit": "times"
+    }
+  ],
+  "suite": "mrcra-relative-performance-budgets-v3",
+  "telemetry": {
+    "checkpoint_embeds_model_weights": false,
+    "complete_state_prefill_median_ms": 8.703000000000571,
+    "cycle_baseline_median_ms": 4.290375000000013,
+    "cycle_integrated_median_ms": 4.571343749999956,
+    "cycle_paired_overhead_mad_percent": 2.281018054005113,
+    "dormant_baseline_median_ms": 1.7739375000000028,
+    "dormant_integrated_median_ms": 1.754249999999999,
+    "dormant_paired_overhead_mad_percent": 1.9189763374202307,
+    "latency_arm_observations_per_repeat": 2,
+    "latency_calls_per_arm_observation": 16,
+    "latency_clock": "process_time",
+    "long_context_active_nodes": 1,
+    "long_context_allocated_node_slots": 4,
+    "maximum_local_active_nodes": 4,
+    "maximum_local_active_relations": 3,
+    "planning_action_capacity": 8,
+    "planning_cells": 128,
+    "planning_horizon_count": 4,
+    "planning_hypothesis_top_k": 4,
+    "runtime_declared_tensor_bytes": 21524,
+    "short_context_allocated_node_slots": 4,
+    "tokenwise_transition_median_ms": 57.10799999999949
+  },
+  "torch_threads": 1
+}

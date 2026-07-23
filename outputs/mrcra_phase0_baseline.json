@@ -1,0 +1,26 @@
+{
+  "artifact": "MRCRA consequential-gap closure Phase 0 baseline",
+  "claim_boundary": "This baseline proves the pre-upgrade repository contracts and bounded local mechanisms pass. It does not prove the consequential gaps are closed.",
+  "empirical_acceptance": {
+    "artifact": "work/mrcra-phase0-empirical-baseline.json",
+    "benchmark_count": 8,
+    "passed": true,
+    "sha256": "7e238c49d092ebea67256d3a2d48ddeb56c6056ac95de5e4dff9772d102a7a6a"
+  },
+  "environment": {
+    "python": "3.14.3",
+    "torch": "2.11.0"
+  },
+  "parameter_baseline": {
+    "artifact": "outputs/mrcra_120m_parameter_report.json",
+    "parameter_count": 113004595,
+    "sha256": "f0216d9084bf30190eea4dbfb8768ad53ea699afe371adecd449697f91e42eff",
+    "trainable_parameter_count": 113004595
+  },
+  "test_baseline": {
+    "command": "PYTHONPATH=src work/wheel-venv/bin/python -m pytest -q",
+    "passed": 416,
+    "failed": 0,
+    "duration_seconds": 26.03
+  }
+}

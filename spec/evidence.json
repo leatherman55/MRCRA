@@ -1,0 +1,2455 @@
+{
+  "0": {
+    "claim": "Status, claim boundaries, and reading rules is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "README.md",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_traceability.py"
+    ]
+  },
+  "1": {
+    "claim": "Executive definition is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "1.1": {
+    "claim": "Information paths is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "1.2": {
+    "claim": "Local and global context is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "10": {
+    "claim": "Bounded eidetic and associative memory is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "10.1": {
+    "claim": "Memory tiers is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "10.2": {
+    "claim": "Memory item is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "10.3": {
+    "claim": "Write policy is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "10.4": {
+    "claim": "Eviction is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "10.5": {
+    "claim": "Retrieval is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py",
+      "tests/test_model.py"
+    ]
+  },
+  "11": {
+    "claim": "One complete MRRN block is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py"
+    ]
+  },
+  "11.1": {
+    "claim": "Attention schedule is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py"
+    ]
+  },
+  "12": {
+    "claim": "Full network topology is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "12.1": {
+    "claim": "Encoder is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "12.2": {
+    "claim": "Analysis is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "12.3": {
+    "claim": "Repeated shared-form blocks is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "12.4": {
+    "claim": "Output is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "13": {
+    "claim": "Modality-specific forms is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.1": {
+    "claim": "Text and symbolic sequences is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.2": {
+    "claim": "Audio and sensor signals is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.3": {
+    "claim": "Images is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.4": {
+    "claim": "Video is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.5": {
+    "claim": "Physical fields and neural operators is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.6": {
+    "claim": "Graphs and irregular domains is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "13.7": {
+    "claim": "Unordered sets is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_modalities.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "14": {
+    "claim": "Causal, bidirectional, and field modes is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "14.1": {
+    "claim": "Strict causal mode is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "14.2": {
+    "claim": "Bidirectional offline mode is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "14.3": {
+    "claim": "Spatial field mode is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "15": {
+    "claim": "Training objectives is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.1": {
+    "claim": "Task loss is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.2": {
+    "claim": "Optional predictive state loss is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.3": {
+    "claim": "Retrieval contrastive loss is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.4": {
+    "claim": "Pole coverage and redundancy is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.5": {
+    "claim": "State-energy control is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.6": {
+    "claim": "Router balance is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.7": {
+    "claim": "Physical constraints is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "15.8": {
+    "claim": "Spectral activation regularization is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/objectives.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_objectives.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "16": {
+    "claim": "Initialization is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/resonance.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_resonance.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "17": {
+    "claim": "Optimization and numerical stability is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "17.1": {
+    "claim": "Precision policy is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "17.2": {
+    "claim": "Gradient controls is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "17.3": {
+    "claim": "Stable exponentials is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "17.4": {
+    "claim": "Normalization placement is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "17.5": {
+    "claim": "Optimizer and schedule is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/optimization.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_optimization.py",
+      "tests/test_complex_ops.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "18": {
+    "claim": "Computational complexity is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_config.py"
+    ]
+  },
+  "18.1": {
+    "claim": "Sequence-dependent work per layer is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_config.py"
+    ]
+  },
+  "18.2": {
+    "claim": "Overall sequence scaling is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_config.py"
+    ]
+  },
+  "18.3": {
+    "claim": "Why no unrestricted dense attention appears is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_config.py"
+    ]
+  },
+  "18.4": {
+    "claim": "Wall-clock qualifications is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_config.py"
+    ]
+  },
+  "19": {
+    "claim": "Recommended MRRN-H configuration is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_model.py"
+    ]
+  },
+  "19.1": {
+    "claim": "Small research model is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_model.py"
+    ]
+  },
+  "19.2": {
+    "claim": "Capability-first large model is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_model.py"
+    ]
+  },
+  "19.3": {
+    "claim": "Efficiency-first model is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_model.py"
+    ]
+  },
+  "2": {
+    "claim": "What \u201cspectral\u201d means in this architecture is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_resonance.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "2.1": {
+    "claim": "When a spectrum is meaningful is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_resonance.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "20": {
+    "claim": "Training curriculum is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "README.md",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "21": {
+    "claim": "Diagnostics and interpretability is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.1": {
+    "claim": "Mode diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.2": {
+    "claim": "Scale diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.3": {
+    "claim": "Memory diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.4": {
+    "claim": "Attention diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.5": {
+    "claim": "Stability diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "21.6": {
+    "claim": "Spectral activation diagnostics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "22": {
+    "claim": "Ablation matrix is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py",
+      "src/mrrn/mixer.py",
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py",
+      "tests/test_mixer.py",
+      "tests/test_resonance.py",
+      "tests/test_attention.py"
+    ]
+  },
+  "23": {
+    "claim": "Failure modes and mitigations is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/diagnostics.py",
+      "README.md"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_diagnostics.py",
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24": {
+    "claim": "Mathematical limitations is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.1": {
+    "claim": "Time\u2013frequency uncertainty is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.2": {
+    "claim": "Nyquist limitation is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.3": {
+    "claim": "Fixed-state information bottleneck is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.4": {
+    "claim": "Dense-attention limitation is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.5": {
+    "claim": "Stability\u2013memory tradeoff is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.6": {
+    "claim": "Boundary and nonstationarity limitation is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.7": {
+    "claim": "Spectral semantics limitation is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "24.8": {
+    "claim": "No-free-lunch limitation is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "25": {
+    "claim": "Reference pseudocode is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_lifting.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "25.1": {
+    "claim": "Streaming step is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_lifting.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "25.2": {
+    "claim": "Parallel training is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_lifting.py",
+      "tests/test_resonance.py"
+    ]
+  },
+  "26": {
+    "claim": "Implementation modules and interfaces is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py",
+      "src/mrrn/checkpoint.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_modalities.py",
+      "tests/test_checkpoint.py"
+    ]
+  },
+  "27": {
+    "claim": "Verification gates is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_traceability.py"
+    ]
+  },
+  "28": {
+    "claim": "What is core and what remains experimental is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/mixer.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_mixer.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "29": {
+    "claim": "Why this is the strongest reasonable form is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_evaluation.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "3": {
+    "claim": "Design goals and non-goals is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "3.1": {
+    "claim": "Required goals is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "3.2": {
+    "claim": "Non-goals is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "30": {
+    "claim": "Research evidence and intellectual lineage is mapped to executable implementation and empirical evidence. Limitation boundaries are preserved rather than promoted to unsupported guarantees.",
+    "implementation": [
+      "outputs/multiresolution_resonance_network_spec.md",
+      "README.md"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_traceability.py"
+    ]
+  },
+  "31": {
+    "claim": "Final architectural statement is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_synthetics.py"
+    ]
+  },
+  "32": {
+    "claim": "Stability, memory, and error derivations is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.1": {
+    "claim": "Uniform bounded-input bounded-state condition is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.2": {
+    "claim": "Half-life and effective horizon is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.3": {
+    "claim": "Phase and delay is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.4": {
+    "claim": "Correlation theorem behind lag routing is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.5": {
+    "claim": "Multiresolution cost bound is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.6": {
+    "claim": "Reconstruction correctness of lifting is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "32.7": {
+    "claim": "Why global context is compressed rather than lost immediately is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/attention.py",
+      "src/mrrn/lifting.py",
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_attention.py",
+      "tests/test_lifting.py",
+      "tests/test_config.py"
+    ]
+  },
+  "33": {
+    "claim": "Hyperparameter decision rules is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.1": {
+    "claim": "Choose scales from physical or semantic span is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.2": {
+    "claim": "Choose modes from spectral rank is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.3": {
+    "claim": "Choose local window and retrieval count is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.4": {
+    "claim": "Choose decay limits is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.5": {
+    "claim": "Choose frequency limits is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.6": {
+    "claim": "Choose MIMO rank is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "33.7": {
+    "claim": "Choose memory capacity is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py"
+    ]
+  },
+  "34": {
+    "claim": "State, cache, and checkpoint format is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/checkpoint.py",
+      "src/mrrn/model.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_checkpoint.py",
+      "tests/test_model.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "34.1": {
+    "claim": "Streaming state per layer and scale is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/checkpoint.py",
+      "src/mrrn/model.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_checkpoint.py",
+      "tests/test_model.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "34.2": {
+    "claim": "Reset semantics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/checkpoint.py",
+      "src/mrrn/model.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_checkpoint.py",
+      "tests/test_model.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "34.3": {
+    "claim": "Determinism is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/checkpoint.py",
+      "src/mrrn/model.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_checkpoint.py",
+      "tests/test_model.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "34.4": {
+    "claim": "Quantization is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/checkpoint.py",
+      "src/mrrn/model.py",
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_checkpoint.py",
+      "tests/test_model.py",
+      "tests/test_memory.py"
+    ]
+  },
+  "35": {
+    "claim": "Minimum implementation test suite is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py",
+      "src/mrrn/evaluation.py",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py",
+      "tests/test_traceability.py"
+    ]
+  },
+  "35.1": {
+    "claim": "Algebraic unit tests is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py",
+      "src/mrrn/evaluation.py",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py",
+      "tests/test_traceability.py"
+    ]
+  },
+  "35.2": {
+    "claim": "Synthetic capability tests is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py",
+      "src/mrrn/evaluation.py",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py",
+      "tests/test_traceability.py"
+    ]
+  },
+  "35.3": {
+    "claim": "Baseline comparisons is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py",
+      "src/mrrn/evaluation.py",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py",
+      "tests/test_traceability.py"
+    ]
+  },
+  "35.4": {
+    "claim": "Required reporting is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py",
+      "src/mrrn/evaluation.py",
+      "src/mrrn/traceability.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py",
+      "tests/test_traceability.py"
+    ]
+  },
+  "36": {
+    "claim": "Resonant Adjoint Surprise Learning is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.1": {
+    "claim": "Trajectory and time semantics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.10": {
+    "claim": "Bounded cross-entropy policy target is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.11": {
+    "claim": "Complete actor objective and trust region is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.12": {
+    "claim": "Gradient firewalls and update order is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.13": {
+    "claim": "EMA target efficiency and rollout preparation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.14": {
+    "claim": "Prioritized bounded replay is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.15": {
+    "claim": "Performance guard is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.16": {
+    "claim": "Training checkpoint is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.17": {
+    "claim": "Input and output preparation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.18": {
+    "claim": "Complexity, limitations, and claim boundary is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.2": {
+    "claim": "Transform-once critic construction is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.3": {
+    "claim": "Causal consequence path and reverse adjoint path is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.4": {
+    "claim": "Original-time fusion and physical support is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.5": {
+    "claim": "Non-collapsible phase-aware latent targets is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.6": {
+    "claim": "Factorized distributional consequence model is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.7": {
+    "claim": "Multihorizon return targets is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.8": {
+    "claim": "Critic objective is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "36.9": {
+    "claim": "Calibrated functional surprise is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "4": {
+    "claim": "Notation and tensor contracts is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_complex_ops.py",
+      "tests/test_lifting.py"
+    ]
+  },
+  "4.1": {
+    "claim": "Core symbols is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_complex_ops.py",
+      "tests/test_lifting.py"
+    ]
+  },
+  "4.2": {
+    "claim": "Main tensors for a one-dimensional model is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/config.py",
+      "src/mrrn/complex_ops.py",
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_config.py",
+      "tests/test_complex_ops.py",
+      "tests/test_lifting.py"
+    ]
+  },
+  "5": {
+    "claim": "The transform-once multiresolution representation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.1": {
+    "claim": "Why it exists is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.2": {
+    "claim": "Perfect-reconstruction lifting transform (E) is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.3": {
+    "claim": "Boundary and causal rules is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.4": {
+    "claim": "Analysis-bank parameterization is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.5": {
+    "claim": "Scale widths is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "5.6": {
+    "claim": "Choosing the number of scales is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6": {
+    "claim": "The complex resonant state-space engine is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.1": {
+    "claim": "Purpose is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.2": {
+    "claim": "Continuous-time starting point (E) is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.3": {
+    "claim": "Stable exponential\u2013trapezoidal discretization (D) is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.4": {
+    "claim": "Input-dependent poles is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.5": {
+    "claim": "Frequency allocation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.6": {
+    "claim": "Low-rank multi-input, multi-output drive is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.7": {
+    "claim": "Real-valued implementation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "6.8": {
+    "claim": "Parallel and recurrent forms is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "7": {
+    "claim": "Cross-scale context exchange is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_scale_exchange.py",
+      "tests/test_model.py"
+    ]
+  },
+  "7.1": {
+    "claim": "Why it exists is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_scale_exchange.py",
+      "tests/test_model.py"
+    ]
+  },
+  "7.2": {
+    "claim": "Fine-to-coarse innovation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_scale_exchange.py",
+      "tests/test_model.py"
+    ]
+  },
+  "7.3": {
+    "claim": "Coarse-to-fine modulation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_scale_exchange.py",
+      "tests/test_model.py"
+    ]
+  },
+  "7.4": {
+    "claim": "Scale identity is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_scale_exchange.py",
+      "tests/test_model.py"
+    ]
+  },
+  "8": {
+    "claim": "Local nonlinear and transient path is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.1": {
+    "claim": "Why it exists is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.2": {
+    "claim": "Phase-preserving normalization is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.3": {
+    "claim": "Gated local mixer is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.4": {
+    "claim": "Complex radial activation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.5": {
+    "claim": "Controlled cross-frequency mixing is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.6": {
+    "claim": "Alias-controlled continuous-signal mode is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "8.7": {
+    "claim": "Learned resonant spectral GLU is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_mixer.py",
+      "tests/test_complex_ops.py",
+      "tests/test_spectral_activation.py"
+    ]
+  },
+  "9": {
+    "claim": "Resonant attention: the attention equivalent is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.1": {
+    "claim": "Why recurrence alone is insufficient is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.2": {
+    "claim": "Candidate-set principle is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.3": {
+    "claim": "Complex query and key representation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.4": {
+    "claim": "Relative-delay compensation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.5": {
+    "claim": "Coherence score is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.6": {
+    "claim": "Bandwise value transport is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.7": {
+    "claim": "Lag-aware correlation router is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "9.8": {
+    "claim": "Relationship to ordinary attention is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py",
+      "tests/test_model.py"
+    ]
+  },
+  "Gate A": {
+    "claim": "transform correctness is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_lifting.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "Gate B": {
+    "claim": "recurrence correctness is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_resonance.py",
+      "tests/test_complex_ops.py"
+    ]
+  },
+  "Gate C": {
+    "claim": "causal correctness is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_model.py",
+      "tests/test_scale_exchange.py",
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "Gate D": {
+    "claim": "attention correctness is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_attention.py"
+    ]
+  },
+  "Gate E": {
+    "claim": "memory correctness is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_memory.py"
+    ]
+  },
+  "Gate F": {
+    "claim": "capability is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/synthetics.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py"
+    ]
+  },
+  "Gate G": {
+    "claim": "efficiency is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Gate H": {
+    "claim": "extrapolation is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/model.py",
+      "src/mrrn/modalities.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_extrapolation.py"
+    ]
+  },
+  "Gate I": {
+    "claim": "Resonant Adjoint Surprise Learning verification is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/surprise.py",
+      "scripts/run_surprise_verification.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_surprise.py"
+    ]
+  },
+  "Stage 0": {
+    "claim": "algebraic and numerical tests is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/lifting.py",
+      "src/mrrn/resonance.py",
+      "src/mrrn/complex_ops.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 1": {
+    "claim": "local baseline is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 2": {
+    "claim": "fixed resonators is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py",
+      "src/mrrn/scale_exchange.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 3": {
+    "claim": "selective dynamics is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/resonance.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 4": {
+    "claim": "local resonant attention is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/attention.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 5": {
+    "claim": "eidetic memory is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/memory.py",
+      "src/mrrn/model.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  },
+  "Stage 6": {
+    "claim": "research options is mapped to executable implementation and empirical evidence.",
+    "implementation": [
+      "src/mrrn/mixer.py",
+      "src/mrrn/modalities.py",
+      "src/mrrn/evaluation.py"
+    ],
+    "maturity": "contract",
+    "status": "verified",
+    "tests": [
+      "tests/test_synthetics.py",
+      "tests/test_evaluation.py"
+    ]
+  }
+}

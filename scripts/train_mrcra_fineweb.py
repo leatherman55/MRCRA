@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""Train the production MRCRA actor on original English FineWeb."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict
+import json
+import os
+from pathlib import Path
+import sys
+import traceback
+
+os.environ.setdefault("PYTHONWARNINGS", "ignore:resource_tracker:UserWarning")
+
+import torch
+
+from mrrn.cognitive_training import MRCRANextTokenTrainer, MRCRATrainingConfig
+from mrrn.config import CognitiveConfig, MRCRAConfig, MRRNConfig
+from mrrn.language import MRCRALanguageModel
+from mrrn.lm_training import (
+    build_evaluation_batches,
+    ByteTextTokenizer, FineWebTextSource, HuggingFaceTextTokenizer,
+    PackedTokenStream, SequenceTextSource,
+)
+
+
+def resolve_revision(repo_id: str, revision: str, *, repo_type: str) -> str:
+    from huggingface_hub import HfApi
+
+    info = (
+        HfApi().dataset_info(repo_id, revision=revision)
+        if repo_type == "dataset" else HfApi().model_info(repo_id, revision=revision)
+    )
+    if not info.sha:
+        raise RuntimeError(f"Hugging Face did not return a commit SHA for {repo_id}")
+    return info.sha
+
+
+def latest_checkpoint(output_dir: Path) -> Path | None:
+    pointer = output_dir / "checkpoints" / "latest.json"
+    if not pointer.is_file():
+        return None
+    target = pointer.parent / json.loads(pointer.read_text(encoding="utf-8"))["checkpoint"]
+    if not target.is_file():
+        raise FileNotFoundError(f"latest checkpoint pointer names missing file {target}")
+    return target
+
+
+def write_json_atomic(path: Path, value: dict) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def tiny_configuration(vocabulary_size: int) -> MRCRAConfig:
+    carrier = MRRNConfig(
+        input_dim=8, model_dim=8, output_dim=vocabulary_size, layers=1, scales=2,
+        heads=2, modes=2, mimo_rank=1, attention_window=2,
+        attention_query_tile_size=2, retrieved_items=1, memory_capacity=4,
+        mixer_expansion=1.5, width_growth_cap=1, mode_growth_cap=1,
+        width_multiple=2, spectral_modes=2, spectral_basis_order=2,
+        spectral_triads_per_mode=1, enable_global_head=False,
+        relational_branch=True, relational_context_dim=8,
+        activation_checkpointing=True,
+    )
+    cognitive = CognitiveConfig(
+        workspace_dim=8, provenance_features=4, uncertainty_channels=8,
+        relation_heads=2, relation_modes=2, relation_adapter_rank=2,
+        goal_slots=1, goal_constraint_dim=2, system_action_channels=2,
+        calibration_regimes=2, active_event_capacity=4, pair_edge_capacity=8,
+        hyperedge_capacity=2, maximum_hyperedge_arity=3, graph_neighbors=1,
+        global_workspace_slots=2, hypothesis_slots=1, maximum_hypothesis_slots=2,
+        maximum_cognitive_steps=1, event_chunk_size=2,
+        event_proposals_per_chunk=1, recent_candidates=2,
+        landmark_candidates=1, episodic_candidates=1, semantic_candidates=1,
+        episodic_memory_capacity=4, semantic_memory_capacity=2,
+        associative_depth=1, associative_budget=1, world_model_horizons=(1,),
+        enable_conditional_reconstruction=True,
+        enable_abstraction_validity_control=True,
+        enable_post_deliberation_action_selection=True,
+        enable_multi_hypothesis_planning=True,
+        enable_agent_session_loop=True,
+        enable_viability_gate=True,
+        enable_integrated_invariant_discovery=True,
+        enable_persistent_session_training=True,
+        enable_metacognitive_routing=True,
+    )
+    return MRCRAConfig(
+        carrier, cognitive, actor_parameter_minimum=1,
+        actor_parameter_maximum=10_000_000,
+    )
+
+
+def production_configuration(vocabulary_size: int, *, lightmodel: bool) -> MRCRAConfig:
+    """Select the declared production actor profile without relaxing its budget."""
+
+    factory = MRCRAConfig.light_8p4m if lightmodel else MRCRAConfig.serious_120m
+    return factory(output_dim=vocabulary_size)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Train the serious MRCRA actor on original English FineWeb with 32K contexts."
+    )
+    result.add_argument("--dataset-id", default="HuggingFaceFW/fineweb")
+    result.add_argument("--dataset-config", default="sample-10BT")
+    result.add_argument("--dataset-revision", default="main")
+    result.add_argument("--tokenizer", default="gpt2")
+    result.add_argument("--tokenizer-revision", default="main")
+    result.add_argument(
+        "--output-dir",
+        help=(
+            "Run directory; defaults to the profile-specific 120M or 8.4M "
+            "FineWeb directory."
+        ),
+    )
+    result.add_argument(
+        "--lightmodel", action="store_true",
+        help=(
+            "Train the complete shared-depth 8.4M MRCRA profile instead of "
+            "the default 120M-class actor."
+        ),
+    )
+    result.add_argument("--total-tokens", type=int, default=20_000_000)
+    result.add_argument("--context-length", type=int, default=32_768)
+    result.add_argument("--execution-chunk-size", type=int, default=256)
+    result.add_argument(
+        "--tbptt-length", type=int,
+        help="Gradient span; defaults to 4,096 tokens.",
+    )
+    result.add_argument(
+        "--vocabulary-tile-size", type=int, default=2_048,
+        help="Exact-softmax vocabulary tile width (memory control, not an approximation).",
+    )
+    result.add_argument(
+        "--loss-memory-policy", choices=("auto", "retain", "recompute"),
+        default="auto",
+        help=(
+            "Retain exact-softmax tile activations, recompute them in backward, "
+            "or select automatically from the declared workspace limit."
+        ),
+    )
+    result.add_argument(
+        "--maximum-retained-loss-mib", type=int, default=1_024,
+        help="Auto-policy ceiling for retained exact-softmax activations.",
+    )
+    result.add_argument(
+        "--progress-interval-tokens", type=int, default=2_048,
+        help="Print progress this often inside a long 32K optimization context.",
+    )
+    result.add_argument(
+        "--cognitive-stride", type=int,
+        help=(
+            "Causal event-cognition cadence; defaults to the selected model's "
+            "architectural event chunk size."
+        ),
+    )
+    result.add_argument(
+        "--cognitive-tbptt-events", type=int, default=4,
+        help="Backpropagate through this many consecutive cognitive event cycles.",
+    )
+    result.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    result.add_argument("--learning-rate", type=float, default=6e-5)
+    result.add_argument("--warmup-tokens", type=int, default=1_000_000)
+    result.add_argument("--weight-decay", type=float, default=0.1)
+    result.add_argument("--curriculum-stage", type=int, default=1)
+    result.add_argument("--training-profile", default="substrate_language_pretraining")
+    result.add_argument("--trainer-mode", default="independent_packed_documents")
+    result.add_argument("--checkpoint-interval", type=int, default=25)
+    result.add_argument("--eval-interval", type=int, default=25)
+    result.add_argument("--eval-batches", type=int, default=4)
+    result.add_argument("--device", default="auto")
+    result.add_argument("--precision", choices=("auto", "fp32", "bf16", "fp16"), default="auto")
+    result.add_argument(
+        "--cpu-threads", type=int, default=4,
+        help="CPU intra-op workers; four is the matched Apple integrated default.",
+    )
+    result.add_argument(
+        "--cpu-interop-threads", type=int, default=1,
+        help="CPU inter-op workers; the causal training graph uses one by default.",
+    )
+    result.add_argument(
+        "--compile-tensor-cores", action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Compile pure carrier chunk kernels. The default enables this on "
+            "CUDA and leaves CPU/MPS eager."
+        ),
+    )
+    result.add_argument(
+        "--apple-mps-loss-offload", action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Offload only exact vocabulary loss to MPS while cognition remains "
+            "on CPU. Disabled by default because the matched M1 integrated path "
+            "is faster without the cross-device backward boundary."
+        ),
+    )
+    result.add_argument("--seed", type=int, default=20260722)
+    result.add_argument("--shuffle-buffer", type=int, default=10_000)
+    result.add_argument("--eval-fraction-permyriad", type=int, default=100)
+    result.add_argument("--trackio-project", default="mrcra-fineweb")
+    result.add_argument(
+        "--trackio", action=argparse.BooleanOptionalAction, default=True,
+        help="Record the run in the single MRCRA Trackio project (default: enabled).",
+    )
+    result.add_argument("--run-name")
+    result.add_argument("--trackio-space-id")
+    result.add_argument("--dashboard", action=argparse.BooleanOptionalAction, default=True)
+    result.add_argument("--spectral-dashboard", action=argparse.BooleanOptionalAction, default=True)
+    result.add_argument("--snapshot-interval", type=int, default=25)
+    result.add_argument(
+        "--phase-transition-telemetry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Log event-threshold distributions, exact hard-event receipts, "
+            "rolling approach rate, and subsystem gradients (default: enabled)."
+        ),
+    )
+    result.add_argument(
+        "--phase-transition-ablation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "At evaluation checkpoints compare full, soft-only, and "
+            "cognition-off arms on identical retained data (default: enabled)."
+        ),
+    )
+    result.add_argument(
+        "--phase-ablation-batches", type=int, default=1,
+        help="Retained batches used by each phase-transition ablation arm.",
+    )
+    result.add_argument("--proposal-slope-ema-decay", type=float, default=0.9)
+    result.add_argument("--low-clip-coefficient-threshold", type=float, default=0.05)
+    result.add_argument("--low-clip-coefficient-patience", type=int, default=10)
+    result.add_argument("--pin-revisions", action=argparse.BooleanOptionalAction, default=True)
+    result.add_argument("--resume", nargs="?", const="latest")
+    result.add_argument("--smoke-test", action="store_true")
+    return result
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if min(
+        args.cpu_threads, args.cpu_interop_threads,
+        args.maximum_retained_loss_mib, args.phase_ablation_batches,
+        args.low_clip_coefficient_patience,
+    ) <= 0:
+        raise ValueError(
+            "thread, workspace, phase-ablation, and clip-patience controls must be positive"
+        )
+    torch.set_num_threads(args.cpu_threads)
+    if torch.get_num_interop_threads() != args.cpu_interop_threads:
+        torch.set_num_interop_threads(args.cpu_interop_threads)
+    torch.manual_seed(args.seed)
+    model_profile = "mrcra_8p4m_light" if args.lightmodel else "mrcra_120m_serious"
+    tbptt_length = args.tbptt_length or 4_096
+    default_output_dir = (
+        f"outputs/mrcra-8p4m-fineweb-{args.total_tokens}-tokens"
+        if args.lightmodel else "outputs/mrcra-120m-fineweb-20m"
+    )
+    output_dir = Path(args.output_dir or default_output_dir).resolve()
+    if args.resume is None and any(
+        (output_dir / name).exists()
+        for name in ("metrics.jsonl", "run_manifest.json", "checkpoints")
+    ):
+        raise FileExistsError(f"{output_dir} already contains a run; use --resume")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.smoke_test:
+        model_profile = "mrcra_tiny_smoke"
+        tokenizer = ByteTextTokenizer()
+        model = MRCRALanguageModel(tiny_configuration(tokenizer.vocabulary_size))
+        source = SequenceTextSource((
+            "Events persist through typed relations.",
+            "Provenance separates observation from simulation.",
+        ))
+        evaluation_source = SequenceTextSource((
+            "Retained evidence is disjoint from optimization.",
+            "Checkpoint identity binds the complete evaluation context.",
+        ))
+        evaluation_batches = build_evaluation_batches(
+            PackedTokenStream(evaluation_source, tokenizer),
+            count=1, batch_size=1, sequence_length=8,
+        )
+        configuration = MRCRATrainingConfig(
+            output_dir=str(output_dir), total_tokens=16, context_length=8,
+            execution_chunk_size=2, tbptt_length=4, vocabulary_tile_size=32,
+            integrated_cognitive_path=True, cognitive_stride=2,
+            cognitive_tbptt_events=2,
+            warmup_tokens=8, checkpoint_interval=2, device="cpu", precision="fp32",
+            evaluation_interval=1, evaluation_batches=1,
+            require_evaluation=True,
+            trackio_enabled=args.trackio, show_dashboard=args.dashboard,
+            spectral_dashboard=args.spectral_dashboard,
+            spectral_snapshot_interval=1, spectral_snapshot_tokens=8,
+            trackio_project=args.trackio_project,
+            run_name=args.run_name or "mrcra-integrated-default-smoke",
+            trackio_space_id=args.trackio_space_id,
+            seed=args.seed,
+            phase_transition_telemetry=args.phase_transition_telemetry,
+            phase_transition_ablation=args.phase_transition_ablation,
+            phase_transition_ablation_batches=args.phase_ablation_batches,
+            proposal_slope_ema_decay=args.proposal_slope_ema_decay,
+            low_clip_coefficient_threshold=args.low_clip_coefficient_threshold,
+            low_clip_coefficient_patience=args.low_clip_coefficient_patience,
+        )
+    else:
+        dataset_revision = (
+            resolve_revision(args.dataset_id, args.dataset_revision, repo_type="dataset")
+            if args.pin_revisions else args.dataset_revision
+        )
+        tokenizer_revision = (
+            resolve_revision(args.tokenizer, args.tokenizer_revision, repo_type="model")
+            if args.pin_revisions else args.tokenizer_revision
+        )
+        tokenizer = HuggingFaceTextTokenizer(args.tokenizer, revision=tokenizer_revision)
+        model_config = production_configuration(
+            tokenizer.vocabulary_size, lightmodel=args.lightmodel,
+        )
+        cognitive_stride = args.cognitive_stride or model_config.cognitive.event_chunk_size
+        model = MRCRALanguageModel(
+            model_config,
+            model_authority=(
+                "mrcra-light-8p4m-fineweb-stage1"
+                if args.lightmodel else "mrcra-fineweb-stage1"
+            ),
+        )
+        model.config.require_actor_parameter_count(model.parameter_count)
+        source = FineWebTextSource(
+            dataset_id=args.dataset_id, dataset_config=args.dataset_config,
+            split="train", revision=dataset_revision, partition="train",
+            evaluation_fraction_permyriad=args.eval_fraction_permyriad,
+            shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+        )
+        evaluation_source = FineWebTextSource(
+            dataset_id=args.dataset_id, dataset_config=args.dataset_config,
+            split="train", revision=dataset_revision, partition="eval",
+            evaluation_fraction_permyriad=args.eval_fraction_permyriad,
+            shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+        )
+        evaluation_batches = build_evaluation_batches(
+            PackedTokenStream(evaluation_source, tokenizer),
+            count=args.eval_batches, batch_size=1,
+            sequence_length=args.context_length,
+        )
+        configuration = MRCRATrainingConfig(
+            output_dir=str(output_dir), total_tokens=args.total_tokens,
+            context_length=args.context_length,
+            execution_chunk_size=args.execution_chunk_size,
+            tbptt_length=tbptt_length,
+            vocabulary_tile_size=args.vocabulary_tile_size,
+            checkpoint_tiles=(
+                None if args.loss_memory_policy == "auto"
+                else args.loss_memory_policy == "recompute"
+            ),
+            maximum_retained_loss_bytes=args.maximum_retained_loss_mib << 20,
+            integrated_cognitive_path=(
+                args.training_profile == "substrate_language_pretraining"
+                and args.trainer_mode == "independent_packed_documents"
+            ),
+            cognitive_stride=cognitive_stride,
+            cognitive_tbptt_events=args.cognitive_tbptt_events,
+            progress_interval_tokens=args.progress_interval_tokens,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            learning_rate=args.learning_rate, warmup_tokens=args.warmup_tokens,
+            weight_decay=args.weight_decay, curriculum_stage=args.curriculum_stage,
+            training_profile=args.training_profile, trainer_mode=args.trainer_mode,
+            checkpoint_interval=args.checkpoint_interval,
+            evaluation_interval=args.eval_interval,
+            evaluation_batches=args.eval_batches,
+            require_evaluation=True,
+            device=args.device, precision=args.precision, seed=args.seed,
+            cpu_threads=args.cpu_threads,
+            cpu_interop_threads=args.cpu_interop_threads,
+            compile_tensor_cores=args.compile_tensor_cores,
+            apple_mps_loss_offload=args.apple_mps_loss_offload,
+            trackio_project=args.trackio_project,
+            run_name=(
+                args.run_name
+                or (
+                    f"mrcra-8p4m-light-integrated-fineweb-"
+                    f"{args.total_tokens}-tokens-32k"
+                    if args.lightmodel
+                    else f"mrcra-120m-fineweb-{args.total_tokens}-tokens-32k"
+                )
+            ),
+            trackio_space_id=args.trackio_space_id,
+            trackio_enabled=args.trackio,
+            show_dashboard=args.dashboard, spectral_dashboard=args.spectral_dashboard,
+            spectral_snapshot_interval=args.snapshot_interval,
+            phase_transition_telemetry=args.phase_transition_telemetry,
+            phase_transition_ablation=args.phase_transition_ablation,
+            phase_transition_ablation_batches=args.phase_ablation_batches,
+            proposal_slope_ema_decay=args.proposal_slope_ema_decay,
+            low_clip_coefficient_threshold=args.low_clip_coefficient_threshold,
+            low_clip_coefficient_patience=args.low_clip_coefficient_patience,
+        )
+    trainer = MRCRANextTokenTrainer(
+        model, tokenizer, PackedTokenStream(source, tokenizer), configuration,
+        evaluation_batches,
+    )
+    manifest = {
+        "model_parameters": model.parameter_count,
+        "architecture": "integrated_mrcra",
+        "model_profile": model_profile,
+        "model_config": asdict(model.config),
+        "tokenizer": tokenizer.identity(),
+        "training_config": asdict(configuration),
+        "training_source": source.state_dict(),
+        "evaluation_source": (
+            None if evaluation_source is None else evaluation_source.state_dict()
+        ),
+        "evaluation_identity": trainer.evaluation_identity,
+        "runtime": trainer.runtime,
+        "functional_surprise_enabled": False,
+        "training_profile": configuration.training_profile,
+        "trainer_mode": configuration.trainer_mode,
+        "claim_boundary": (
+            "substrate and English language modeling only; this FineWeb stage does not "
+            "establish integrated cognition, agency, transfer, or deployment maturity"
+        ),
+        "evidence_maturity": "mechanism",
+        "functional_surprise_reason": (
+            "FineWeb supplies text targets but no external downstream consequence; "
+            "RASL task-loss-as-reward is forbidden."
+        ),
+    }
+    manifest_path = output_dir / "run_manifest.json"
+    write_json_atomic(manifest_path, manifest)
+    print(
+        f"MRCRA actor: {model.parameter_count:,} parameters; "
+        f"{configuration.total_tokens:,} tokens; {configuration.context_length:,}-token contexts; "
+        f"{configuration.total_steps:,} updates.", flush=True,
+    )
+    print(
+        f"Device {trainer.runtime['device']} ({trainer.runtime.get('gpu_name', 'host')}), "
+        f"precision {trainer.runtime['precision']}.", flush=True,
+    )
+    if args.resume:
+        checkpoint = latest_checkpoint(output_dir) if args.resume == "latest" else Path(args.resume)
+        if checkpoint is None:
+            raise FileNotFoundError("--resume requested but no latest checkpoint exists")
+        trainer.load_checkpoint(checkpoint)
+        print(f"Resumed {checkpoint} at update {trainer.state.step}.", flush=True)
+    trainer.train()
+    if trainer.state.step % configuration.checkpoint_interval:
+        trainer.save_checkpoint()
+    manifest["final_training_state"] = asdict(trainer.state)
+    manifest["completed"] = trainer.state.tokens_seen >= configuration.total_tokens
+    write_json_atomic(manifest_path, manifest)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        if "pyarrow" not in sys.modules:
+            raise
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    if "pyarrow" in sys.modules:
+        # See the canonical wrapper's documented PyArrow 25/macOS finalizer
+        # workaround. All trainer/reporting persistence has completed here.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)

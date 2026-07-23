@@ -1,0 +1,78 @@
+{
+  "artifact_version": "1.8.0",
+  "target_parameters": 4700000,
+  "measured_parameters": 4695023,
+  "target_error_parameters": -4977,
+  "target_error_percent": -0.1058936170212766,
+  "legacy_parameters": 26439515,
+  "reduction_percent": 82.24240119381918,
+  "architecture": {
+    "vocabulary_size": 50257,
+    "model_width": 48,
+    "layers": 3,
+    "scales": 5,
+    "scale_widths": [48, 64, 64, 64, 64],
+    "attention_heads": 4,
+    "base_modes": 10,
+    "scale_modes": [10, 12, 12, 12, 12],
+    "mimo_rank": 2,
+    "spectral_modes": 8,
+    "spectral_basis_order": 4,
+    "spectral_triads_per_mode": 1,
+    "mixer_expansion": 2.0,
+    "local_attention_window": 16,
+    "retrieved_items": 8,
+    "eidetic_capacity": 2048,
+    "global_prediction_head": false,
+    "tied_input_output_embeddings": true
+  },
+  "parameter_allocation": {
+    "embedding_and_output_bias": 2462593,
+    "multiresolution_blocks": 2159154,
+    "other_components": 73276
+  },
+  "training_defaults": {
+    "dataset_id": "HuggingFaceFW/fineweb",
+    "dataset_config": "sample-10BT",
+    "tokenizer": "gpt2",
+    "total_tokens": 20000000,
+    "tokens_per_parameter": 4.259830037041352,
+    "sequence_length": 2048,
+    "generation_context_interface": 32768,
+    "output_dir": "outputs/fineweb-4p7m-stable",
+    "trackio_run_name": "mrrn-4p7m-fineweb-stable-20000000-tokens",
+    "device": "auto",
+    "precision": "auto"
+  },
+  "verification": {
+    "tests_passed": 284,
+    "tests_failed": 0,
+    "branch_aware_coverage_percent": 96.45,
+    "specification_headings": 189,
+    "specification_headings_verified": 189,
+    "strict_specification_check": "passed",
+    "python_compileall": "passed",
+    "exact_model_forward": "passed",
+    "exact_model_backward": "passed",
+    "optimizer_step": "passed",
+    "recurrent_step": "passed",
+    "finite_logits": true,
+    "finite_gradients": true,
+    "cuda_implementation_checks": "passed",
+    "physical_cuda_execution": "not run on this macOS host",
+    "wheel_contents_check": "passed"
+  },
+  "package": {
+    "filename": "mrrn-1.8.0-py3-none-any.whl",
+    "sha256": "bf033f120ff54be31250c55aa250bfdd3f6b9cc2e82cf1048ff8863a1447e142",
+    "bundled_trackio_spectral_frontend": true,
+    "automatic_cuda_selection": true,
+    "cuda_amp_and_gradient_scaling": true,
+    "windows_startup_documented": true
+  },
+  "compatibility": {
+    "legacy_constructor_retained": "fineweb_27m_config",
+    "legacy_checkpoint_direct_resume_supported": false,
+    "reason": "The 4.7M and 26.4M models have different parameter shapes."
+  }
+}

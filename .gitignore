@@ -1,0 +1,44 @@
+__pycache__/
+*.py[cod]
+.coverage
+.coverage.*
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+work/
+.DS_Store
+
+# Local environments, credentials, and editor state.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Training products are local by default.  Retain only the small, reproducible
+# specifications, reports, and acceptance evidence stored at outputs/ root.
+outputs/*
+!outputs/*.json
+!outputs/*.md
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.whl
+
+# Rebuildable Trackio frontend dependencies and bundles.
+trackio_frontend/node_modules/
+trackio_frontend/.svelte-kit/
+trackio_frontend/.vite/
+trackio_frontend/dist/
+
+# Runtime logs and scratch databases.
+*.log
+*.sqlite
+*.sqlite3

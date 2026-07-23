@@ -1,0 +1,378 @@
+{
+  "claim_boundary": "Passing proves bounded mechanism learnability and matched local effects; it does not prove serious-scale, open-domain, or deployment capability.",
+  "device": "cpu",
+  "format_version": 2,
+  "maturity": "mechanism",
+  "passed": true,
+  "physical_cuda_tested": false,
+  "results": [
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "router_recall",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_least",
+          "metric": "reranker_top1_recall",
+          "threshold": 0.9
+        },
+        {
+          "direction": "at_least",
+          "metric": "downstream_gain",
+          "threshold": 0.5
+        },
+        {
+          "direction": "at_least",
+          "metric": "eviction_survival_accuracy",
+          "threshold": 0.85
+        },
+        {
+          "direction": "at_most",
+          "metric": "oracle_gap",
+          "threshold": 0.05
+        }
+      ],
+      "duration_seconds": 0.0136712500025169,
+      "gate": "G",
+      "maturity": "mechanism",
+      "metrics": {
+        "downstream_accuracy": 1.0,
+        "downstream_gain": 0.75,
+        "eviction_survival_accuracy": 1.0,
+        "oracle_gap": 0.0,
+        "recent_only_accuracy": 0.25,
+        "reranker_top1_recall": 1.0,
+        "router_recall": 1.0,
+        "write_recall": 1.0
+      },
+      "name": "delayed_retrieval_utility",
+      "passed": true,
+      "scope": "bounded exact tensor-memory task with distractors and eviction",
+      "seed": 17,
+      "trainable_parameters": 6
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "held_out_cross_modal_recall_at_1",
+          "threshold": 0.9
+        },
+        {
+          "direction": "at_least",
+          "metric": "binding_gain",
+          "threshold": 0.65
+        },
+        {
+          "direction": "at_least",
+          "metric": "parameter_ratio",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "parameter_ratio",
+          "threshold": 1.0
+        }
+      ],
+      "duration_seconds": 0.7226501670011203,
+      "gate": "Stage 4",
+      "maturity": "mechanism",
+      "metrics": {
+        "binding_gain": 1.0,
+        "chance_recall": 0.0625,
+        "held_out_cross_modal_recall_at_1": 1.0,
+        "parameter_ratio": 1.0,
+        "shuffled_pair_recall_at_1": 0.0
+      },
+      "name": "cross_modal_event_binding",
+      "passed": true,
+      "scope": "paired token/sensor event retrieval with an equal-parameter shuffled-pair control",
+      "seed": 1026,
+      "trainable_parameters": 276
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "mean_code_gain_bits",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "held_out_distortion",
+          "threshold": 0.75
+        },
+        {
+          "direction": "at_least",
+          "metric": "compressed_predictive_accuracy",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_least",
+          "metric": "predictive_accuracy_delta",
+          "threshold": -0.05
+        },
+        {
+          "direction": "at_least",
+          "metric": "promotion_acceptance_rate",
+          "threshold": 0.9
+        }
+      ],
+      "duration_seconds": 0.1850820410036249,
+      "gate": "H",
+      "maturity": "mechanism",
+      "metrics": {
+        "compressed_predictive_accuracy": 1.0,
+        "held_out_distortion": 0.09747537970542908,
+        "mean_code_gain_bits": 344.3369140625,
+        "predictive_accuracy_delta": 0.0,
+        "promotion_acceptance_rate": 1.0,
+        "raw_predictive_accuracy": 1.0,
+        "relation_distortion": 0.05395261198282242
+      },
+      "name": "validated_hierarchical_compression",
+      "passed": true,
+      "scope": "held-out recurring graph motifs with raw and compressed predictive heads",
+      "seed": 2035,
+      "trainable_parameters": 798
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "central_80_coverage",
+          "threshold": 0.7
+        },
+        {
+          "direction": "at_most",
+          "metric": "central_80_coverage",
+          "threshold": 0.9
+        },
+        {
+          "direction": "at_most",
+          "metric": "classification_ece",
+          "threshold": 0.1
+        },
+        {
+          "direction": "at_least",
+          "metric": "ood_to_id_epistemic_ratio",
+          "threshold": 1.05
+        },
+        {
+          "direction": "at_least",
+          "metric": "ambiguous_effective_hypotheses",
+          "threshold": 1.9
+        },
+        {
+          "direction": "at_most",
+          "metric": "resolved_effective_hypotheses",
+          "threshold": 1.1
+        }
+      ],
+      "duration_seconds": 0.08257179200154496,
+      "gate": "I",
+      "maturity": "mechanism",
+      "metrics": {
+        "ambiguous_effective_hypotheses": 2.0,
+        "central_80_coverage": 0.787109375,
+        "classification_ece": 0.032167766243219376,
+        "ood_to_id_epistemic_ratio": 64.4893569946289,
+        "resolved_effective_hypotheses": 1.017462134361267
+      },
+      "name": "calibrated_uncertainty_and_hypotheses",
+      "passed": true,
+      "scope": "heteroscedastic held-out regression/classification plus two-alternative evidence update",
+      "seed": 3044,
+      "trainable_parameters": 152
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_most",
+          "metric": "interventional_mse",
+          "threshold": 0.03
+        },
+        {
+          "direction": "at_least",
+          "metric": "ablation_error_ratio",
+          "threshold": 5.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "counterfactual_separation_ratio",
+          "threshold": 0.8
+        }
+      ],
+      "duration_seconds": 0.06312795799749438,
+      "gate": "J",
+      "maturity": "mechanism",
+      "metrics": {
+        "ablation_error_ratio": 29.019575119018555,
+        "action_ablated_mse": 0.713079035282135,
+        "counterfactual_separation_ratio": 0.9461798071861267,
+        "interventional_mse": 0.02457234635949135
+      },
+      "name": "action_conditioned_intervention",
+      "passed": true,
+      "scope": "held-out controlled transitions with the action channel ablated at evaluation",
+      "seed": 4053,
+      "trainable_parameters": 1115
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "easy_success",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_least",
+          "metric": "hard_success",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_most",
+          "metric": "easy_mean_steps",
+          "threshold": 1.1
+        },
+        {
+          "direction": "at_least",
+          "metric": "hard_mean_steps",
+          "threshold": 2.9
+        },
+        {
+          "direction": "at_least",
+          "metric": "matched_baseline_gain",
+          "threshold": 0.02
+        }
+      ],
+      "duration_seconds": 0.13482279200252378,
+      "gate": "K",
+      "maturity": "mechanism",
+      "metrics": {
+        "adaptive_net_utility": 0.8999999761581421,
+        "easy_mean_steps": 1.0,
+        "easy_success": 1.0,
+        "fixed_one_net_utility": 0.45,
+        "fixed_three_net_utility": 0.85,
+        "hard_mean_steps": 3.0,
+        "hard_success": 1.0,
+        "matched_baseline_gain": 0.4999999701976776,
+        "matched_fixed_two_net_utility": 0.4
+      },
+      "name": "adaptive_internal_compute",
+      "passed": true,
+      "scope": "easy/hard action traces against fixed-one, compute-matched fixed-two, and fixed-three policies",
+      "seed": 5062,
+      "trainable_parameters": 1294
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "fsce_correct_action_probability",
+          "threshold": 0.85
+        },
+        {
+          "direction": "at_least",
+          "metric": "delayed_return_gain",
+          "threshold": 0.6
+        },
+        {
+          "direction": "at_least",
+          "metric": "equal_environment_interactions",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "performance_veto_triggered",
+          "threshold": 1.0
+        }
+      ],
+      "duration_seconds": 0.11883754199516261,
+      "gate": "L",
+      "maturity": "mechanism",
+      "metrics": {
+        "calibrator_updates": 90.0,
+        "ce_only_correct_action_probability": 0.5186826586723328,
+        "delayed_return_gain": 0.921441912651062,
+        "equal_environment_interactions": 1.0,
+        "fsce_correct_action_probability": 0.9794036149978638,
+        "performance_veto_triggered": 1.0
+      },
+      "name": "delayed_functional_surprise",
+      "passed": true,
+      "scope": "three-step delayed contextual consequence with equal-interaction random-behavior CE control",
+      "seed": 6071,
+      "trainable_parameters": 4
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "base_task_a_accuracy",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_least",
+          "metric": "replay_task_a_accuracy",
+          "threshold": 0.7
+        },
+        {
+          "direction": "at_least",
+          "metric": "replay_task_b_accuracy",
+          "threshold": 0.7
+        },
+        {
+          "direction": "at_least",
+          "metric": "isolated_adapter_task_b_accuracy",
+          "threshold": 0.95
+        },
+        {
+          "direction": "at_least",
+          "metric": "replay_retention_gain",
+          "threshold": 0.15
+        },
+        {
+          "direction": "at_least",
+          "metric": "accepted_after_validation",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "revocation_recorded",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "rollback_exact",
+          "threshold": 1.0
+        }
+      ],
+      "duration_seconds": 0.048574832995655015,
+      "gate": "Stage 9",
+      "maturity": "mechanism",
+      "metrics": {
+        "accepted_after_validation": 1.0,
+        "base_task_a_accuracy": 0.994140625,
+        "isolated_adapter_task_b_accuracy": 0.982421875,
+        "naive_task_a_accuracy": 0.515625,
+        "replay_retention_gain": 0.255859375,
+        "replay_task_a_accuracy": 0.771484375,
+        "replay_task_b_accuracy": 0.734375,
+        "revocation_recorded": 1.0,
+        "rollback_exact": 1.0
+      },
+      "name": "consolidation_replay_and_rollback",
+      "passed": true,
+      "scope": "two-task continual adaptation with naive, replay, isolated-adapter, authority, and rollback paths",
+      "seed": 7080,
+      "trainable_parameters": 12
+    }
+  ],
+  "serious_scale_capability_tested": false,
+  "suite": "mrcra-bounded-learned-behavior-v2",
+  "torch_version": "2.13.0"
+}

@@ -1,0 +1,1051 @@
+<script>
+  import { onMount, tick } from "svelte";
+  import embed from "vega-embed";
+  import * as vega from "vega";
+  import { buildColorSpecKey } from "../lib/dataProcessing.js";
+  import { visibleLegendEntries } from "../lib/legend.js";
+
+  let {
+    data = [],
+    x = "step",
+    y = "",
+    colorField = "run",
+    colorDisplayField = "",
+    colorLabel = "",
+    dashField = "",
+    dashLabel = "",
+    yLabel = "",
+    colorMap = {},
+    title = "",
+    xLim = null,
+    yExtent = undefined,
+    onSelect = null,
+    onResetZoom = null,
+    draggable = false,
+    ondragstart = null,
+    ondragover = null,
+    ondrop = null,
+  } = $props();
+
+  let container = $state(null);
+  let plotContainer = $state(null);
+  let fullscreenHost = $state(null);
+  let view = $state(null);
+  let fullscreen = $state(false);
+
+  let lastStructuralKey = null;
+  let lastHasSmoothed = false;
+  let resolvedColorLabel = $derived(colorLabel || colorField);
+  let resolvedDashLabel = $derived(dashLabel || dashField);
+  let resolvedYLabel = $derived(yLabel || (y.includes("/") ? y.split("/").pop() : y));
+
+  let legendEntries = $derived.by(() => {
+    if (!colorField || !data || data.length === 0) return [];
+    const seen = new Set();
+    const entries = [];
+    for (const d of data) {
+      const key = d[colorField];
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        entries.push({
+          key,
+          name: d[colorDisplayField] || key,
+          color: colorMap[key] || "#999",
+        });
+      }
+    }
+    return entries;
+  });
+
+  let colorSpecKey = $derived(buildColorSpecKey(data, colorField, colorMap));
+
+  const LEGEND_COLLAPSED_COUNT = 6;
+  let legendExpanded = $state(false);
+  let legendExpandedFs = $state(false);
+  let visibleLegend = $derived(
+    visibleLegendEntries(legendEntries, legendExpanded, LEGEND_COLLAPSED_COUNT),
+  );
+  let visibleLegendFs = $derived(
+    visibleLegendEntries(legendEntries, legendExpandedFs, LEGEND_COLLAPSED_COUNT),
+  );
+
+  let dashLegendEntries = $derived.by(() => {
+    if (!dashField || !data || data.length === 0) return [];
+    const seen = new Set();
+    const entries = [];
+    const patterns = [
+      [1, 0],
+      [12, 4],
+      [3, 2],
+      [10, 3, 2, 3],
+      [2, 2],
+      [14, 4, 2, 4],
+      [6, 4, 1, 4],
+      [16, 5],
+      [4, 2, 1, 2],
+      [2, 1],
+    ];
+    for (const d of data) {
+      const name = d[dashField];
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        entries.push({
+          name,
+          pattern: patterns[entries.length % patterns.length],
+        });
+      }
+    }
+    return entries;
+  });
+
+  let dashSpecKey = $derived.by(() => {
+    if (!dashField || !data || data.length === 0) return "";
+    const parts = dashLegendEntries.map(
+      (entry) => `${entry.name}:${entry.pattern.join(",")}`,
+    );
+    parts.sort();
+    return parts.join("|");
+  });
+
+  function cssVar(name, fallback) {
+    return (
+      getComputedStyle(document.documentElement)
+        .getPropertyValue(name)
+        .trim() || fallback
+    );
+  }
+
+  function splitData() {
+    const originalData = data.filter(
+      (d) => d.data_type === "original" || !d.data_type,
+    );
+    const smoothedData = data.filter((d) => d.data_type === "smoothed");
+    return { originalData, smoothedData, hasSmoothed: smoothedData.length > 0 };
+  }
+
+  function computeXDomain(originalData) {
+    const xVals = originalData.map((d) => d[x]).filter((v) => v != null);
+    if (xLim) return [xLim[0], xLim[1]];
+    if (xVals.length > 0) return [Math.min(...xVals), Math.max(...xVals)];
+    return undefined;
+  }
+
+  function buildSpec() {
+    const hasColor =
+      colorField && data.length > 0 && Object.hasOwn(data[0], colorField);
+    const hasDash =
+      dashField && data.length > 0 && Object.hasOwn(data[0], dashField);
+    const allRuns = hasColor
+      ? [...new Set(data.map((d) => d[colorField]))]
+      : [];
+    const uniqueRuns = [...new Set(allRuns)];
+    const colorDomain = uniqueRuns;
+    const colorRange = uniqueRuns.map(
+      (r) => colorMap[r] || "#999",
+    );
+
+    const { originalData, smoothedData, hasSmoothed } = splitData();
+    lastHasSmoothed = hasSmoothed;
+    const xDomain = computeXDomain(originalData);
+
+    const xEnc = {
+      field: x,
+      type: "quantitative",
+      scale: { zero: false, ...(xDomain ? { domain: xDomain } : {}) },
+    };
+    const yEnc = {
+      field: y,
+      type: "quantitative",
+      ...(yExtent ? { scale: { domain: yExtent } } : {}),
+    };
+    const colorEnc = hasColor
+      ? {
+          color: {
+            field: colorField,
+            type: "nominal",
+            scale: { domain: colorDomain, range: colorRange },
+            legend: null,
+          },
+        }
+      : {};
+    const dashEnc = hasDash
+      ? {
+          strokeDash: {
+            field: dashField,
+            type: "nominal",
+            scale: {
+              domain: dashLegendEntries.map((entry) => entry.name),
+              range: dashLegendEntries.map((entry) => entry.pattern),
+            },
+            legend: null,
+          },
+        }
+      : {};
+
+    const layers = [];
+
+    const lineMark = (extra = {}) => ({
+      type: "line",
+      clip: true,
+      strokeWidth: 2.25,
+      ...extra,
+    });
+
+    const yTitle = resolvedYLabel;
+    const tooltipEnc = [];
+    if (hasColor) {
+      tooltipEnc.push({
+        field: colorDisplayField || colorField,
+        type: "nominal",
+        title: resolvedColorLabel,
+      });
+    }
+    if (hasDash) {
+      tooltipEnc.push({
+        field: dashField,
+        type: "nominal",
+        title: resolvedDashLabel,
+      });
+    }
+    tooltipEnc.push(
+      { field: x, type: "quantitative", title: x },
+      { field: y, type: "quantitative", title: yTitle },
+    );
+
+    const hoverParams = [{
+      name: "hover",
+      select: { type: "point", on: "pointerover", nearest: true, clear: "pointerout" },
+    }];
+
+    const hoverPointLayer = (dataSpec, layerName) => ({
+      ...dataSpec,
+      mark: { type: "circle", clip: true, size: 60, opacity: 0 },
+      encoding: {
+        x: xEnc,
+        y: yEnc,
+        ...colorEnc,
+        tooltip: tooltipEnc,
+        opacity: {
+          condition: { param: "hover", empty: false, value: 1 },
+          value: 0,
+        },
+      },
+      params: hoverParams,
+      name: layerName,
+    });
+
+    if (hasSmoothed) {
+      layers.push({
+        data: { name: "data_original", values: originalData },
+        mark: lineMark({ strokeWidth: 1, opacity: 0.3 }),
+        encoding: { x: xEnc, y: yEnc, ...colorEnc, ...dashEnc },
+        name: "original",
+      });
+      layers.push({
+        data: { name: "data_smoothed", values: smoothedData },
+        mark: lineMark(),
+        encoding: { x: xEnc, y: yEnc, ...colorEnc, ...dashEnc },
+        name: "plot",
+      });
+      layers.push(
+        hoverPointLayer({ data: { name: "data_smoothed", values: smoothedData } }, "hover_points"),
+      );
+    } else {
+      layers.push({
+        data: { name: "data_plot", values: data },
+        mark: lineMark(),
+        encoding: { x: xEnc, y: yEnc, ...colorEnc, ...dashEnc },
+        name: "plot",
+      });
+      layers.push(
+        hoverPointLayer({ data: { name: "data_plot", values: data } }, "hover_points"),
+      );
+    }
+
+    return {
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      height: fullscreen ? "container" : 250,
+      autosize: { type: "fit", contains: "padding" },
+      layer: layers,
+      ...(onSelect
+        ? {
+            params: [
+              {
+                name: "brush",
+                select: {
+                  type: "interval",
+                  encodings: ["x"],
+                  mark: { fill: "gray", fillOpacity: 0.3, stroke: "none" },
+                },
+                views: ["plot"],
+              },
+            ],
+          }
+        : {}),
+      config: {
+        background: "transparent",
+        axis: {
+          labelColor: cssVar("--body-text-color-subdued", "#6b7280"),
+          titleColor: cssVar("--body-text-color", "#374151"),
+          gridColor: cssVar("--border-color-primary", "#f3f4f6"),
+        },
+        view: {
+          stroke: "transparent",
+        },
+        mark: {
+          cursor: onSelect ? "crosshair" : undefined,
+        },
+      },
+      encoding: {
+        y: { title: yTitle },
+      },
+    };
+  }
+
+  function getStructuralKey() {
+    const { originalData } = splitData();
+    const xDomain = computeXDomain(originalData);
+    const xKey = xDomain ? `${xDomain[0]},${xDomain[1]}` : "auto";
+    const yKey = yExtent ? `${yExtent[0]},${yExtent[1]}` : "auto";
+    return `${y}\0${x}\0${colorSpecKey}\0${dashSpecKey}\0${title}\0${fullscreen}\0${!!onSelect}\0${xKey}\0${yKey}`;
+  }
+
+  function replaceDataset(v, name, newData) {
+    const cs = vega.changeset().remove(vega.truthy).insert(newData);
+    v.change(name, cs);
+  }
+
+  function tryIncrementalUpdate() {
+    if (!view) return false;
+
+    const { originalData, smoothedData, hasSmoothed } = splitData();
+
+    if (hasSmoothed !== lastHasSmoothed) return false;
+
+    try {
+      if (hasSmoothed) {
+        replaceDataset(view, "data_original", originalData);
+        replaceDataset(view, "data_smoothed", smoothedData);
+      } else {
+        replaceDataset(view, "data_plot", data);
+      }
+
+      view.run();
+      lastHasSmoothed = hasSmoothed;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function fullRender() {
+    await tick();
+    if (!container || !data || data.length === 0 || !y) return;
+
+    const spec = buildSpec();
+
+    try {
+      if (view) {
+        view.finalize();
+        view = null;
+      }
+      const result = await embed(container, spec, {
+        actions: false,
+        renderer: "canvas",
+      });
+      view = result.view;
+      lastStructuralKey = getStructuralKey();
+      requestAnimationFrame(() => {
+        result.view.resize();
+      });
+
+      if (onSelect) {
+        let lastSelectTime = 0;
+        let debounceTimer = null;
+        result.view.addSignalListener("brush", (_, value) => {
+          if (Date.now() - lastSelectTime < 1000) return;
+          if (!value || Object.keys(value).length === 0) return;
+          clearTimeout(debounceTimer);
+          const range = value[Object.keys(value)[0]];
+          if (!range || range.length !== 2) return;
+          debounceTimer = setTimeout(() => {
+            lastSelectTime = Date.now();
+            onSelect(range);
+          }, 250);
+        });
+      }
+    } catch (e) {
+      console.error("Vega render error:", e);
+    }
+  }
+
+  async function render() {
+    if (!container || !data || data.length === 0 || !y) return;
+
+    const structuralKey = getStructuralKey();
+    if (view && structuralKey === lastStructuralKey) {
+      if (tryIncrementalUpdate()) return;
+    }
+
+    await fullRender();
+  }
+
+  function downloadCSV() {
+    if (!data || data.length === 0) return;
+    const originals = data.filter((d) => d.data_type === "original" || !d.data_type);
+    if (originals.length === 0) return;
+
+    const cols = Object.keys(originals[0]).filter((k) => k !== "data_type");
+    const header = cols.map((c) => /[,"]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c).join(",");
+    const rows = originals.map((row) =>
+      cols.map((c) => {
+        const v = row[c];
+        if (v == null) return "";
+        if (typeof v === "string" && (v.includes(",") || v.includes('"')))
+          return `"${v.replace(/"/g, '""')}"`;
+        return v;
+      }).join(","),
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(y || "data").replace(/\//g, "_")}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadImage() {
+    if (!view) return;
+    try {
+      const url = await view.toImageURL("png", 4);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(y || "chart").replace(/\//g, "_")}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e) {
+      console.error("Failed to export image:", e);
+    }
+  }
+
+  function requestFullscreenEl(el) {
+    if (!el) return Promise.reject(new Error("no element"));
+    const req =
+      el.requestFullscreen ||
+      el.webkitRequestFullscreen ||
+      el.mozRequestFullScreen ||
+      el.msRequestFullscreen;
+    if (!req) return Promise.reject(new Error("no fullscreen"));
+    return req.call(el);
+  }
+
+  function exitFullscreenDoc() {
+    const exit =
+      document.exitFullscreen ||
+      document.webkitExitFullscreen ||
+      document.mozCancelFullScreen ||
+      document.msExitFullscreen;
+    if (exit) return exit.call(document);
+    return Promise.resolve();
+  }
+
+  function relocateTooltipElement(target) {
+    const tooltipEl = document.getElementById("vg-tooltip-element");
+    if (tooltipEl && target && tooltipEl.parentElement !== target) {
+      target.appendChild(tooltipEl);
+    }
+  }
+
+  async function enterFullscreen() {
+    fullscreen = true;
+    document.body.style.overflow = "hidden";
+    await tick();
+    await tick();
+    try {
+      await requestFullscreenEl(fullscreenHost);
+      await tick();
+      relocateTooltipElement(fullscreenHost);
+      view?.resize();
+    } catch {
+      document.body.style.overflow = "";
+      fullscreen = false;
+    }
+  }
+
+  async function leaveFullscreen() {
+    try {
+      await exitFullscreenDoc();
+    } catch {
+    }
+    document.body.style.overflow = "";
+    fullscreen = false;
+    relocateTooltipElement(document.body);
+  }
+
+  async function toggleFullscreen() {
+    if (fullscreen) {
+      await leaveFullscreen();
+    } else {
+      await enterFullscreen();
+    }
+  }
+
+  function onFullscreenChange() {
+    const active =
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement;
+    if (!active && fullscreen) {
+      document.body.style.overflow = "";
+      fullscreen = false;
+      relocateTooltipElement(document.body);
+    }
+    if (active && fullscreen) {
+      tick().then(() => view?.resize());
+    }
+  }
+
+  function handleKeydown(e) {
+    if (e.key === "Escape" && fullscreen) {
+      leaveFullscreen();
+    }
+  }
+
+  $effect(() => {
+    data;
+    y;
+    x;
+    colorSpecKey;
+    dashSpecKey;
+    xLim;
+    yExtent;
+    title;
+    fullscreen;
+    container;
+    render();
+  });
+
+  $effect(() => {
+    if (!container) return;
+    const ro = new ResizeObserver(() => {
+      queueMicrotask(() => {
+        view?.resize();
+      });
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  });
+
+  onMount(() => {
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    document.addEventListener("mozfullscreenchange", onFullscreenChange);
+    document.addEventListener("MSFullscreenChange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", onFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", onFullscreenChange);
+      if (view) view.finalize();
+      document.body.style.overflow = "";
+    };
+  });
+
+  function handleDragStart(e) {
+    if (ondragstart) ondragstart(e);
+  }
+</script>
+
+<svelte:window onkeydown={handleKeydown} />
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="plot-container"
+  class:hidden-plot={fullscreen}
+  bind:this={plotContainer}
+  draggable={draggable ? "true" : undefined}
+  ondragstart={draggable ? handleDragStart : undefined}
+  ondragover={draggable ? ondragover : undefined}
+  ondrop={draggable ? ondrop : undefined}
+>
+  <div class="plot-toolbar">
+    <button
+      type="button"
+      class="toolbar-btn"
+      onclick={downloadCSV}
+      title="Download this plot’s data as a CSV file"
+      aria-label="Download this plot’s data as a CSV file"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/>
+        <line x1="16" y1="17" x2="8" y2="17"/>
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="toolbar-btn"
+      onclick={downloadImage}
+      title="Download this chart as a PNG image"
+      aria-label="Download this chart as a PNG image"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="toolbar-btn"
+      onclick={toggleFullscreen}
+      title="Open this chart in the browser’s fullscreen mode"
+      aria-label="Open this chart in the browser’s fullscreen mode"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="15 3 21 3 21 9"/>
+        <polyline points="9 21 3 21 3 15"/>
+        <line x1="21" y1="3" x2="14" y2="10"/>
+        <line x1="3" y1="21" x2="10" y2="14"/>
+      </svg>
+    </button>
+  </div>
+  {#if draggable}
+    <div
+      class="drag-handle"
+      title="Drag to reorder this plot in the list"
+      aria-label="Drag to reorder this plot in the list"
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/>
+        <circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/>
+        <circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/>
+      </svg>
+    </div>
+  {/if}
+  {#if !fullscreen}
+    {#if title}
+      <div class="plot-title">{title}</div>
+    {/if}
+    <div class="plot-chart-wrap">
+      <div class="plot" bind:this={container}></div>
+      {#if xLim && onResetZoom}
+        <button
+          type="button"
+          class="reset-zoom-btn"
+          onclick={(e) => {
+            e.stopPropagation();
+            onResetZoom();
+          }}
+          title="Reset horizontal zoom: show the full range on the x-axis"
+          aria-label="Reset horizontal zoom: show the full range on the x-axis"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/>
+          </svg>
+        </button>
+      {/if}
+    </div>
+    {#if legendEntries.length > 0}
+      <div class="custom-legend">
+        {#each visibleLegend as entry}
+          <span class="legend-item">
+            <span class="legend-dot" style="background: {entry.color}"></span>
+            <span class="legend-label">{entry.name}</span>
+          </span>
+        {/each}
+        {#if legendEntries.length > LEGEND_COLLAPSED_COUNT}
+          <button
+            type="button"
+            class="legend-toggle"
+            onclick={(e) => { e.stopPropagation(); legendExpanded = !legendExpanded; }}
+          >
+            {legendExpanded
+              ? "Show less"
+              : `+${legendEntries.length - LEGEND_COLLAPSED_COUNT} more`}
+          </button>
+        {/if}
+      </div>
+    {/if}
+    {#if dashLegendEntries.length > 0}
+      <div class="custom-legend">
+        <span class="legend-title">{resolvedDashLabel}</span>
+        {#each dashLegendEntries as entry}
+          <span class="legend-item">
+            <svg class="legend-line-swatch" viewBox="0 0 24 10" aria-hidden="true">
+              <line
+                x1="1"
+                y1="5"
+                x2="23"
+                y2="5"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-dasharray={entry.pattern.join(" ")}
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="legend-label">{entry.name}</span>
+          </span>
+        {/each}
+      </div>
+    {/if}
+  {/if}
+</div>
+
+{#if fullscreen}
+  <div class="fullscreen-host" bind:this={fullscreenHost}>
+    <div class="fullscreen-toolbar">
+      <button
+        type="button"
+        class="toolbar-btn"
+        onclick={downloadCSV}
+        title="Download this plot’s data as a CSV file"
+        aria-label="Download this plot’s data as a CSV file"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="toolbar-btn"
+        onclick={downloadImage}
+        title="Download this chart as a PNG image"
+        aria-label="Download this chart as a PNG image"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="toolbar-btn"
+        onclick={() => leaveFullscreen()}
+        title="Exit fullscreen and return to the metrics view"
+        aria-label="Exit fullscreen and return to the metrics view"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="4 14 10 14 10 20"/>
+          <polyline points="20 10 14 10 14 4"/>
+          <line x1="14" y1="10" x2="21" y2="3"/>
+          <line x1="3" y1="21" x2="10" y2="14"/>
+        </svg>
+      </button>
+    </div>
+    {#if title}
+      <div class="plot-title plot-title--fs">{title}</div>
+    {/if}
+    <div class="fullscreen-chart-wrap">
+      <div class="plot-chart-wrap plot-chart-wrap--fs">
+        <div class="plot fullscreen-plot" bind:this={container}></div>
+        {#if xLim && onResetZoom}
+          <button
+            type="button"
+            class="reset-zoom-btn"
+            onclick={(e) => {
+              e.stopPropagation();
+              onResetZoom();
+            }}
+            title="Reset horizontal zoom: show the full range on the x-axis"
+            aria-label="Reset horizontal zoom: show the full range on the x-axis"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/>
+            </svg>
+          </button>
+        {/if}
+      </div>
+    </div>
+    {#if legendEntries.length > 0}
+      <div class="custom-legend fullscreen-legend">
+        {#each visibleLegendFs as entry}
+          <span class="legend-item">
+            <span class="legend-dot" style="background: {entry.color}"></span>
+            <span class="legend-label">{entry.name}</span>
+          </span>
+        {/each}
+        {#if legendEntries.length > LEGEND_COLLAPSED_COUNT}
+          <button
+            type="button"
+            class="legend-toggle"
+            onclick={(e) => { e.stopPropagation(); legendExpandedFs = !legendExpandedFs; }}
+          >
+            {legendExpandedFs
+              ? "Show less"
+              : `+${legendEntries.length - LEGEND_COLLAPSED_COUNT} more`}
+          </button>
+        {/if}
+      </div>
+    {/if}
+    {#if dashLegendEntries.length > 0}
+      <div class="custom-legend fullscreen-legend">
+        <span class="legend-title">{resolvedDashLabel}</span>
+        {#each dashLegendEntries as entry}
+          <span class="legend-item">
+            <svg class="legend-line-swatch" viewBox="0 0 24 10" aria-hidden="true">
+              <line
+                x1="1"
+                y1="5"
+                x2="23"
+                y2="5"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-dasharray={entry.pattern.join(" ")}
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="legend-label">{entry.name}</span>
+          </span>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/if}
+
+<style>
+  .plot-container {
+    min-width: 350px;
+    flex: 1;
+    background: var(--background-fill-primary, white);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-lg, 8px);
+    padding: 12px;
+    overflow: hidden;
+    position: relative;
+  }
+  .plot-container[draggable="true"] {
+    cursor: grab;
+  }
+  .plot-container[draggable="true"]:active {
+    cursor: grabbing;
+  }
+  .hidden-plot {
+    visibility: hidden;
+    height: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .drag-handle {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    color: var(--body-text-color-subdued, #9ca3af);
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 5;
+  }
+  .plot-container:hover .drag-handle {
+    opacity: 0.5;
+  }
+  .drag-handle:hover {
+    opacity: 1 !important;
+  }
+  .plot-toolbar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+    z-index: 5;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .plot-container:hover .plot-toolbar {
+    opacity: 1;
+  }
+  .toolbar-btn {
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    background: var(--background-fill-primary, white);
+    color: var(--body-text-color-subdued, #6b7280);
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm, 4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .toolbar-btn:hover {
+    background: var(--neutral-100, #f3f4f6);
+    color: var(--body-text-color, #1f2937);
+  }
+  .plot-chart-wrap {
+    position: relative;
+    width: 100%;
+  }
+  .plot-chart-wrap--fs {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .reset-zoom-btn {
+    position: absolute;
+    bottom: 1px;
+    right: 1px;
+    z-index: 6;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    min-width: 52px;
+    padding: 5px 12px 5px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--body-text-color-subdued, #334155);
+    cursor: pointer;
+    opacity: 0.92;
+    transform: translateY(6px);
+    transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+    box-shadow: none;
+  }
+  .reset-zoom-btn:hover {
+    opacity: 1;
+    color: var(--body-text-color, #0f172a);
+    background: var(--background-fill-secondary, rgba(226, 232, 240, 0.85));
+    transform: translateY(6px);
+  }
+  .reset-zoom-btn svg {
+    display: block;
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.95));
+  }
+  .plot-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--body-text-color, #374151);
+    text-align: center;
+    padding: 0 0 6px;
+    word-break: break-word;
+  }
+  .plot-title--fs {
+    flex-shrink: 0;
+  }
+  .plot {
+    width: 100%;
+  }
+  .plot :global(.vega-embed) {
+    width: 100% !important;
+  }
+  .plot :global(.vega-embed summary) {
+    display: none;
+  }
+  .fullscreen-host {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    background: var(--background-fill-primary, white);
+    padding: 12px;
+    gap: 8px;
+    pointer-events: auto;
+  }
+  .fullscreen-host:fullscreen {
+    width: 100%;
+    height: 100%;
+  }
+  .fullscreen-host:-webkit-full-screen {
+    width: 100%;
+    height: 100%;
+  }
+  .fullscreen-toolbar {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    z-index: 5;
+  }
+  .fullscreen-chart-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .fullscreen-legend {
+    flex-shrink: 0;
+  }
+  .fullscreen-plot {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+  }
+  .fullscreen-plot :global(.vega-embed) {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .fullscreen-plot :global(.vega-embed .vega-view) {
+    flex: 1;
+    min-height: 0;
+  }
+  .fullscreen-plot :global(.vega-embed summary) {
+    display: none;
+  }
+  .custom-legend {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 6px 0 0;
+    flex-wrap: wrap;
+  }
+  .legend-title {
+    font-size: 11px;
+    color: var(--body-text-color-subdued, #6b7280);
+    font-weight: 600;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .legend-line-swatch {
+    width: 24px;
+    height: 10px;
+    flex-shrink: 0;
+    color: var(--body-text-color, #1f2937);
+  }
+  .legend-label {
+    font-size: 11px;
+    color: var(--body-text-color-subdued, #6b7280);
+  }
+  .legend-toggle {
+    font-size: 11px;
+    color: var(--body-text-color-subdued, #6b7280);
+    background: none;
+    border: none;
+    padding: 0 4px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .legend-toggle:hover {
+    color: var(--body-text-color, #1f2937);
+  }
+</style>

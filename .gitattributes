@@ -1,0 +1,2 @@
+outputs/*.md whitespace=-blank-at-eol
+src/mrrn/trackio_frontend/assets/* -text linguist-generated=true whitespace=-trailing-space

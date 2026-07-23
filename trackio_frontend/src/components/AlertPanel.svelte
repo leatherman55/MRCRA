@@ -1,0 +1,186 @@
+<script>
+  let { alerts = [] } = $props();
+
+  const BADGES = { info: "🔵", warn: "🟡", error: "🔴" };
+  let expanded = $state({});
+  let filterLevel = $state(null);
+  let collapsed = $state(false);
+
+  let filtered = $derived(
+    filterLevel ? alerts.filter((a) => a.level === filterLevel) : alerts,
+  );
+
+  function toggleExpand(i) {
+    expanded = { ...expanded, [i]: !expanded[i] };
+  }
+</script>
+
+{#if alerts.length > 0}
+  <div class="alert-panel" class:collapsed>
+    <div class="alert-header" role="button" tabindex="0" onclick={() => (collapsed = !collapsed)} onkeydown={(e) => e.key === "Enter" && (collapsed = !collapsed)}>
+      <span class="alert-title">Alerts ({alerts.length})</span>
+      {#if !collapsed}
+        <div class="filter-pills">
+          <button
+            class="pill"
+            class:active={filterLevel === null}
+            onclick={(e) => {
+              e.stopPropagation();
+              filterLevel = null;
+            }}
+            >All</button
+          >
+          <button
+            class="pill"
+            class:active={filterLevel === "info"}
+            onclick={(e) => {
+              e.stopPropagation();
+              filterLevel = "info";
+            }}
+            >🔵 Info</button
+          >
+          <button
+            class="pill"
+            class:active={filterLevel === "warn"}
+            onclick={(e) => {
+              e.stopPropagation();
+              filterLevel = "warn";
+            }}
+            >🟡 Warn</button
+          >
+          <button
+            class="pill"
+            class:active={filterLevel === "error"}
+            onclick={(e) => {
+              e.stopPropagation();
+              filterLevel = "error";
+            }}
+            >🔴 Error</button
+          >
+        </div>
+      {/if}
+      <svg class="collapse-icon" class:rotated={collapsed} width="14" height="14" viewBox="0 0 16 16" fill="none">
+        <path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    {#if !collapsed}
+    <div class="alert-list">
+      {#each filtered as alert, i}
+        <div class="alert-item" class:expanded={expanded[i]}>
+          <button class="alert-row" onclick={() => toggleExpand(i)}>
+            <span>{BADGES[alert.level] || ""}</span>
+            <span class="alert-text">{alert.title}</span>
+            <span class="alert-meta">{alert.meta || ""}</span>
+          </button>
+          {#if expanded[i] && alert.text}
+            <div class="alert-detail">{alert.text}</div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+    {/if}
+  </div>
+{/if}
+
+<style>
+  .alert-panel {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    width: 380px;
+    max-height: 400px;
+    background: var(--background-fill-primary, white);
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: var(--shadow-drop-lg);
+    z-index: 1000;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .alert-panel.collapsed {
+    max-height: none;
+  }
+  .alert-header {
+    padding: 10px 12px;
+    border: none;
+    border-bottom: 1px solid var(--border-color-primary, #e5e7eb);
+    background: none;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    gap: 8px;
+  }
+  .alert-panel.collapsed .alert-header {
+    border-bottom: none;
+  }
+  .collapse-icon {
+    color: var(--body-text-color-subdued, #9ca3af);
+    flex-shrink: 0;
+    transition: transform 0.15s;
+  }
+  .collapse-icon.rotated {
+    transform: rotate(-90deg);
+  }
+  .alert-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--body-text-color, #1f2937);
+  }
+  .filter-pills {
+    display: flex;
+    gap: 4px;
+  }
+  .pill {
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-xxl, 22px);
+    padding: 2px 8px;
+    font-size: 11px;
+    background: var(--background-fill-secondary, #f9fafb);
+    color: var(--body-text-color-subdued, #6b7280);
+    cursor: pointer;
+  }
+  .pill.active {
+    background: var(--color-accent, #f97316);
+    color: white;
+    border-color: var(--color-accent, #f97316);
+  }
+  .alert-list {
+    overflow-y: auto;
+    flex: 1;
+  }
+  .alert-item {
+    border-bottom: 1px solid var(--neutral-100, #f3f4f6);
+  }
+  .alert-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    font-size: var(--text-sm, 12px);
+  }
+  .alert-row:hover {
+    background: var(--background-fill-secondary, #f9fafb);
+  }
+  .alert-text {
+    flex: 1;
+    color: var(--body-text-color, #1f2937);
+  }
+  .alert-meta {
+    font-size: var(--text-xs, 10px);
+    color: var(--body-text-color-subdued, #9ca3af);
+    white-space: nowrap;
+  }
+  .alert-detail {
+    padding: 4px 12px 8px 32px;
+    font-size: var(--text-sm, 12px);
+    color: var(--body-text-color-subdued, #6b7280);
+  }
+</style>

@@ -1,0 +1,704 @@
+<script>
+  import { onMount } from "svelte";
+  import Navbar from "./components/Navbar.svelte";
+  import Sidebar from "./components/Sidebar.svelte";
+  import AlertPanel from "./components/AlertPanel.svelte";
+  import Metrics from "./pages/Metrics.svelte";
+  import SpectralNetwork from "./pages/SpectralNetwork.svelte";
+  import CognitiveArchitecture from "./pages/CognitiveArchitecture.svelte";
+  import Traces from "./pages/Traces.svelte";
+  import SystemMetrics from "./pages/SystemMetrics.svelte";
+  import Media from "./pages/Media.svelte";
+  import Reports from "./pages/Reports.svelte";
+  import Runs from "./pages/Runs.svelte";
+  import RunDetail from "./pages/RunDetail.svelte";
+  import Files from "./pages/Files.svelte";
+  import ArtifactsSidebar from "./components/ArtifactsSidebar.svelte";
+  import { DEFAULT_LOGO_URLS } from "./components/Logo.svelte";
+  import ArtifactsDetail from "./pages/ArtifactsDetail.svelte";
+  import {
+    getAllProjects,
+    getRunsForProject,
+    getRunConfigs,
+    getAlerts,
+    getTabAvailability,
+    getRunMutationStatus,
+    getSettings,
+    getReadOnlySource,
+    isStaticMode,
+    setMediaDir,
+  } from "./lib/api.js";
+  import {
+    getAppPollIntervalMs,
+    isRateLimitCooldownActive,
+    isTabHidden,
+  } from "./lib/hostPolling.js";
+  import { setColorPalette } from "./lib/stores.js";
+  import { reconcileSelectedRuns } from "./lib/selection.js";
+  import {
+    canonicalProject,
+  } from "./lib/projectPolicy.js";
+  import {
+    getPageFromPath,
+    navigateTo,
+    getQueryParam,
+    getArtifactSelectionFromUrl,
+  } from "./lib/router.js";
+  import Settings from "./pages/Settings.svelte";
+  import { initTheme, isDark, onThemeChange } from "./lib/theme.js";
+
+  function metricFilterFromLegacyMetricsParam(metricsParam) {
+    if (!metricsParam) return "";
+    const trimmed = metricsParam.trim();
+    const parts = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) return "";
+    const isSimpleToken = (p) => /^[\w./-]+$/.test(p);
+    if (parts.every(isSimpleToken)) {
+      return parts
+        .map((p) => {
+          const esc = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          return `^${esc}$`;
+        })
+        .join("|");
+    }
+    return trimmed;
+  }
+
+  function xAxisParamFromUrl() {
+    return getQueryParam("x_axis") || getQueryParam("x-axis");
+  }
+
+  initTheme();
+
+  let darkMode = $state(isDark());
+  onThemeChange((dark) => { darkMode = dark; });
+
+  let currentPage = $state("metrics");
+  let selectedProject = $state(null);
+  let runs = $state([]);
+  let selectedRuns = $state([]);
+  let smoothing = $state(10);
+  let xAxis = $state("step");
+  let logScaleX = $state(false);
+  let logScaleY = $state(false);
+  let metricFilter = $state("");
+  let realtimeEnabled = $state(true);
+  let showHeaders = $state(true);
+  let filterText = $state("");
+  let metricColumns = $state([]);
+  let requestedUrlXAxis = $state(null);
+  let urlXAxisApplied = $state(false);
+  let sidebarOpen = $state(true);
+  let sidebarHidden = $state(false);
+  let navbarHidden = $state(false);
+  let hideEmptyTabs = $state(false);
+  let urlTick = $state(0);
+  let alerts = $state([]);
+  let pollTimer = $state(null);
+  let mutationStatus = $state({
+    spaces: false,
+    allowed: true,
+    auth: "local",
+  });
+  let mutationPollTimer = $state(null);
+  let appBootstrapReady = $state(false);
+  let logoUrls = $state(DEFAULT_LOGO_URLS);
+  let plotOrder = $state([]);
+  let tableTruncateLength = $state(250);
+  let readOnlySource = $state(null);
+  let spaceId = $state(null);
+  let availableSystemDevices = $state([]);
+  let selectedSystemDevices = $state([]);
+  let tabAvailability = $state({});
+  let tabAvailabilityRequestId = 0;
+  let lastTabAvailabilityRefreshAt = 0;
+  let shouldOpenFirstNonEmptyTab = false;
+  let openedFirstNonEmptyTab = false;
+  const TAB_AVAILABILITY_POLL_INTERVAL_MS = 15000;
+
+  const OPTIONAL_EMPTY_TABS = new Set([
+    "system",
+    "traces",
+    "media",
+    "reports",
+    "files",
+    "artifacts",
+  ]);
+  const AUTO_OPEN_TAB_ORDER = [
+    "metrics",
+    "spectral",
+    "cognition",
+    "system",
+    "traces",
+    "media",
+    "reports",
+    "runs",
+    "files",
+    "artifacts",
+  ];
+  let runConfigs = $state({});
+  let runConfigsProject = $state(null);
+  let artifactSelection = $state(null);
+  let artifactsEmpty = $state(false);
+
+  function runKey(run) {
+    return run?.id ?? run?.name;
+  }
+
+  function isXAxisAvailable(axis) {
+    return axis === "step" || axis === "time" || metricColumns.includes(axis);
+  }
+
+  let selectedRunRecords = $derived(
+    runs.filter((run) => selectedRuns.includes(runKey(run))),
+  );
+
+  function handleNavigate(page) {
+    openedFirstNonEmptyTab = true;
+    currentPage = page;
+    navigateTo(page);
+  }
+
+  function isBareDashboardPath() {
+    const base = window.__trackio_base || "";
+    let pathname = window.location.pathname;
+    if (base && pathname.startsWith(base)) {
+      pathname = pathname.slice(base.length) || "/";
+    }
+    pathname = pathname.replace(/\/+$/, "") || "/";
+    return pathname === "/";
+  }
+
+  async function refreshProjects() {
+    try {
+      const data = await getAllProjects();
+      selectedProject = canonicalProject(data);
+    } catch (e) {
+      console.error("Failed to load projects:", e);
+    }
+  }
+
+  async function refreshRunsAndMutation() {
+    await refreshRuns();
+    await refreshMutationAccess();
+  }
+
+  async function refreshRuns() {
+    const project = selectedProject;
+    if (!project) {
+      runs = [];
+      selectedRuns = [];
+      availableSystemDevices = [];
+      selectedSystemDevices = [];
+      runConfigs = {};
+      runConfigsProject = null;
+      return;
+    }
+    if (project !== runConfigsProject) {
+      runConfigs = {};
+    }
+    try {
+      const [data, configs] = await Promise.all([
+        getRunsForProject(project),
+        getRunConfigs(project).catch(() => null),
+      ]);
+      if (selectedProject !== project) return;
+      const newRuns = [...(data || [])].reverse();
+
+      if (JSON.stringify(runs) !== JSON.stringify(newRuns)) {
+        const prevSelected = selectedRuns;
+        const prevOrdered = runs.map(runKey);
+        runs = newRuns;
+        selectedRuns = reconcileSelectedRuns(
+          prevSelected,
+          newRuns.map(runKey),
+          prevOrdered,
+        );
+      }
+      if (configs != null) {
+        runConfigs = configs;
+        runConfigsProject = project;
+      }
+    } catch (e) {
+      console.error("Failed to load runs:", e);
+    }
+  }
+
+  async function refreshAlerts() {
+    if (!selectedProject) return;
+    try {
+      const data = await getAlerts(selectedProject, null, null, null);
+      alerts = (data || []).slice(-20);
+    } catch {
+      // ignore
+    }
+  }
+
+  function initialAvailability() {
+    return {
+      metrics: false,
+      system: false,
+      traces: false,
+      media: false,
+      reports: false,
+      runs: false,
+      files: false,
+      artifacts: false,
+    };
+  }
+
+  async function refreshTabAvailability({ force = false } = {}) {
+    const now = Date.now();
+    if (
+      !force &&
+      now - lastTabAvailabilityRefreshAt < TAB_AVAILABILITY_POLL_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastTabAvailabilityRefreshAt = now;
+    const requestId = ++tabAvailabilityRequestId;
+    if (!selectedProject) {
+      tabAvailability = initialAvailability();
+      return;
+    }
+
+    try {
+      const flags = await getTabAvailability(selectedProject);
+      if (requestId !== tabAvailabilityRequestId) return;
+      const availability = {
+        ...initialAvailability(),
+        ...flags,
+        runs: runs.length > 0,
+      };
+      tabAvailability = availability;
+
+      if (shouldOpenFirstNonEmptyTab && !openedFirstNonEmptyTab && isBareDashboardPath()) {
+        const first = AUTO_OPEN_TAB_ORDER.find((page) => availability[page]);
+        if (first && first !== currentPage) {
+          currentPage = first;
+          navigateTo(first);
+        }
+        openedFirstNonEmptyTab = true;
+      }
+    } catch (e) {
+      if (requestId !== tabAvailabilityRequestId) return;
+      console.error("Failed to load tab availability:", e);
+      tabAvailability = initialAvailability();
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      if (!realtimeEnabled) return;
+      if (isTabHidden()) return;
+      if (isRateLimitCooldownActive()) return;
+      await refreshProjects();
+      await refreshRuns();
+      await refreshAlerts();
+      await refreshTabAvailability();
+    }, getAppPollIntervalMs());
+  }
+
+  function applyUrlTokens() {
+    const params = new URLSearchParams(window.location.search);
+    let changed = false;
+    const wt = params.get("write_token");
+    if (wt) {
+      const maxAge = 60 * 60 * 24 * 7;
+      document.cookie = `trackio_write_token=${encodeURIComponent(wt)}; path=/; max-age=${maxAge}; SameSite=Lax`;
+      params.delete("write_token");
+      changed = true;
+    }
+    const oauthSession = params.get("oauth_session");
+    if (oauthSession) {
+      sessionStorage.setItem("trackio_oauth_session", oauthSession);
+      params.delete("oauth_session");
+      changed = true;
+    }
+    if (changed) {
+      const q = params.toString();
+      const path = window.location.pathname + (q ? `?${q}` : "");
+      window.history.replaceState({}, "", path);
+    }
+  }
+
+  async function refreshMutationAccess() {
+    try {
+      const s = await getRunMutationStatus();
+      mutationStatus = {
+        spaces: !!s.spaces,
+        allowed: !!s.allowed,
+        auth: s.auth ?? "none",
+      };
+    } catch {
+      mutationStatus = { spaces: false, allowed: true, auth: "local" };
+    }
+  }
+
+  function startMutationPolling() {
+    if (mutationPollTimer) clearInterval(mutationPollTimer);
+    mutationPollTimer = setInterval(() => {
+      refreshMutationAccess();
+    }, 120000);
+  }
+
+  $effect(() => {
+    selectedProject;
+    availableSystemDevices = [];
+    selectedSystemDevices = [];
+    refreshRuns();
+  });
+
+  $effect(() => {
+    urlTick;
+    navbarHidden = getQueryParam("navbar") === "hidden";
+  });
+
+  $effect(() => {
+    urlTick;
+    if (currentPage !== "artifacts" || !sidebarHidden) return;
+    const { name, version } = getArtifactSelectionFromUrl();
+    if (!name || version == null) return;
+    artifactSelection = { name, version };
+  });
+
+  onMount(() => {
+    const sidebarParam = getQueryParam("sidebar");
+    if (sidebarParam === "hidden") {
+      sidebarHidden = true;
+      sidebarOpen = false;
+    } else if (sidebarParam === "collapsed") {
+      sidebarHidden = false;
+      sidebarOpen = false;
+    } else {
+      sidebarHidden = false;
+    }
+
+    const smoothingParam = getQueryParam("smoothing");
+    if (smoothingParam) {
+      const s = parseInt(smoothingParam, 10);
+      if (!Number.isNaN(s)) smoothing = s;
+    }
+
+    const xAxisParam = xAxisParamFromUrl();
+    if (xAxisParam && xAxisParam.trim()) {
+      requestedUrlXAxis = xAxisParam.trim();
+      xAxis = requestedUrlXAxis;
+    } else {
+      urlXAxisApplied = true;
+    }
+
+    const metricFilterParam = getQueryParam("metric_filter");
+    const metricsLegacyParam = getQueryParam("metrics");
+    if (metricFilterParam) {
+      metricFilter = metricFilterParam;
+    } else if (metricsLegacyParam) {
+      metricFilter = metricFilterFromLegacyMetricsParam(metricsLegacyParam);
+    }
+
+    if (getQueryParam("accordion") === "hidden") {
+      showHeaders = false;
+    }
+
+    hideEmptyTabs = getQueryParam("hide_empty_tabs") === "true";
+
+    shouldOpenFirstNonEmptyTab = isBareDashboardPath();
+    currentPage = getPageFromPath();
+
+    window.addEventListener("popstate", () => {
+      currentPage = getPageFromPath();
+      urlTick++;
+    });
+
+    applyUrlTokens();
+
+    (async () => {
+      const staticMode = await isStaticMode();
+
+      if (!staticMode) {
+        refreshMutationAccess();
+        startMutationPolling();
+        window.addEventListener("focus", refreshMutationAccess);
+      } else {
+        realtimeEnabled = false;
+        mutationStatus = { spaces: false, allowed: false, auth: "static" };
+        readOnlySource = await getReadOnlySource();
+      }
+
+      try {
+        try {
+          const settings = await getSettings();
+          if (settings) {
+            if (settings.logo_urls) logoUrls = settings.logo_urls;
+            if (settings.color_palette) setColorPalette(settings.color_palette);
+            if (settings.plot_order) plotOrder = settings.plot_order;
+            if (settings.table_truncate_length) tableTruncateLength = settings.table_truncate_length;
+            if (settings.media_dir) setMediaDir(settings.media_dir);
+            if (settings.space_id) spaceId = settings.space_id;
+          }
+        } catch {
+          // settings endpoint may not be available
+        }
+        await refreshProjects();
+        await refreshRuns();
+
+        await refreshAlerts();
+        await refreshTabAvailability({ force: true });
+      } catch (e) {
+        console.error("Failed to load projects:", e);
+      } finally {
+        appBootstrapReady = true;
+      }
+
+      if (!staticMode) {
+        startPolling();
+      }
+    })();
+
+    return () => {
+      if (pollTimer) clearInterval(pollTimer);
+      if (mutationPollTimer) clearInterval(mutationPollTimer);
+      window.removeEventListener("focus", refreshMutationAccess);
+    };
+  });
+
+  $effect(() => {
+    selectedProject;
+    runs;
+    if (appBootstrapReady) refreshTabAvailability({ force: true });
+  });
+
+  $effect(() => {
+    if (urlXAxisApplied || !requestedUrlXAxis) return;
+    if (isXAxisAvailable(requestedUrlXAxis)) {
+      xAxis = requestedUrlXAxis;
+      urlXAxisApplied = true;
+    } else if (metricColumns.length > 0) {
+      xAxis = "step";
+      urlXAxisApplied = true;
+    }
+  });
+
+  let urlRunsFromQueryApplied = $state(false);
+
+  $effect(() => {
+    if (urlRunsFromQueryApplied) return;
+    if (!appBootstrapReady) return;
+    if (!selectedProject) return;
+    const runIdsParam = getQueryParam("run_ids");
+    const runsParam = getQueryParam("runs");
+    if (!runIdsParam && !runsParam) {
+      urlRunsFromQueryApplied = true;
+      return;
+    }
+    if (!runs.length) {
+      urlRunsFromQueryApplied = true;
+      return;
+    }
+    let wanted;
+    if (runIdsParam) {
+      const ids = runIdsParam.split(",").map((s) => s.trim()).filter(Boolean);
+      const validKeys = new Set(runs.map((r) => runKey(r)));
+      wanted = ids.filter((id) => validKeys.has(id));
+    } else {
+      const names = runsParam.split(",").map((s) => s.trim()).filter(Boolean);
+      const wantedNames = new Set(names);
+      wanted = runs.filter((r) => wantedNames.has(r.name)).map((r) => runKey(r));
+    }
+    if (wanted.length) {
+      selectedRuns = wanted;
+    }
+    urlRunsFromQueryApplied = true;
+  });
+
+  let showSidebar = $derived(
+    currentPage === "metrics" ||
+      currentPage === "spectral" ||
+      currentPage === "cognition" ||
+      currentPage === "traces" ||
+      currentPage === "system" ||
+      currentPage === "media" ||
+      currentPage === "reports" ||
+      currentPage === "runs" ||
+      currentPage === "run-detail" ||
+      currentPage === "files"
+  );
+
+  let sidebarVariant = $derived(
+    currentPage === "runs" || currentPage === "files" ? "compact" : "full"
+  );
+</script>
+
+<div class="app">
+  {#if showSidebar && !sidebarHidden}
+    <Sidebar
+      bind:open={sidebarOpen}
+      variant={sidebarVariant}
+      {currentPage}
+      spacesMode={mutationStatus.spaces}
+      runMutationAllowed={mutationStatus.allowed}
+      mutationAuth={mutationStatus.auth}
+      {readOnlySource}
+      bind:selectedProject
+      {runs}
+      {runConfigs}
+      bind:selectedRuns
+      bind:smoothing
+      bind:xAxis
+      bind:logScaleX
+      bind:logScaleY
+      bind:metricFilter
+      bind:realtimeEnabled
+      bind:showHeaders
+      bind:filterText
+      {metricColumns}
+      {availableSystemDevices}
+      bind:selectedSystemDevices
+      {spaceId}
+      {logoUrls}
+      {darkMode}
+    />
+  {/if}
+
+  {#if currentPage === "artifacts" && !sidebarHidden}
+    <ArtifactsSidebar
+      bind:project={selectedProject}
+      {logoUrls}
+      {darkMode}
+      bind:selection={artifactSelection}
+      bind:empty={artifactsEmpty}
+    />
+  {/if}
+
+  <div class="main">
+    {#if !navbarHidden}
+      <Navbar
+        {currentPage}
+        {tabAvailability}
+        optionalEmptyTabs={OPTIONAL_EMPTY_TABS}
+        {hideEmptyTabs}
+        onNavigate={handleNavigate}
+      />
+    {/if}
+
+    <div class="page-content">
+      {#if currentPage === "metrics"}
+        <Metrics
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+          allRuns={runs}
+          {smoothing}
+          {xAxis}
+          {logScaleX}
+          {logScaleY}
+          {metricFilter}
+          {showHeaders}
+          {appBootstrapReady}
+          {plotOrder}
+          {realtimeEnabled}
+          bind:metricColumns
+        />
+      {:else if currentPage === "spectral"}
+        <SpectralNetwork
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+          allRuns={runs}
+          {realtimeEnabled}
+        />
+      {:else if currentPage === "cognition"}
+        <CognitiveArchitecture
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+          allRuns={runs}
+          {realtimeEnabled}
+        />
+      {:else if currentPage === "traces"}
+        <Traces
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+        />
+      {:else if currentPage === "system"}
+        <SystemMetrics
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+          allRuns={runs}
+          {smoothing}
+          {appBootstrapReady}
+          {realtimeEnabled}
+          bind:availableDevices={availableSystemDevices}
+          bind:selectedDevices={selectedSystemDevices}
+        />
+      {:else if currentPage === "media"}
+        <Media
+          project={selectedProject}
+          selectedRuns={selectedRunRecords}
+          allRuns={runs}
+          {tableTruncateLength}
+        />
+      {:else if currentPage === "reports"}
+        <Reports project={selectedProject} selectedRuns={selectedRunRecords} />
+      {:else if currentPage === "runs"}
+        <Runs
+          project={selectedProject}
+          {runs}
+          {filterText}
+          onRunsChanged={refreshRunsAndMutation}
+          runMutationAllowed={mutationStatus.allowed}
+        />
+      {:else if currentPage === "run-detail"}
+        <RunDetail project={selectedProject} />
+      {:else if currentPage === "files"}
+        <Files project={selectedProject} />
+      {:else if currentPage === "artifacts"}
+        <ArtifactsDetail
+          project={selectedProject}
+          selection={artifactSelection}
+          empty={artifactsEmpty}
+        />
+      {:else if currentPage === "settings"}
+        <Settings {spaceId} selectedProject={selectedProject} />
+      {/if}
+    </div>
+  </div>
+
+  <AlertPanel {alerts} />
+</div>
+
+<style>
+  :global(*) {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  :global(body) {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    background: var(--background-fill-primary, #fff);
+    color: var(--body-text-color, #1f2937);
+    font-size: var(--text-md, 14px);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .page-content {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    background: var(--bg-primary);
+  }
+</style>
