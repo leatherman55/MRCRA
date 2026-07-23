@@ -160,9 +160,13 @@ rotates phase. MRRN uses an exponential-trapezoidal step. With
 $q_t=\Delta_t\lambda_t$,
 
 $$
-z_t = e^{q_t}z_{t-1}
-+ \Delta_t\left[\left(\varphi_1(q_t)-\varphi_2(q_t)\right)g_{t-1}
-+ \varphi_2(q_t)g_t\right],
+\begin{aligned}
+z_t &= e^{q_t}z_{t-1} \\
+&\quad + \Delta_t\left[
+\left(\varphi_1(q_t)-\varphi_2(q_t)\right)g_{t-1}
+{}\mathbin{+} \varphi_2(q_t)g_t
+\right],
+\end{aligned}
 $$
 
 where
@@ -413,10 +417,13 @@ The learning path has several important safeguards:
 The actor objective is conceptually
 
 $$
+\begin{aligned}
 \mathcal L_{\text{actor}}
-= \lambda_{\text{task}}\mathcal L_{\text{task}}
-+ \lambda_{\text{FS}}\mathcal L_{\text{functional-surprise CE}}
-+ \lambda_{\text{trust}}D_{\mathrm{KL}}(\pi_{\text{target}}\|\pi_{\text{actor}}).
+&= \lambda_{\text{task}}\mathcal L_{\text{task}} \\
+&\quad + \lambda_{\text{FS}}\mathcal L_{\text{functional-surprise CE}} \\
+&\quad + \lambda_{\text{trust}}
+D_{\mathrm{KL}}(\pi_{\text{target}}\|\pi_{\text{actor}}).
+\end{aligned}
 $$
 
 Functional-surprise learning is **genuine reinforcement only when the reward is
