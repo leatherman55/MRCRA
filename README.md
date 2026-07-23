@@ -1,813 +1,448 @@
-# Multimodal Relational-Continuity Resonance Architecture
+# MRCRA
 
-This repository contains the production-oriented PyTorch implementation of the
-[Multimodal Relational-Continuity Resonance Architecture](outputs/multimodal_relational_continuity_resonance_architecture.md)
-(MRCRA) and its dense
-[Multiresolution Resonance Network](outputs/multiresolution_resonance_network_spec.md)
-(MRRN) carrier. The earlier sequence-only MRRN and exact-weight compiled Apple
-MLX executor remain available as a carrier baseline and deployment path.
+## Multimodal Relational-Continuity Resonance Architecture
 
-It implements the complete required baseline: exact learned lifting, paired-real
-complex selective resonators, exponential–trapezoidal and associative recurrence,
-neighbor exchange aligned by physical completion time, local/structured nonlinear
-mixers, learned bounded resonant spectral GLU activations with sparse legal
-sum/difference-frequency triads, candidate-bounded coherence attention, coarse landmarks, bounded exact
-eidetic retrieval, batch and constant-state streaming, three output modes, domain
-encoders/transforms, auxiliary objectives, diagnostics, checkpoints, resets,
-quantization measurement, synthetic gates, and matched-interface baselines. Version
-1.3 adds Resonant Adjoint Surprise Learning (RASL): a compact transform-reusing
-distributional critic, reverse consequence adjoint, bounded functional-surprise
-policy targets, calibrated uncertainty, replay, performance guard, and complete
-training checkpoints. Version 1.4 adds the sequence-only, tied-embedding MRRN
-language model and a resumable streamed FineWeb next-token trainer with live
-Trackio charts and tokenizer-independent effective cross entropy. Version 1.5
-decay-normalizes every resonator drive, adds excess-state-energy control and
-fail-closed stability guards, and uses a validated conservative LM schedule.
-Version 1.6 adds a native Trackio **Spectral Network** tab backed by versioned
-run artifacts. Version 1.7 adds automatic CUDA execution, BF16/FP16 AMP,
-scaled FP16 gradients, fused AdamW, pinned nonblocking transfers, indexed-GPU
-selection, CUDA runtime telemetry, and Windows-safe startup.
-Version 1.7.1 distinguishes finite pre-clip gradient pressure from an unsafe
-applied update, adds bounded automatic LR recovery, and preserves safety anchors.
-Version 1.8 made the measured 4,695,023-parameter sequence model the stable MRRN
-baseline. Version 2.0 adds the bounded MRCRA substrate: typed event and relation
-rings, immutable provenance, relational resonance routing, a competitive global
-workspace, episodic and gated semantic memory, compression and invariants,
-factorized hypotheses, calibrated uncertainty, an action-conditioned world model,
-a budgeted executable controller, candidate-bounded cognitive RASL, and a
-stateful exact-full-softmax 32K trainer.
-Version 3.0 completes the integrated MRCRA authority path: unified multimodal
-packet assembly, persistent goals/self-model/controller/schema state, immutable
-provenance features, two-phase abstraction/invariant promotion, separated and
-permission-gated external actions with feedback, learned distributional and
-calibration heads, evidence-backed supervision for all cognitive objective
-families, exact structured/anti-aliased MLX parity, and hash-bound executable
-traceability. Capability claims remain gated on training and target hardware.
+MRCRA is an experimental PyTorch architecture that combines a
+**multiresolution spectral recurrent network** with a **bounded relational
+cognitive substrate**. The dense spectral carrier preserves causal signal
+history across multiple time scales; the sparse cognitive system turns salient
+events into typed relations, memories, hypotheses, workspace state, and
+permission-gated action proposals.
 
-```python
-import torch
-from mrrn import MRRN, MRRNConfig
+This repository contains the architecture, language-model interface, original
+English FineWeb trainer, checkpointing and evaluation systems, Trackio
+instrumentation, and executable acceptance evidence.
 
-config = MRRNConfig(input_dim=16, output_dim=4, model_dim=64, layers=4, scales=4)
-model = MRRN(config)
-x = torch.randn(2, 128, 16)
+> **Project status:** research implementation. No pretrained production
+> checkpoint is included. The repository validates mechanisms and causal
+> contracts; it does not claim general intelligence, deployment maturity, or
+> capabilities that have not been established by training and held-out
+> evaluation.
 
-# Portable parallel training or prefill.
-prediction = model(x).prediction
+[Quick start](#quick-start) ·
+[Architecture](#architecture-at-a-glance) ·
+[Model profiles](#model-profiles) ·
+[Training](#fineweb-training) ·
+[Dashboard](#trackio-dashboard) ·
+[Documentation](#documentation) ·
+[Validation](#validation-and-claim-boundaries)
 
-# Exact causal incremental execution with bounded neural state.
-state = model.initial_stream_state(batch=2)
-step_prediction = model.step(x[:, 0], state).prediction
+## Why this architecture exists
+
+Most sequence models keep information in token-indexed vectors and recover
+context through attention over an expanding cache. MRCRA explores a different
+division of labor:
+
+- The **MRRN carrier** stores causal history in learned resonant modes with
+  amplitude, phase, frequency, and decay across several physical resolutions.
+- A **typed event graph** stores sparse, durable structure only when the dense
+  stream produces a sufficiently supported event.
+- A **global workspace** selects a small competitive set of information and
+  feeds it back into the carrier.
+- **Episodic and semantic memory** separate exact retained detail from validated
+  consolidation.
+- **Hypotheses and a world model** maintain bounded alternatives and estimate
+  action-conditioned consequences.
+- A **budgeted controller** proposes internal operations and external actions,
+  while hard capability, permission, provenance, viability, and abstention
+  gates remain authoritative.
+
+The central idea is not to discard tensors or learned vectors. It is to make
+spectral dynamics the continuous information carrier and reserve explicit
+relational state for structure that benefits from identity, provenance, and
+longer-lived continuity.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    A["Tokens or multimodal observations"] --> B["Modality preparation and learned lifting"]
+    B --> C["MRRN spectral carrier<br/>multiresolution recurrent modes"]
+    C --> D["Causal event extraction"]
+    D --> E["Typed relational state<br/>nodes, edges, provenance"]
+    E --> F["Workspace, memory,<br/>hypotheses, world model"]
+    F --> G["Budgeted cognitive controller"]
+    G --> H["Permission-gated<br/>external action proposal"]
+    F --> I["Bounded cognitive feedback"]
+    I --> C
+    C --> J["Output latent / tied vocabulary head"]
 ```
 
-## Startup
+| Component | Role |
+| --- | --- |
+| Multiresolution Resonance Network | Causal dense carrier built from stable paired-real complex resonators, neighbor-scale exchange, structured mixing, bounded coherence attention, and learned spectral activations. |
+| Resonant Spectral GLU | A learned frequency-domain activation with bounded gain, phase modulation, and sparse legal sum/difference-frequency interactions. |
+| Event and relation substrate | Promotes supported temporal events into fixed-capacity typed nodes, pair relations, and hyperedges. |
+| Provenance ledger | Keeps observation, prediction, reconstruction, simulation, and external evidence distinguishable through immutable source records. |
+| Global workspace | Selects a bounded competitive set of active structure and broadcasts learned context back into the carrier. |
+| Memory | Uses exact episodic retention and gated semantic consolidation rather than treating every learned write as fact. |
+| Hypothesis and world model | Represents a bounded set of alternatives, including an explicit unknown option, and predicts multihorizon consequences. |
+| Controller and agent boundary | Executes budgeted internal operations; external actions require an application-owned schema, authorization, viability state, and executor receipt. |
+| Cognitive learning | Allows language loss and evidence-backed auxiliary objectives to shape the cognitive path without inventing labels or treating task loss as environmental reward. |
+
+### What is distinctive
+
+- **Spectral recurrent state:** learned phase and decay are first-class carrier
+  variables rather than only positional features.
+- **Dense–sparse integration:** continuous multiscale dynamics and explicit
+  relational cognition train through one causal path.
+- **Authoritative metadata:** learned embeddings estimate content, but cannot
+  silently rewrite node identity, relation type, provenance, permissions, or
+  observed-versus-predicted status.
+- **Bounded computation:** attention candidates, graph capacity, workspace
+  occupancy, hypotheses, memory retrieval, and controller steps all have
+  explicit limits.
+- **Fail-closed cognition:** abstraction, invariants, semantic knowledge, and
+  external action proposals require their own evidence and authorization gates.
+- **Inspectable dynamics:** spectral state, event thresholds, cognitive
+  gradients, causal ablations, relational state, memory, and action gates are
+  exposed through the Trackio dashboard.
+
+### Multimodal boundary
+
+The cognitive network consumes typed observation packets rather than assuming
+that every input is a one-dimensional token sequence. Modality preparation for
+text, audio, images, video, fields, graphs, and sets lives in
+[`src/mrrn/modalities.py`](src/mrrn/modalities.py). Masks, timestamps,
+coordinates, sample intervals, segment boundaries, uncertainty seeds, source
+identities, and provenance accompany learned values into the model.
+
+The included end-to-end trainer is specifically an English language-model
+trainer. Other modalities require an application to provide their observation
+packets and evidence-backed training targets; unordered structures are not
+silently flattened into the temporal carrier.
+
+## Model profiles
+
+The model sizes below use the GPT-2 vocabulary of 50,257 tokens.
+
+| Profile | Parameters | Carrier | Intended use | Selection |
+| --- | ---: | --- | --- | --- |
+| Integrated light | 8,413,442 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate | `--lightmodel` |
+| Serious | 115,925,944 | 6 scales, unshared learned depth, 256-wide base | Full architecture training and serious evaluation | Default |
+| Legacy sequence MRRN | 4,695,023 | Sequence-only spectral carrier | Compatibility and carrier-only ablation | `--legacy-mrrn` |
+
+The parameter counts are construction-time invariants, not rounded marketing
+targets. Reproduce the audits with:
+
+```bash
+python scripts/report_mrcra_parameters.py --lightmodel
+python scripts/report_mrcra_parameters.py
+```
+
+Detailed subsystem allocations are retained in
+[`outputs/mrcra_8p4m_parameter_report.json`](outputs/mrcra_8p4m_parameter_report.json)
+and
+[`outputs/mrcra_120m_parameter_report.json`](outputs/mrcra_120m_parameter_report.json).
+
+## Quick start
+
+MRCRA requires Python 3.11 or newer.
 
 ### Linux or macOS
 
-From the repository root, create an isolated environment and install the full
-training and verification stack:
-
 ```bash
-python3 -m venv .venv
+git clone https://github.com/leatherman55/MRCRA.git
+cd MRCRA
+python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python scripts/train_fineweb.py
 ```
 
-On an NVIDIA Linux host, install the CUDA-enabled PyTorch wheel selected at
-[PyTorch Get Started](https://pytorch.org/get-started/locally/) before installing
-`requirements.txt`. The requirements file will preserve an already-compatible
-CUDA build. On Apple silicon, install `python -m pip install -e '.[apple]'` if
-the optional MLX executor is also required.
-
-### Windows with NVIDIA CUDA
-
-These commands are PowerShell commands. Python 3.11 or newer and a current
-NVIDIA display/compute driver are required. A separate system CUDA toolkit is
-not required when using an official PyTorch CUDA wheel.
+### Windows PowerShell
 
 ```powershell
-nvidia-smi
+git clone https://github.com/leatherman55/MRCRA.git
+cd MRCRA
 py -3.11 -m venv .venv
 Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-```
-
-Use the command generated by the official
-[PyTorch Windows/Pip/CUDA selector](https://pytorch.org/get-started/locally/).
-For example, when CUDA 12.6 is the selected supported wheel:
-
-```powershell
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
 python -m pip install -r requirements.txt
 ```
 
-Verify that this environment—not merely the NVIDIA driver—can execute CUDA:
+For NVIDIA training, install the CUDA-enabled PyTorch wheel selected by the
+[official PyTorch installer](https://pytorch.org/get-started/locally/) before
+installing `requirements.txt`. A separate system CUDA toolkit is not required
+for official PyTorch wheels.
 
-```powershell
-python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"
-```
+### Verify the installation
 
-Then start training. No CUDA flag is needed: `auto` selects the first visible
-CUDA GPU before CPU or MPS. On the RTX A4500 it selects BF16 AMP automatically;
-on CUDA devices without BF16 it uses FP16 with dynamic gradient scaling.
-
-```powershell
-python scripts\train_fineweb.py
-```
-
-Selection can be made explicit when troubleshooting or using multiple GPUs:
-
-```powershell
-python scripts\train_fineweb.py --device cuda:0 --precision bf16
-python scripts\train_fineweb.py --device cuda:1 --precision fp16
-python scripts\train_fineweb.py --device cpu --precision fp32 --smoke-test
-```
-
-`--device auto` supports one process on one selected CUDA device. This release
-does not claim multi-GPU data/model parallelism. The startup line reports the
-resolved GPU, precision, and fused-optimizer status, while Trackio records GPU
-allocation, reservation, peak memory, and NVML system telemetry.
-
-On Apple silicon, install the optional backend and import the same learned
-weights directly—there is no conversion checkpoint or reduced surrogate:
+The smoke test uses a tiny local model and does not download FineWeb:
 
 ```bash
-python3 -m pip install -e '.[apple,test]'
+python scripts/train_fineweb.py \
+  --smoke-test \
+  --no-trackio \
+  --no-dashboard \
+  --output-dir work/mrcra-smoke
 ```
 
-```python
-from mrrn import MLXMRRN
+Run the complete Python test suite with:
 
-fast_model = MLXMRRN(model)               # compiled inference + fixed-state decode
-fast_prediction = fast_model(x)            # accepts Torch or MLX arrays
-stream = fast_model.initial_stream_state(batch=2)
-step_prediction, stream = fast_model.stream_step(x[:, 0], stream)
-
-train_model = MLXMRRN(model, training=True) # work-efficient differentiable scan
-loss, gradients = train_model.loss_and_grad(x, torch.zeros_like(prediction))
+```bash
+python -m pytest
 ```
 
-The MLX executor deliberately fails closed for noncausal topology,
-continuous-signal anti-alias blocks, and structured low-rank mixers; external
-eidetic-memory reads/writes remain on the PyTorch authority path. Those variants
-must not be described as MLX-accelerated until their own parity tests pass.
+## Python API
 
-`MRRNConfig.research`, `.capability_first`, and `.efficiency_first` provide the
-three specification profiles. Text/audio/image/video/field/graph/set forms live
-in `mrrn.modalities`; unordered sets and graphs deliberately do not enter the
-one-dimensional lifting path without a meaningful order.
-
-## Production MRCRA
-
-MRCRA is a dual substrate. The dense MRRN carrier preserves a causal signal at
-six physical resolutions through learned lifting, stable complex recurrence,
-neighbor-scale exchange, local/RSGLU mixing, and bounded candidate attention.
-The sparse substrate promotes only completed salient events into a fixed-capacity
-typed graph. Exact node/relation pointers, source class, scenario, support,
-versions, and provenance remain authoritative metadata; learned vectors estimate
-content but cannot rewrite those facts.
-
-The global workspace admits a small competitive set of nodes and broadcasts its
-conclusion back through the carrier's fifth residual branch. Episodic retrieval
-preserves exact detail; semantic memory accepts only validated consolidations.
-Compression proposals expose reconstruction and distortion and cannot silently
-promote themselves. Alternative hypotheses are residual copies, not duplicated
-backbones. The controller has a hard microstep budget and executes 31 typed
-operations with explicit success/failure receipts and differentiable pre-decision
-logits. Abstractions, invariants, and symbols enter a durable proposal bank and
-cannot become semantic authority until held-out non-regression, distortion,
-utility, provenance-diversity, and counterexample gates pass. External actions
-are a separate ontology: a learned proposal is executable only after capability,
-permission, immutable-provenance, and abstention checks. Environment receipts
-update the measured system model without granting new permissions. Simulation
-remains scenario tagged, verification creates a bounded typed evidence request,
-and abstention is a first-class output.
-
-Version 4 is the integrated consequential-gap closure. Conditional descent now
-reconstructs localized typed graphs from an abstraction, surviving traces,
-current evidence, hypotheses, goals, requested scale, and precision while keeping
-`RECONSTRUCTED` distinct from observations. Applicability is checked before an
-abstraction is used. Live hypotheses retain observation provenance and an explicit
-unknown alternative; posterior- and diversity-routed alternatives evaluate a
-bounded candidate-action set before any external action is selected. Hard
-capability, permission, provenance, posterior-mass, and viability gates precede
-utility. Role-normalized invariant discovery includes permutation alignment and
-near-match counterexamples. Metacognitive receipts, external-artifact references,
-measured executor consequences, and explicit continuity scopes are persistent,
-checkpointed state. The canonical `scripts/train_fineweb.py` command now selects
-this complete MRCRA path; the sequence-only MRRN is available only through the
-explicit `--legacy-mrrn` compatibility switch.
-
-Raw models intentionally have no external capabilities or permissions. Use
-`CognitiveAgentSession` with an application-owned `ActionSchemaRegistry`, an
-explicit authorized goal, and—when viability gating is enabled—measured viability
-authority. The session owns observe → deliberate → execute → ingest sequencing,
-idempotent receipts, and checkpoint/resume; the neural model never calls tools or
-changes the environment directly.
+The following constructs an **untrained** integrated light model and demonstrates
+the output contract:
 
 ```python
 import torch
 from mrrn import MRCRAConfig, MRCRALanguageModel
 
-config = MRCRAConfig.serious_120m(output_dim=50_257)
+vocabulary_size = 50_257
+config = MRCRAConfig.light_8p4m(output_dim=vocabulary_size)
 model = MRCRALanguageModel(config)
-tokens = torch.randint(0, 50_257, (1, 128))
-output = model(tokens)
+
+tokens = torch.randint(0, vocabulary_size, (1, 128))
+output = model(tokens, source_uris=("example://prompt",))
 
 logits = output.logits
-typed_nodes = output.cognitive.nodes
-typed_relations = output.cognitive.relations
+nodes = output.cognitive.nodes
+relations = output.cognitive.relations
+workspace = output.cognitive.workspace
+uncertainty = output.cognitive.uncertainty
 provenance = output.ledger
 ```
 
-The serious configuration is constrained to 110M–125M actor parameters rather
-than padded to a cosmetic count. Count validation occurs after tied weights and
-all cognitive modules are constructed. With the GPT-2 vocabulary it constructs
-exactly **115,925,944 trainable parameters**. Reproduce the complete subsystem
-breakdown and static-storage audit with:
-
-```bash
-python scripts/report_mrcra_parameters.py
-```
-
-The generated authority is
-`outputs/mrcra_120m_parameter_report.json`; “120M” names the declared model
-class, not a claim that unused parameters were added to hit a round number.
-
-### Integrated 8.4M light model
-
-Pass `--lightmodel` to select the parameter-efficient integrated profile:
-
-```bash
-python scripts/train_fineweb.py --lightmodel
-python scripts/train_fineweb.py --lightmodel --resume latest
-python scripts/report_mrcra_parameters.py --lightmodel
-```
-
-With the GPT-2 vocabulary this profile contains exactly **8,413,442 trainable
-parameters** and enforces an 8.35M–8.45M construction band. It is a smaller
-MRCRA actor, not the legacy sequence-only network: conditional reconstruction,
-validity-controlled abstraction, multi-hypothesis planning, post-deliberation
-selection, the agent-session loop, viability gating, invariant discovery,
-persistent-session training, and metacognitive routing all remain enabled.
-
-The allocation is intentionally nonuniform. A tied 96-wide token/output
-embedding receives 4,824,672 parameters; the carrier uses five dyadic scales
-with widths `[96, 112, 112, 112, 112]`, 12–15 resonant modes per scale, four
-heads, and six recurrent refinement passes over one shared learned block. An
-8-rank structured mixer and five-mode learned spectral activation retain the
-spectral operations without dense feed-forward matrices. The bounded cognitive
-runtime keeps 128 event slots, 512 pair edges, 64 hyperedges, 12 global
-workspace slots, 4,096 episodic entries, and 1,024 semantic entries. This puts
-capacity into vocabulary coverage, multiresolution state, and complete
-cognition rather than cosmetic unshared depth.
-
-Unless overridden, a light run uses
-`outputs/mrcra-8p4m-fineweb-<total-tokens>-tokens` and the Trackio run prefix
-`mrcra-8p4m-light-integrated-fineweb-`; it remains inside the single
-`mrcra-fineweb` Trackio project. The token-qualified output path prevents an
-aborted run with a different budget from blocking a fresh invocation.
-Checkpoints cannot be accidentally resumed across light and 120M profiles
-because the complete model configuration and parameter identity are
-checkpoint-bound.
-
-### 32K FineWeb training
-
-`scripts/train_fineweb.py` is the canonical entrypoint and defaults to the
-complete integrated MRCRA actor. It delegates to the maintained MRCRA trainer;
-it does not construct the old sequence-only model. The serious configuration
-enables conditional reconstruction, validity-controlled abstraction,
-multi-hypothesis planning, post-deliberation selection, the agent-session and
-viability paths, invariant discovery, authorized persistence, and metacognitive
-routing. Raw FineWeb still activates only supervision for which it has valid
-targets; enabled mechanisms never authorize fabricated consequence labels.
-
-The production command uses original English `HuggingFaceFW/fineweb`
-(`sample-10BT`), a GPT-2 tokenizer, 32,768-token optimization contexts,
-256-token execution chunks, 4,096-token TBPTT spans, microbatch one, activation
-checkpointing at every carrier block/scale, and exact 2,048-token vocabulary
-tiles. It never retains a 32K-by-vocabulary logit tensor. The exact-loss
-auto-policy retains a TBPTT tile graph only while its declared estimate is at
-most 1 GiB; larger contractions recompute tiles in backward. Document
-transitions are masked from CE and reset recurrent/cognitive state; original
-FineWeb document IDs remain attached to provenance records.
-
-Dataset and tokenizer revisions are pinned before construction. A stable hash
-of each FineWeb document ID reserves a disjoint 1% evaluation partition. Four
-32K retained contexts are materialized by default, hashed into checkpoint
-identity, and evaluated every 25 updates with exact tiled full-softmax CE. The
-evaluation runtime and provenance ledger are fresh per context; evaluation
-cannot mutate or leak into training state. `--eval-interval` and
-`--eval-batches` may be changed explicitly, but a non-smoke production run
-fails closed if retained evaluation is absent.
-
-```bash
-python scripts/train_fineweb.py
-python scripts/train_fineweb.py --resume latest
-python scripts/train_fineweb.py --smoke-test --output-dir work/mrcra-smoke
-```
-
-Stage 1 optimizes next-token CE plus bounded spectral/state regularization.
-It uses an integrated multirate path by default. The spectral carrier processes
-each bounded span vectorially, while the complete event/graph/workspace/memory/
-hypothesis/controller runtime observes causal summaries at its architectural
-event cadence (128 tokens for the light profile, 256 for the serious profile).
-A summary ending at token `t` modulates the prediction made from token `t` and
-later tokens, never earlier predictions. Exact next-token CE therefore flows
-through cognitive feedback, soft controller policy pressure, schemas,
-workspace routing, uncertainty, and the carrier: cognition evolves under the
-same environmental task pressure as language behavior without any future-token
-leak or invented cognitive label.
-
-The 4,096-token carrier TBPTT boundary and four-event cognitive TBPTT horizon
-(512 input tokens at the light profile's cadence) bound adjoint history while
-preserving forward state; packed document boundaries reset both states. Multiple short documents share one
-bounded tiled-softmax reduction without sharing state. This bounds live
-autograd memory, amortizes full-vocabulary work, and prints token/cognitive-cycle
-progress inside every 32K update. Retained evaluation uses exactly the same
-integrated causal path.
-Functional surprise is deliberately disabled for raw FineWeb because text targets
-do not provide an external downstream consequence. Later cognitive stages accept
-strict masked evidence-backed objectives. Packed boundaries and provenance supply
-event/source targets; causal next-state prediction is self-supervised; multimodal
-binding, typed relations, controller consequence, and external action outcomes
-activate only when their complete annotation groups are present. Missing required
-families fail closed. The RASL path rejects
-`reward_source="task_loss"`.
-
-Checkpoints atomically include model, optimizer, scheduler, AMP scaler, exact
-packer buffers and segment/source metadata, RNG, the last bounded runtime state,
-and its provenance ledger. A one-worker CPU lookahead overlaps streaming,
-tokenization, and packing with model work. Its already-advanced stream state and
-materialized next batch are checkpointed together, so restart neither skips nor
-duplicates tokens. The default `auto` device chooses CUDA first, BF16
-when supported and scaled FP16 otherwise. On Apple Silicon, matched local probes
-select CPU for the 8.4M integrated training path because its heterogeneous
-cognitive control graph is launch-bound on MPS; `--device mps` remains an
-explicit override.
-
-CPU execution defaults to four intra-op workers and one inter-op worker. On
-this Apple integrated workload, four workers beat one, two, and eight on the
-4,096-token carrier span, while extra inter-op scheduling did not help the
-strictly causal event/state dependency chain. Override with `--cpu-threads` and
-`--cpu-interop-threads` when measuring a different host. Multiprocessing is not
-applied inside one cognitive stream: events, provenance allocation, recurrent
-state, and hard actions are causally dependent. Independent data-parallel
-contexts may be distributed by an external launcher, but a single-process run
-does not create unsynchronized model or optimizer replicas.
-
-Workspace graph execution is occupancy-sensitive. Active nodes are stably
-compacted for learned relation routing and global competition, then all selected
-participants are mapped back to their persistent authority-ring indices. An
-empty ring bypasses impossible relation scoring and transport while still
-executing the differentiable broadcast/controller path. On the local 8.4M
-profile's 128-slot empty ring this reduced the graph median from 26.3 ms to
-0.43 ms (about 61x for that component); dense output and learned-gradient
-equivalence are tested. Trackio records active-node mean, maximum, and capacity
-utilization so the saving remains observable rather than assumed.
-
-During gradient-disabled evaluation and generation, fused identity/gate,
-attention K/V, SwiGLU, and spectral projections cache their packed weights.
-The cache invalidates on parameter version, storage, device, or precision
-change. Training always constructs the pack inside the live autograd graph, so
-this inference optimization cannot stale gradients or alter checkpoint names.
-
-The causal carrier now has one complete continuation state for both optimized
-training spans and generation. A stream-aligned span vectorizes lifting filters,
-masked fine-to-coarse prefix reductions, coarse-to-fine carry, resonator scans,
-local attention, absolute-time landmarks, spectral/local mixers, anti-alias
-filters, and support-aligned synthesis. It then commits the resulting lifting
-histories, exchange carry, bounded attention windows, resonator state, anti-alias
-history, latest synthesis bands, and absolute position in causal order. An
-arbitrary prefix or final tail uses the identical one-token transition. Thus a
-4,096-token TBPTT boundary truncates gradients when requested but no longer
-resets any carrier operator inside the advertised 32,768-token context.
-
-On the real 8.4M carrier profile, a local four-thread CPU probe measured a
-256-token stateful prefill at 0.108 seconds versus 2.175 seconds for 256
-individual decode calls, about 20.1x faster. Against the old non-continuable
-dense span it was within roughly 5% on a paired probe while preserving the
-complete state needed by the next span. These are local component measurements,
-not target-GPU or end-to-end training claims.
-
-CUDA additionally compiles the pure per-scale resonator/mixer tensor cores by
-default. Persistent authority updates remain outside the compiled region and
-are committed only after a kernel returns, so compilation cannot reorder graph,
-provenance, attention-history, or recurrent-state mutations. CPU and MPS stay
-eager by default. Use `--no-compile-tensor-cores` to disable CUDA compilation or
-`--compile-tensor-cores` to measure it explicitly on another backend.
-
-The optimized Metal path keeps spectral arithmetic in paired-real form for
-fusion, while CPU uses its faster native-complex kernels; neither policy alters
-the complex algebra or paired-real checkpoint representation. Repeated tensor
-state checks are deferred only inside a trusted cognitive event span and the
-completed state tree is validated at its boundary; public observations,
-checkpoints, provenance records, action schemas, and external-action authority
-remain fail-closed. `--apple-mps-loss-offload` enables the exact vocabulary
-contraction on MPS while cognition stays on CPU, but is off by default because
-the matched M1 4K integrated measurement was slower across the cross-device
-backward boundary. The full MLX carrier backend remains available for compiled
-Apple inference/training parity experiments and is covered by active tests when
-the Apple extra is installed.
-
-CUDA hardware characterization is optional and is not part of the current local
-acceptance scope. The harness remains available when a CUDA machine is present;
-it writes peak allocated/reserved memory, throughput, runtime, precision,
-parameter count, and pass status:
-
-```bash
-python scripts/benchmark_mrcra_32k.py --device cuda --precision auto
-```
-
-### Cognitive training and continuity contracts
-
-Named profiles in `mrrn.training_profiles` bind every curriculum stage to its
-mandatory objective families, admissible target authorities, target coverage,
-persistence permission, and maximum claim maturity. The integrated serious
-profile cannot start when any required family or target source is missing.
-Persistent trainer modes additionally require explicit continuity keys; state is
-reused only when the complete key tuple matches, and unrelated packed documents
-remain isolated.
-
-Production reconstruction and world-model objectives train the actual deployed
-heads. Per-family gradient governance reports norms and cosine conflicts and can
-apply deterministic conflict projection. Continual adaptation is restricted to
-an exact adapter-parameter allowlist, uses a bounded provenance-bearing replay
-ring, and commits only after an application-supplied retention gate; failure
-restores adapter weights exactly and never modifies base parameters.
-
-Continuity resets use `BoundaryScope`, not inferred boundary strength:
-`EVENT`, `SEGMENT`, `DOCUMENT`, `ENVIRONMENT_EPISODE`, `SESSION`,
-`IDENTITY_RESET`, and `STREAM_DISCONTINUITY` each have an independently tested
-state-persistence matrix. A partial identity reset fails closed because online
-calibration is process-global. Provenance and audit clocks are never rolled back.
-
-Checkpoint format 8 migrates formats 3 through 7 conservatively. Format 7 first
-bound the retained evaluation batch digest, evaluation controls, exact-loss
-memory policy, and deterministic prefetched batch into resume identity. Format
-8 additionally checkpoints proposal-slope history, sustained-clipping state,
-and the unique first-hard-event receipt. Missing
-consequence measurements, goal metadata, hypothesis evidence provenance, or
-foundation state become unknown/empty and never acquire capability authority
-during migration.
-
-## Bounded learned-behavior acceptance
-
-Unit tests prove contracts and invariants, but they cannot establish that a
-mechanism learns a useful role. The deterministic empirical suite trains the
-production components on eight controlled held-out tasks and compares them with
-explicit ablations:
-
-- delayed tensor-memory retrieval versus recent-only recall under eviction;
-- aligned cross-modal event binding versus equal-parameter shuffled pairs;
-- validated graph compression with code, distortion, and prediction checks;
-- distributional calibration, OOD uncertainty, and alternative hypotheses;
-- action-conditioned world prediction versus action ablation;
-- adaptive microsteps versus fixed-one, compute-matched fixed-two, and fixed-three compute;
-- FSCE versus behavior CE with equal delayed-consequence interactions;
-- naive, replayed, and isolated continual adaptation with validation, revocation,
-  and exact rollback.
-
-Run it with:
-
-```bash
-python scripts/run_mrcra_empirical_acceptance.py
-```
-
-The authoritative result is `outputs/mrcra_empirical_acceptance.json`. Every
-threshold, raw metric, parameter count, duration, scope statement, and pass/fail
-decision is retained. Passing proves bounded mechanism learnability and local
-causal effects; it does not claim a seriously trained checkpoint, open-domain
-competence, or general cognition.
-
-## Integrated cognition and performance acceptance
-
-The next acceptance layer exercises actual production paths under matched
-ablations rather than testing each component in isolation. It repeats 16 unique
-seeds and records Wilson confidence intervals for all 15 preregistered controls:
-spectral phase/delay, reconstruction traces and evidence, explicit reconstructed
-source identity, adaptive abstraction, multi-hypothesis and information-gain
-deliberation, post-deliberation selection, viability, normalized invariants,
-metacognitive routing, scoped persistence, learned memory writes, functional
-surprise, and neural provenance features with ledger authority retained:
-
-```bash
-python scripts/run_mrcra_integrated_acceptance.py
-python scripts/run_mrcra_performance_acceptance.py
-```
-
-The resulting `outputs/mrcra_integrated_acceptance.json` and
-`outputs/mrcra_performance_acceptance.json` retain per-file source hashes, the
-checkpoint/data status, exact test node IDs, arm definitions, per-arm parameter
-and work counts, seeds, confidence intervals, hardware/dtype, timing conditions,
-failures, unresolved external gates, exact routing/checkpoint-structure bounds,
-and explicit claim boundaries. These bounded CPU results do not substitute for
-a trained 115.9M checkpoint or target-hardware throughput measurements.
-The performance-v2 timing sentinel uses single-thread process CPU time with
-symmetric ABBA/BAAB arm ordering and reports the median paired overhead plus its
-median absolute deviation, preventing ordinary host scheduling noise from being
-misclassified as an architectural regression.
-
-The final serious-checkpoint decision is a separate fail-closed authority. It
-reconstructs the checkpoint architecture, verifies format/tensor/configuration
-identity, enforces the serious parameter and training-token floors, checks the
-pinned disjoint split, binds checkpoint SHA-256 to the evaluation artifact,
-requires all nine preregistered held-out task families with matched controls,
-and recomputes both task confidence decisions and measured 32K target-hardware
-budgets:
-
-```bash
-python scripts/run_mrcra_serious_checkpoint_acceptance.py \
-  --checkpoint outputs/mrcra-120m-fineweb/checkpoints/step-XXXXXXX.pt \
-  --run-manifest outputs/mrcra-120m-fineweb/run_manifest.json \
-  --evaluation-artifact outputs/mrcra-120m-fineweb/serious-evaluation.json
-```
-
-The default serious floor is one billion training tokens, preserving the
-architecture specification’s distinction between a 20M-token integration run
-and a capability-bearing low-billions regime. Missing or mismatched evidence
-produces a failed report. Contract fixtures test the authority but can never
-emit `serious_checkpoint` maturity. Evaluation producers use the typed
-`SeriousTaskEvidence`, `SeriousCriterion`, and `SeriousPerformanceEvidence`
-records with `build_serious_evaluation_artifact`; that builder refuses partial,
-duplicate, failed, nonfinite, unhashed, or non-recomputable evidence. The final
-auditor independently recomputes every decision rather than trusting a stored
-`passed` flag.
-
-## Legacy sequence-only English FineWeb training
-
-The legacy language configuration has **4,695,023 trainable parameters**
-with the GPT-2 vocabulary. It is a three-block, five-scale causal MRRN with tied
-48-dimensional input/output embeddings, four heads, 10 recurrent base modes,
-eight RSGLU spectral modes, bounded local/coherence attention, and widths
-`(48, 64, 64, 64, 64)`. The unused global prediction head is absent. The legacy
-`fineweb_27m_config` remains available only to address existing 26.4M
-checkpoints. Neither legacy configuration is selected by a normal
-`train_fineweb.py` invocation.
-
-The default corpus is the original English `HuggingFaceFW/fineweb` dataset,
-configuration `sample-10BT`. It is not FineWeb2. Dataset and tokenizer revisions
-are resolved to immutable Hub commit hashes before the run begins. Because
-FineWeb has only a training split, a stable SHA-256 hash of each document ID
-assigns 1% to a disjoint retained evaluation stream.
-
-To intentionally run the sequence-only compatibility baseline, add the required
-`--legacy-mrrn` switch. For example, use
-`python scripts/train_fineweb.py --legacy-mrrn --no-dashboard` without opening
-the live dashboard.
-
-Omit `--no-dashboard` to open live local charts. The default run processes 20M
-tokens as 2,442 optimizer updates (2,048 tokens per microbatch, four accumulated
-microbatches), evaluates and checkpoints every 100 updates, and uses a `1e-4`
-peak learning rate with 800K-token warmup. The 20M-token default supplies about
-4.26 training tokens per model parameter. Run the
-dependency-free local integration test with:
-
-```bash
-python3 scripts/train_fineweb.py --legacy-mrrn --smoke-test --output-dir work/lm-smoke
-```
-
-Resume exactly from the saved dataset position, packing buffer, optimizer,
-scheduler, model, counters, and random state:
-
-```bash
-python3 scripts/train_fineweb.py --legacy-mrrn --resume latest
-```
-
-The v1.5 resonator scales each mode's learned drive by its positive decay
-`alpha`. Its impulse-kernel absolute integral is therefore one instead of
-`1/alpha`: longer memory no longer creates free state gain. Training additionally
-logs mean/maximum state RMS, pre/post-clip gradient norms and clip coefficient on
-every update, penalizes only state energy above RMS 8, warns persistently at RMS
-16 or pre-clip gradient norm 100, and immediately rejects non-finite values or
-three consecutive readings at RMS 32. A finite pre-clip gradient above 1,000 is
-not itself called an unsafe applied update: the norm-1 clip remains authoritative,
-and three consecutive readings trigger a 0.5 learning-rate backoff. Four bounded
-recoveries are allowed before persistent gradient pressure becomes a hard abort.
-Recovery count and effective LR scale are checkpointed and reported to Trackio.
-The trainer also writes an unscheduled safety checkpoint one reading before a
-hard stability decision and immediately after a recovery, preventing the normal
-100-step checkpoint interval from discarding a long span of safe updates.
-
-`cross_entropy_nats_per_token` is ordinary next-token CE. The companion
-`effective_cross_entropy_nats_per_byte` is the same total target NLL divided by
-the number of original UTF-8 bytes represented by those targets; EOS contributes
-NLL but zero bytes. Bits-per-byte is that value divided by `ln(2)`. With identical
-text and boundary policy, the byte-normalized values permit comparisons across
-tokenizers; ordinary token CE is directly comparable when both models use GPT-2
-BPE. The complete operating contract is maintained in this section and in the
-[architecture specification](outputs/multiresolution_resonance_network_spec.md).
-
-The Resonant Spectral GLU (RSGLU) hybrid local mixer is enabled by default.
-`spectral_modes` caps its modal
-cost independently of the recurrent mode count; `spectral_basis_order` controls
-learned transfer resolution; and gain, phase, and sparse-triad limits are explicit
-stability bounds. Set `spectral_activation=False` for the exact original
-SwiGLU-only ablation.
-
-The machine-checked evidence ledger maps every traceable specification heading
-to implementation and tests. The retained reports under `outputs/` record the
-actual environment, shapes, dtype, parameter mismatch, timings, capability
-thresholds, and coverage.
-
-## Trackio Spectral Network and MRCRA Cognition tabs
-
-The bundled dashboard is intentionally single-project: it opens
-`mrcra-fineweb` directly and does not expose a project selector. Run selection
-remains available for comparing current and future MRCRA training runs within
-that one project.
-
-FineWeb training opens Trackio with a dedicated **Spectral Network** tab. It
-contains the Training Stability Observatory, Token Resonance Microscope, RSGLU
-Triad Atlas, Resonance Constellation, and—on MRCRA artifacts—the Cognitive Atlas
-for the typed graph, workspace, two-phase knowledge proposals, hypotheses,
-decomposed uncertainty, online calibration, internal actions, permission-gated
-external actions, clocks, and provenance. The integrated trainer publishes its
-first snapshot after optimizer step one and then every 25 optimizer steps by
-default; the explicit legacy trainer publishes at step one and then every 100.
-Each
-snapshot is a versioned `mrcra-cognitive-spectral-evidence` Trackio artifact, so the tab
-works for local dashboards and Hugging Face Space-backed dashboards without
-placing large modal arrays in scalar metric logs.
-
-The **Phase Transition** instrument is enabled by default on the canonical
-`scripts/train_fineweb.py` path. It plots the proposal mean, median, p90, p99,
-and maximum; the signed logit distance to the configured hard boundary; the
-fractions of cognitive anchors above probabilities 0.25, 0.35, 0.45, and 0.50;
-the rolling proposal-logit slope; and exact counts of opened, finalized,
-emitted, still-open, and quota-rejected events. These are receipts from the
-causal extractor itself, not values inferred from active node counts.
-
-Every optimizer update also reports disjoint pre/post-clip gradient norms and
-gradient-tensor participation for the carrier, event system, output bridge,
-controller, workspace/router, world-model/hypothesis system, memory, and
-remaining cognition. Trackio records the applied effective learning rate
-(`learning_rate * clip_coefficient`). A warning is emitted only after the clip
-coefficient stays below 0.05 for ten consecutive updates; the warning does not
-change optimization.
-
-At each retained evaluation checkpoint, one retained batch is replayed through
-three causally matched arms by default:
-
-- **full** retains the soft feedback path and authoritative hard allocation;
-- **soft only** retains differentiable event/controller feedback but suppresses
-  persistent hard-event allocation;
-- **cognition off** runs the same carrier with zero cognitive feedback.
-
-`soft_only_CE - full_CE` measures the hard-structure contribution, while
-`cognition_off_CE - soft_only_CE` measures the soft-bridge contribution.
-Positive gain means that component reduced held-out CE. All arms use identical
-tokens, labels, byte counts, weights, and fresh runtime/ledger state; evaluation
-restores model mode and RNG and cannot update parameters.
-
-When the first proposal actually emits a hard event, the trainer immediately
-writes a non-prunable
-`checkpoints/phase-transition-first-event-step-XXXXXXX.pt`, publishes a Trackio
-INFO alert and `mrcra-first-hard-event` artifact, and atomically retains
-`diagnostics/first-hard-event.json`. The receipt includes the triggering
-proposal/end probabilities, support interval, selected type and confidence,
-graph/workspace occupancy before and after allocation, and global plus
-per-subsystem gradients before and after clipping. Its step, token position,
-and checkpoint name are part of format-8 resumable training state, preventing
-duplicate first-event alerts after resume.
-
-MRCRA evidence also opens a separate **MRCRA Cognition** tab. Its five linked
-views are Reconstructive Descent, Deliberation Lattice, Viability Envelope,
-Invariant Transfer, and Cognitive Causal Timeline. All views consume immutable
-diagnostic snapshots: they expose provenance and authorization decisions but do
-not participate in the runtime authority path.
-
-```bash
-python3 scripts/train_fineweb.py
-```
-
-To reopen Trackio with the custom tabs:
-
-```bash
-PYTHONPATH=src python3 scripts/show_trackio_dashboard.py --project mrcra-fineweb
-```
-
-The launcher uses the largest completed run under `work/` or `outputs/` when
-`--output-dir` is omitted. If the local Trackio database was removed and has no
-runs, it reconstructs exactly one canonical run from that completed run's
-manifest and checkpoint, including scalar metrics and the cognitive-spectral
-artifact. An existing project containing any run is never backfilled or
-modified by this recovery path.
-
-The integrated trainer controls include `--no-spectral-dashboard`,
-`--snapshot-interval`, `--no-phase-transition-telemetry`,
-`--no-phase-transition-ablation`, and `--phase-ablation-batches`. The production
-defaults keep both phase systems enabled and bound the ablation to one retained
-batch to limit evaluation overhead. The legacy trainer additionally accepts
-`--spectral-baseline-metrics`. Snapshot
-generation is explicitly non-authoritative: a visualization failure produces a
-Trackio warning but cannot apply, reject, or otherwise alter an optimizer update.
-
-### Standalone spectral evidence
-
-The four interactive instruments—the Training Stability Observatory, Token
-Resonance Microscope, RSGLU Triad Atlas, and Resonance Constellation—consume one
-checkpoint-grounded JSON bundle. Re-export it for any compatible v1.5 language
-checkpoint and prompt with:
-
-```bash
-PYTHONPATH=src python3 scripts/export_visualization_data.py \
-  --checkpoint outputs/fineweb-4p7m-stable/checkpoints/step-0000100.pt \
-  --stable-metrics outputs/fineweb-4p7m-stable/metrics.jsonl \
-  --baseline-metrics outputs/fineweb-4p7m-baseline/metrics.jsonl \
-  --output outputs/mrrn-visualization-data.json
-```
-
-The exporter recurrently replays the prompt through the actual checkpoint,
-records modal amplitude and circular phase at every block and scale, derives
-learned pole locations and half-lives, measures batch branch routing and RSGLU
-triad activity, and extracts the latest monotonic optimizer run from append-only
-telemetry. The visualization evidence schema and limitations are defined by the
-exporter implementation and the
-[architecture specification](outputs/multiresolution_resonance_network_spec.md).
-
-## Resonant Adjoint Surprise Learning
-
-RASL trains a causal MRRN as an actor without relifting its representation. The
-critic receives detached actor bands, predicts multihorizon quantile returns on a
-strictly causal path, and runs a separate outcome-conditioned resonator backward
-over completed trajectories to assign delayed credit. Its default four bootstrap
-heads separate epistemic disagreement from quantile spread, while exploration is
-rewarded only when uncertainty is epistemic, prediction error is improving, and
-the action is controllable.
+Generation preserves recurrent cognitive state and records generated tokens as
+predictions rather than observations:
 
 ```python
-from mrrn import ResonantAdjointSurpriseLearner, TrajectoryBatch
-
-learner = ResonantAdjointSurpriseLearner(model)
-actor_optimizer, critic_optimizer = learner.make_optimizers()
-
-# Use the EMA actor to collect a rollout and retain its logits with the actions.
-behavior = learner.rollout_policy(x).prediction
-batch = TrajectoryBatch(
-    inputs=x,
-    actions=actions,          # int64 [batch, time]
-    rewards=rewards,          # consequence of action at the same index
-    dones=dones,              # termination after that consequence
-    mask=valid_steps,         # may become false once; never reactivate
-    behavior_logits=behavior,
-    reward_source="environment",
+generated = model.generate(
+    tokens[:, :16],
+    maximum_new_tokens=32,
+    temperature=0.8,
+    top_k=50,
+    top_p=0.95,
 )
-report = learner.train_step(batch, actor_optimizer, critic_optimizer)
 
-# Later: stratified replay with built-in importance correction and priority refresh.
-replay_report = learner.train_replay_step(32, actor_optimizer, critic_optimizer)
+generated_tokens = generated.tokens
+generated_provenance_ids = generated.generated_provenance_ids
 ```
 
-`reward_source="task_loss"` is rejected by default: using the same supervised
-error as reward would be hard-example weighting, not reinforcement learning.
-Human or verifier reward is accepted when it describes a downstream preference
-or consequence. Fixed offline data without retained behavior logits uses the
-detached pre-update actor as its trust anchor.
+Meaningful generation requires trained weights. Checkpoint identity includes the
+complete model configuration, so incompatible profiles cannot be silently mixed.
 
-The retained reference critic has 28,260 parameters versus 730,819 for the actor
-(3.87%). Critic backward has zero actor-gradient leaks; actor backward has zero
-critic-gradient leaks. Changing a terminal outcome changes early adjoint credit
-but changes forward values by exactly zero. On a seeded task where reward arrives
-five transitions after the decision, correct early-action probability increased
-from 0.435 to 0.593 in 40 updates. Complete RASL two-loss backward measured 1.51×
-the time of a plain actor backward on the retained one-thread CPU shape. The small
-heterogeneous graph is launch-bound on MPS (2.08× in the retained MPS check), so
-CPU is the recommended PyTorch training device for this reference size; MLX
-continues to be the accelerated actor inference/decode path. These are local
-construction and capability results, not universal convergence or quality claims.
+## FineWeb training
 
-The full equations, input/output contracts, safety boundaries, and acceptance
-gate are in section 36 and Gate I of the architecture specification. Raw evidence
-is retained in `outputs/surprise_verification_report.json` and
-`outputs/surprise_mps_verification_report.json`.
+[`scripts/train_fineweb.py`](scripts/train_fineweb.py) is the canonical training
+entrypoint. A normal invocation trains the integrated serious MRCRA model; it
+never silently falls back to the legacy sequence-only carrier.
 
-On the retained M1 benchmark (FP32, batch 1, 730,819 MRRN parameters versus a
-741,056-parameter Transformer using MLX fused causal attention), MRRN prefill is
-slower at short contexts but crosses over at the measured 12,288-token point:
-401 ms versus 642 ms, or 1.60× faster. Recurrent decode crosses over at the same
-measured context and reaches 2.28× the Transformer's throughput at 32,768 cached
-tokens. Training remains slower through the largest retained 4,096-token point.
-These are shape- and machine-specific measurements, not universal quality or
-latency claims; see the three `apple_*_report.json` files for raw synchronized
-samples and boundaries.
-
-## Development commands
+### Recommended first substantial run
 
 ```bash
-python3 -m pip install -e '.[test]'
-coverage run -m pytest
-coverage report
-python3 scripts/verify_spec.py --strict
-python3 scripts/build_mrcra_evidence.py
-python3 -c "from pathlib import Path; from mrrn.traceability import audit; print(audit(Path('.'), specification='outputs/multimodal_relational_continuity_resonance_architecture.md', evidence_file='spec/mrcra_evidence.json'))"
-python3 scripts/report_mrcra_parameters.py
-python3 scripts/benchmark_mrcra_32k.py --device cuda --precision auto
-python3 scripts/run_verification.py --repeats 5
-python3 scripts/run_surprise_verification.py --device cpu --timing-repeats 7
-python3 scripts/run_apple_benchmarks.py --phase prefill --repeats 7
-python3 scripts/run_apple_benchmarks.py --phase decode --repeats 64
+python scripts/train_fineweb.py \
+  --lightmodel \
+  --total-tokens 20000000
 ```
+
+### Serious profile
+
+```bash
+python scripts/train_fineweb.py \
+  --total-tokens 20000000
+```
+
+### Resume a run
+
+`--resume` loads the latest checkpoint in the resolved output directory:
+
+```bash
+python scripts/train_fineweb.py \
+  --lightmodel \
+  --total-tokens 20000000 \
+  --resume
+```
+
+If you change the total-token target while extending a run, reuse the original
+directory explicitly because the default light-model directory includes the
+token budget:
+
+```bash
+python scripts/train_fineweb.py \
+  --lightmodel \
+  --total-tokens 32000000 \
+  --output-dir outputs/my-light-run \
+  --resume
+```
+
+### Device selection
+
+`--device auto` is the default:
+
+- CUDA is selected first when available.
+- CUDA uses BF16 when supported and dynamically scaled FP16 otherwise.
+- Pure carrier tensor kernels are compiled automatically on CUDA.
+- On Apple silicon, the integrated light model defaults to CPU because its
+  heterogeneous cognitive graph is launch-bound on MPS in matched local probes.
+- Explicit `cpu`, `mps`, `cuda`, and indexed CUDA devices remain available.
+
+Examples:
+
+```bash
+python scripts/train_fineweb.py --lightmodel --device cuda:0 --precision bf16
+python scripts/train_fineweb.py --lightmodel --device cpu --cpu-threads 4
+python scripts/train_fineweb.py --lightmodel --device mps
+```
+
+The built-in trainer is single-process and single-device. It does not claim
+multi-GPU data or model parallelism.
+
+An optional MLX backend is available on Apple silicon for supported carrier
+inference and recurrent decode:
+
+```bash
+python -m pip install -e '.[apple]'
+```
+
+It imports the same learned weights and fails closed for unsupported topology.
+The complete relational cognitive authority path remains the PyTorch reference.
+
+### Default data and context contract
+
+| Setting | Default |
+| --- | --- |
+| Dataset | Original English `HuggingFaceFW/fineweb`, configuration `sample-10BT` |
+| Tokenizer | GPT-2 BPE |
+| Optimization context | 32,768 tokens |
+| Carrier execution chunk | 256 tokens |
+| Carrier TBPTT span | 4,096 tokens |
+| Cognitive TBPTT horizon | 4 event cycles |
+| Full-softmax tile | 2,048 vocabulary entries |
+| Held-out split | Stable document-ID hash, 1% |
+| Evaluation/checkpoint interval | 25 optimizer updates |
+
+Dataset and tokenizer revisions are pinned before training. Documents are packed
+for throughput, but document transitions are excluded from next-token loss and
+reset recurrent and cognitive state. Full-vocabulary cross entropy is exact and
+tiled for memory control; it is not sampled or approximated.
+
+Raw FineWeb supplies language targets but no external downstream consequence.
+The FineWeb stage therefore does **not** enable functional-surprise reinforcement
+learning by treating task loss as reward. RASL is available only for trajectories
+with a legitimate environment, verifier, or preference consequence.
+
+### Run outputs
+
+Each run directory contains the durable state required for exact continuation:
+
+```text
+run_manifest.json
+metrics.jsonl
+checkpoints/
+diagnostics/
+```
+
+Checkpoints include model, optimizer, scheduler, AMP scaler, stream position,
+packer buffers, retained runtime state, provenance ledger, and random state.
+Local run directories and weight files are excluded from Git by default.
+
+## Trackio dashboard
+
+Trackio logging and the local dashboard are enabled by default during training.
+MRCRA adds two architecture-specific tabs:
+
+- **Spectral Network:** training stability, token-scale resonance, learned
+  spectral activation triads, pole/phase structure, and phase-transition
+  telemetry.
+- **MRCRA Cognition:** typed event graphs, reconstruction, deliberation,
+  hypotheses, viability, invariant transfer, uncertainty, memory, provenance,
+  and action authorization.
+
+The trainer also records matched **full**, **soft-only**, and **cognition-off**
+evaluation arms so cognitive contributions can be measured on identical retained
+data.
+
+Reopen the dashboard with:
+
+```bash
+PYTHONPATH=src python scripts/show_trackio_dashboard.py \
+  --project mrcra-fineweb
+```
+
+Disable UI launch while retaining or disabling logging independently:
+
+```bash
+python scripts/train_fineweb.py --lightmodel --no-dashboard
+python scripts/train_fineweb.py --lightmodel --no-trackio --no-dashboard
+```
+
+Dashboard artifacts are diagnostic observers. They do not participate in model
+authority, optimization decisions, or external action permission.
+
+## External actions and application authority
+
+The neural model never calls tools or changes an environment directly.
+Application integration uses `CognitiveAgentSession`, an application-owned
+`ActionSchemaRegistry`, explicit authorized goals, viability authority when
+enabled, and a structured executor.
+
+The session owns:
+
+```text
+observe → deliberate → authorize → execute → ingest receipt
+```
+
+Learned utility cannot bypass capability, permission, provenance, viability, or
+abstention gates. Simulation remains scenario-tagged, and environment feedback
+updates the measured system model without granting new permissions.
+
+## Repository layout
+
+```text
+src/mrrn/              Architecture, language interface, training, and runtime
+scripts/               Training, parameter audits, benchmarks, and verification
+tests/                 Unit, integration, causal, and acceptance tests
+trackio_frontend/      Spectral Network and MRCRA Cognition dashboard source
+outputs/               Small retained specifications and evidence artifacts
+spec/                  Machine-readable traceability ledgers
+```
+
+Large checkpoints, local datasets, Trackio databases, build products, and active
+training runs are intentionally not stored in the public repository.
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [MRCRA architecture specification](outputs/multimodal_relational_continuity_resonance_architecture.md) | Complete cognitive architecture, invariants, authority boundaries, training contracts, and acceptance criteria |
+| [MRRN mathematical specification](outputs/multiresolution_resonance_network_spec.md) | Spectral carrier equations, attention, recurrent state, activation, input/output contracts, and scaling behavior |
+| [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
+| [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
+| [Acceptance manifest](outputs/mrcra_acceptance_manifest.json) | Environment, commands, source hashes, and retained verification results |
+| [Evidence ledger](spec/mrcra_evidence.json) | Machine-readable mapping from specification requirements to implementation and tests |
+
+## Validation and claim boundaries
+
+Run the repository-wide acceptance workflow with:
+
+```bash
+python scripts/run_mrcra_acceptance.py
+python scripts/build_mrcra_evidence.py
+```
+
+The retained initial-public-release evidence records:
+
+- 536 passing Python tests and 1 skipped test;
+- passing frontend tests, lint, and production build;
+- passing empirical mechanism acceptance;
+- passing integrated cognitive-path acceptance;
+- passing bounded performance acceptance;
+- source hashes for every retained acceptance input.
+
+These results establish implemented contracts, bounded causal effects, exact
+resume behavior, and local mechanism learnability. They do not substitute for a
+seriously trained checkpoint, broad downstream evaluation, target-hardware
+qualification, or evidence of general cognition.
+
+## License
+
+No license file is currently included. Public visibility alone does not grant
+permission to reuse, modify, or redistribute the code. Add an explicit license
+before treating this repository as an open-source release.
