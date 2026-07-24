@@ -394,9 +394,9 @@ system receives positive pressure when held-out CE is falling faster than its
 own causal learning curve, negative pressure when learning plateaus or
 regresses, and no positive pressure before the evidence is mature.
 
-Let \(t_i\) be the cumulative number of valid target tokens and \(C_i\) the
+Let $t_i$ be the cumulative number of valid target tokens and $C_i$ the
 exact CE in nats per token on a fixed, disjoint progress probe. A Huber-robust
-line over the recent window gives the active slope \(m_{\text{fast}}\). Older
+line over the recent window gives the active slope $m_{\text{fast}}$. Older
 observations, separated from the present by a configurable lag, fit the shifted
 power-law baseline
 
@@ -419,11 +419,12 @@ $$
 $$
 u=\frac{w_sz_s+w_dz_d}{w_s+w_d},
 \qquad
-p=p_{\max}\,\operatorname{tanh}
-\left(\frac{\operatorname{deadband}(u)}{\tau}\right)c.
+p=p_{\max}\tanh
+\left(\frac{\mathcal D(u)}{\tau}\right)c.
 $$
 
-Here \(d\) is **progress debt** and \(c\in[0,1]\) is evidence confidence. Debt
+Here $\mathcal D$ is the configured deadband, $d$ is **progress debt**, and
+$c\in[0,1]$ is evidence confidence. Debt
 prevents a regress-then-drop strategy from earning positive pressure merely
 because its latest local slope looks good. Positive pressure is also
 categorically forbidden when the observed CE slope is nonnegative. A separate
