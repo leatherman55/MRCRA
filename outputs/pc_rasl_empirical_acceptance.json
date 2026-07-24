@@ -1,0 +1,180 @@
+{
+  "causal_replay_test_nodes": [
+    "tests/test_pc_rasl_training.py::test_pc_rasl_checkpoint_binds_both_probe_and_guard_evidence",
+    "tests/test_cognitive_surprise.py::test_replay_critic_uses_preconsequence_behavior_evidence_not_later_reanalysis"
+  ],
+  "checkpoint_migration_test_nodes": [
+    "tests/test_pc_rasl_training.py::test_format8_checkpoint_migrates_into_fresh_causal_pc_rasl_warmup",
+    "tests/test_pc_rasl_training.py::test_format9_pc_rasl_checkpoint_discards_pre_v10_replay_authority"
+  ],
+  "claim_boundary": "Passing establishes the signed causal-pressure mechanism, bounded candidate critic, internal-action credit, gradient firewall, and governor on deterministic local evidence. It does not establish open-domain capability or a beneficial phase transition.",
+  "device": "cpu",
+  "exact_trainer_resume_test_node": "tests/test_pc_rasl_training.py::test_pc_rasl_production_path_is_checkpoint_resume_exact",
+  "format_version": 2,
+  "passed": true,
+  "phase_transition_metrics_used_as_authority": false,
+  "production_resource_test_node": "tests/test_fineweb_entrypoint.py::test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner",
+  "results": [
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "accelerating_pressure",
+          "threshold": 0.05
+        },
+        {
+          "direction": "at_most",
+          "metric": "plateau_pressure",
+          "threshold": -0.01
+        },
+        {
+          "direction": "at_most",
+          "metric": "rising_pressure",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "gaming_pressure",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "gaming_debt",
+          "threshold": 0.1
+        },
+        {
+          "direction": "at_least",
+          "metric": "guard_veto",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "vetoed_positive_pressure",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "guard_recovery",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "resume_state_mismatch",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "phase_authority_mentions",
+          "threshold": 0.0
+        }
+      ],
+      "duration_seconds": 0.03451541699178051,
+      "metrics": {
+        "accelerating_pressure": 0.6183185906875217,
+        "gaming_debt": 0.8435239459450128,
+        "gaming_pressure": -0.9999999999794088,
+        "guard_recovery": 1.0,
+        "guard_veto": 1.0,
+        "phase_authority_mentions": 0.0,
+        "plateau_pressure": -0.06718283362523958,
+        "resume_state_mismatch": 0.0,
+        "rising_pressure": -1.0,
+        "vetoed_positive_pressure": 0.0
+      },
+      "name": "causal progress authority",
+      "passed": true
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_least",
+          "metric": "signed_behavior_probability_margin",
+          "threshold": 0.05
+        },
+        {
+          "direction": "at_most",
+          "metric": "critic_actor_gradient_leaks",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "controller_gradient_norm",
+          "threshold": 1e-08
+        },
+        {
+          "direction": "at_most",
+          "metric": "critic_loss_ratio",
+          "threshold": 0.75
+        },
+        {
+          "direction": "at_most",
+          "metric": "candidate_count",
+          "threshold": 5.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "progress_head_gradient",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_least",
+          "metric": "internal_value_head_gradient",
+          "threshold": 1.0
+        }
+      ],
+      "duration_seconds": 1.1629663750063628,
+      "metrics": {
+        "candidate_count": 5.0,
+        "controller_gradient_norm": 0.0730082738247599,
+        "critic_actor_gradient_leaks": 0.0,
+        "critic_loss_ratio": 0.5101236220081136,
+        "internal_value_head_gradient": 1.0,
+        "progress_head_gradient": 1.0,
+        "signed_behavior_probability_margin": 0.4599989652633667
+      },
+      "name": "critic and internal cognitive credit",
+      "passed": true
+    },
+    {
+      "criteria": [
+        {
+          "direction": "at_most",
+          "metric": "carrier_mutation",
+          "threshold": 0.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "controller_auxiliary_norm",
+          "threshold": 0.100001
+        },
+        {
+          "direction": "at_least",
+          "metric": "controller_task_dot",
+          "threshold": -1e-07
+        },
+        {
+          "direction": "at_least",
+          "metric": "conflict_detected",
+          "threshold": 1.0
+        },
+        {
+          "direction": "at_most",
+          "metric": "unknown_auxiliary_applied",
+          "threshold": 0.0
+        }
+      ],
+      "duration_seconds": 0.00044629200419876724,
+      "metrics": {
+        "carrier_mutation": 0.0,
+        "conflict_detected": 1.0,
+        "controller_auxiliary_norm": 0.09999999403953552,
+        "controller_task_dot": 0.0,
+        "unknown_auxiliary_applied": 0.0
+      },
+      "name": "guarded auxiliary gradient merge",
+      "passed": true
+    }
+  ],
+  "seed": 20260723,
+  "suite": "progress-conditioned-rasl-empirical-v2"
+}

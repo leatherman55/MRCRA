@@ -81,6 +81,11 @@ def test_candidate_builder_is_unique_bounded_and_keeps_behavior_action():
     assert bool((candidate.sort(-1).values[..., 1:] != candidate.sort(-1).values[..., :-1]).all())
     assert bool((log_probability[sampled] < 0).all())
     assert bool((log_probability[~sampled] == 0).all())
+    positions = torch.arange(7).view(1, 1, 7).expand_as(sampled)
+    expected = -torch.log((17 - positions).to(log_probability.dtype))
+    torch.testing.assert_close(
+        log_probability[sampled], expected[sampled]
+    )
 
 
 def test_cognitive_rasl_uses_bounded_candidates_and_firewalls_gradients():
@@ -126,6 +131,151 @@ def test_cognitive_rasl_rejects_task_loss_as_reward_and_validates_candidates():
     duplicate[..., 1] = duplicate[..., 0]
     with pytest.raises(ValueError, match="unique"):
         learner.compute_losses(replace(batch, candidate_token_ids=duplicate))
+    with pytest.raises(ValueError, match="complete contract"):
+        learner.compute_losses(replace(
+            batch,
+            behavior_cognitive_features=torch.zeros(
+                *batch.input_ids.shape,
+                model.config.cognitive.workspace_dim,
+            ),
+        ))
+
+
+def test_learning_progress_is_a_distinct_delayed_reward_authority():
+    model = MRCRALanguageModel(configuration())
+    learner = CognitiveResonantAdjointSurpriseLearner(model, rasl_configuration())
+    batch = trajectory(
+        model, reward=0.025, reward_source="learning_progress"
+    )
+    losses = learner.compute_losses(batch)
+    assert torch.isfinite(losses.critic.progress_return)
+    assert torch.isfinite(losses.critic.internal_action_value)
+    assert torch.isfinite(losses.actor.internal_policy)
+    losses.critic.total.backward()
+    assert learner.critic.progress_return.weight.grad is not None
+    assert learner.critic.internal_action_value.weight.grad is not None
+
+
+def test_signed_learning_progress_moves_the_behavior_target_in_both_directions():
+    model = MRCRALanguageModel(configuration())
+    learner = CognitiveResonantAdjointSurpriseLearner(
+        model, rasl_configuration()
+    )
+    positive = trajectory(
+        model, reward=2.0, reward_source="learning_progress"
+    )
+    negative = replace(
+        positive, rewards=torch.full_like(positive.rewards, -2.0)
+    )
+    positive_target = learner.compute_losses(
+        positive
+    ).surprise.distribution
+    negative_target = learner.compute_losses(
+        negative
+    ).surprise.distribution
+    behavior_index = (
+        positive.candidate_token_ids
+        == positive.behavior_tokens.unsqueeze(-1)
+    ).to(torch.int64).argmax(-1)
+    positive_probability = positive_target.gather(
+        -1, behavior_index.unsqueeze(-1)
+    ).squeeze(-1)
+    negative_probability = negative_target.gather(
+        -1, behavior_index.unsqueeze(-1)
+    ).squeeze(-1)
+    assert bool(
+        (
+            positive_probability[positive.loss_mask]
+            > negative_probability[positive.loss_mask]
+        ).all()
+    )
+
+
+def test_progress_conditioned_internal_policy_reaches_live_controller_actions():
+    model = MRCRALanguageModel(configuration())
+    learner = CognitiveResonantAdjointSurpriseLearner(model, rasl_configuration())
+    losses = learner.compute_losses(
+        trajectory(model, reward=0.025, reward_source="learning_progress")
+    )
+    assert bool(losses.actor_output.cognitive.action_receipts.mask.any())
+    losses.actor.internal_policy.backward()
+    gradients = [
+        parameter.grad
+        for parameter in model.cognitive.controller.parameters()
+        if parameter.grad is not None
+    ]
+    assert gradients
+    assert sum(float(value.square().sum()) for value in gradients) > 0
+
+
+def test_replay_critic_uses_preconsequence_behavior_evidence_not_later_reanalysis():
+    torch.manual_seed(306)
+    model = MRCRALanguageModel(configuration()).eval()
+    learner = CognitiveResonantAdjointSurpriseLearner(
+        model, rasl_configuration()
+    )
+    base = trajectory(
+        model, reward=0.5, reward_source="learning_progress"
+    )
+    with torch.no_grad():
+        behavior_output = model(base.input_ids)
+    cognitive = behavior_output.cognitive
+    receipts = cognitive.action_receipts
+    historical = replace(
+        base,
+        behavior_candidate_logits=behavior_output.logits.gather(
+            -1, base.candidate_token_ids
+        ),
+        behavior_cognitive_features=cognitive.cognitive_features,
+        behavior_workspace_features=cognitive.workspace_features,
+        behavior_relation_features=cognitive.relation_features,
+        behavior_relation_type_probabilities=(
+            cognitive.relation_type_probabilities
+        ),
+        behavior_internal_actions=receipts.actions,
+        behavior_internal_statuses=receipts.statuses,
+        behavior_internal_mask=receipts.mask,
+    )
+    before = learner.compute_losses(historical)
+    with torch.no_grad():
+        for parameter in model.cognitive.controller.parameters():
+            parameter.add_(2.0)
+    after = learner.compute_losses(historical)
+    torch.testing.assert_close(
+        before.critic.returns,
+        after.critic.returns,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        before.critic.total, after.critic.total, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        before.local_actions, after.local_actions, atol=0, rtol=0
+    )
+    assert historical.behavior_internal_actions is not None
+
+
+def test_progress_critic_learns_fixed_delayed_consequence_empirically():
+    torch.manual_seed(307)
+    model = MRCRALanguageModel(configuration())
+    learner = CognitiveResonantAdjointSurpriseLearner(
+        model, rasl_configuration()
+    )
+    batch = trajectory(
+        model, reward=0.5, reward_source="learning_progress"
+    )
+    optimizer = torch.optim.Adam(learner.critic.parameters(), lr=2e-3)
+    losses = []
+    for _ in range(24):
+        optimizer.zero_grad(set_to_none=True)
+        loss = learner.compute_losses(batch).critic.total
+        assert bool(torch.isfinite(loss))
+        losses.append(float(loss.detach()))
+        loss.backward()
+        optimizer.step()
+    assert losses[-1] < 0.75 * losses[0]
+    assert min(losses[-4:]) < min(losses[:4])
 
 
 def test_cognitive_rasl_checkpoint_restores_targets_calibration_guard_and_optimizers(tmp_path):

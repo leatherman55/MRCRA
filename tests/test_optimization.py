@@ -10,6 +10,7 @@ from mrrn.optimization import (
     build_scheduler,
     clip_and_report_gradients,
     learning_rate_multiplier,
+    merge_auxiliary_gradients,
 )
 
 
@@ -118,3 +119,55 @@ def test_optimizer_contracts_fail_closed():
     network.encoder.weight.requires_grad_(False)
     optimizer = build_adamw(network)
     assert all(network.encoder.weight is not parameter for group in optimizer.param_groups for parameter in group["params"])
+
+
+def test_auxiliary_gradient_merge_projects_conflicts_and_enforces_subsystem_caps():
+    class Instrumented(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.token_embedding = nn.Linear(2, 1, bias=False)
+            self.cognitive = nn.Module()
+            self.cognitive.controller = nn.Linear(2, 1, bias=False)
+
+    network = Instrumented()
+    named = dict(network.named_parameters())
+    named["token_embedding.weight"].grad = torch.tensor([[1.0, 0.0]])
+    named["cognitive.controller.weight"].grad = torch.tensor([[1.0, 0.0]])
+    auxiliary = {
+        "token_embedding.weight": torch.tensor([[-10.0, 10.0]]),
+        "cognitive.controller.weight": torch.tensor([[-10.0, 10.0]]),
+    }
+    report = merge_auxiliary_gradients(
+        network,
+        auxiliary,
+        {"carrier": 0.0, "controller": 0.1},
+    )
+    assert report.applied
+    assert set(report.conflicting_subsystems) == {"carrier", "controller"}
+    torch.testing.assert_close(
+        named["token_embedding.weight"].grad,
+        torch.tensor([[1.0, 0.0]]),
+    )
+    controller_auxiliary = (
+        named["cognitive.controller.weight"].grad - torch.tensor([[1.0, 0.0]])
+    )
+    assert controller_auxiliary.norm() <= 0.100001
+    assert float(
+        (
+            controller_auxiliary
+            * torch.tensor([[1.0, 0.0]])
+        ).sum()
+    ) >= -1e-7
+
+
+def test_auxiliary_gradient_merge_rejects_auxiliary_only_and_unknown_paths():
+    network = nn.Linear(2, 1, bias=False)
+    report = merge_auxiliary_gradients(
+        network, {"weight": torch.ones_like(network.weight)}, {"carrier": 1.0}
+    )
+    assert not report.applied
+    assert network.weight.grad is None
+    with pytest.raises(ValueError, match="unknown parameters"):
+        merge_auxiliary_gradients(
+            network, {"missing": torch.ones(1)}, {"carrier": 1.0}
+        )

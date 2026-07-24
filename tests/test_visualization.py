@@ -98,6 +98,61 @@ def test_training_series_uses_latest_monotonic_run(tmp_path):
     assert all(sample["ablation_full_ce"] is None for sample in samples)
 
 
+def test_training_series_exports_progress_rasl_and_guard_without_phase_telemetry(
+    tmp_path,
+):
+    path = tmp_path / "metrics.jsonl"
+    rows = [
+        {
+            "kind": "metrics",
+            "step": 4,
+            "metrics": {
+                "optimization/gradient_norm_before_clip": 1.0,
+                "progress/tokens_seen": 4096,
+                "pc_rasl/progress_pressure": -0.25,
+                "pc_rasl/raw_progress_pressure": -0.30,
+                "pc_rasl/progress_confidence": 0.8,
+                "pc_rasl/probe_ce_nats_per_token": 3.5,
+                "pc_rasl/expected_ce_nats_per_token": 3.4,
+                "pc_rasl/observed_ce_slope_per_million_tokens": -1.0,
+                "pc_rasl/expected_ce_slope_per_million_tokens": -2.0,
+                "pc_rasl/progress_debt_nats_per_token": 0.1,
+                "pc_rasl/critic_loss": 0.7,
+                "pc_rasl/internal_policy_loss": 0.2,
+                "pc_rasl/replay_transitions": 32,
+                "pc_rasl/replay_storage_bytes": 4096,
+                "pc_rasl/behavior_evidence_bound": 1,
+            },
+        },
+        {
+            "kind": "metrics",
+            "step": 4,
+            "metrics": {
+                "pc_rasl/guard_ce_nats_per_token": 3.6,
+                "pc_rasl/guard_best_ce_nats_per_token": 3.55,
+                "pc_rasl/guard_allows_positive_pressure": 0,
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    sample = load_training_series(path, label="pc-rasl")["samples"][0]
+    assert sample["pc_pressure"] == -0.25
+    assert sample["pc_probe_ce"] == 3.5
+    assert sample["pc_expected_ce"] == 3.4
+    assert sample["pc_observed_slope"] == -1.0
+    assert sample["pc_expected_slope"] == -2.0
+    assert sample["pc_debt"] == 0.1
+    assert sample["pc_critic_loss"] == 0.7
+    assert sample["pc_internal_policy_loss"] == 0.2
+    assert sample["pc_replay_transitions"] == 32
+    assert sample["pc_replay_storage_bytes"] == 4096
+    assert sample["pc_behavior_evidence_bound"] == 1
+    assert sample["pc_guard_ce"] == 3.6
+    assert sample["pc_guard_best_ce"] == 3.55
+    assert sample["pc_guard_allows_positive"] == 0
+    assert sample["phase_distance"] is None
+
+
 class _TokenizerStub:
     def __init__(self, name, *, revision):
         self.name, self.revision = name, revision

@@ -32,7 +32,9 @@ from .surprise import (
 )
 
 
-RewardSource = Literal["environment", "human", "verifier", "task_loss"]
+RewardSource = Literal[
+    "environment", "human", "verifier", "learning_progress", "task_loss"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +49,11 @@ class CognitiveRASLConfig:
     cognitive_transition_weight: float = 0.25
     termination_weight: float = 0.10
     reverse_credit_weight: float = 0.25
+    progress_return_weight: float = 0.25
+    internal_action_value_weight: float = 0.25
+    internal_policy_weight: float = 0.10
     replay_burn_in_steps: int = 1
+    maintain_target_actor: bool = False
 
     def __post_init__(self) -> None:
         if not 2 <= self.maximum_candidates <= 64:
@@ -55,11 +61,14 @@ class CognitiveRASLConfig:
         if min(
             self.relation_transition_weight, self.memory_utility_weight,
             self.cognitive_transition_weight, self.termination_weight,
-            self.reverse_credit_weight,
+            self.reverse_credit_weight, self.progress_return_weight,
+            self.internal_action_value_weight, self.internal_policy_weight,
         ) < 0:
             raise ValueError("cognitive RASL loss weights cannot be negative")
         if self.replay_burn_in_steps <= 0:
             raise ValueError("cognitive replay requires a positive recurrent burn-in")
+        if not isinstance(self.maintain_target_actor, bool):
+            raise ValueError("maintain_target_actor must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +89,13 @@ class CognitiveTrajectoryBatch:
     relation_transition_targets: Tensor | None = None
     memory_utility_targets: Tensor | None = None
     cognitive_transition_targets: Tensor | None = None
+    behavior_cognitive_features: Tensor | None = None
+    behavior_workspace_features: Tensor | None = None
+    behavior_relation_features: Tensor | None = None
+    behavior_relation_type_probabilities: Tensor | None = None
+    behavior_internal_actions: Tensor | None = None
+    behavior_internal_statuses: Tensor | None = None
+    behavior_internal_mask: Tensor | None = None
     reward_source: RewardSource = "environment"
     burn_in_steps: int = 0
     importance_weights: Tensor | None = None
@@ -166,8 +182,15 @@ class CognitiveTrajectoryBatch:
             self.task_targets.shape != base or self.task_targets.dtype != torch.int64
         ):
             raise ValueError("task targets must be int64 with batch/time shape")
-        if self.behavior_candidate_logits is not None and self.behavior_candidate_logits.shape != self.candidate_token_ids.shape:
-            raise ValueError("behavior candidate logits must match candidate IDs")
+        if self.behavior_candidate_logits is not None and (
+            self.behavior_candidate_logits.shape
+            != self.candidate_token_ids.shape
+            or not self.behavior_candidate_logits.is_floating_point()
+            or not bool(torch.isfinite(self.behavior_candidate_logits).all())
+        ):
+            raise ValueError(
+                "behavior candidate logits must be finite and match candidate IDs"
+            )
         if self.goal_features is not None and self.goal_features.shape != (*base, width):
             raise ValueError("goal features must be (batch,time,cognitive_width)")
         relation_shape = (*base, len(RelationFamily), 3)
@@ -177,7 +200,101 @@ class CognitiveTrajectoryBatch:
             raise ValueError("memory utility targets must match batch/time")
         if self.cognitive_transition_targets is not None and self.cognitive_transition_targets.shape != (*base, width):
             raise ValueError("cognitive transition targets must be (batch,time,cognitive_width)")
-        if self.reward_source not in {"environment", "human", "verifier", "task_loss"}:
+        evidence = (
+            self.behavior_cognitive_features,
+            self.behavior_workspace_features,
+            self.behavior_relation_features,
+            self.behavior_relation_type_probabilities,
+            self.behavior_internal_actions,
+            self.behavior_internal_statuses,
+            self.behavior_internal_mask,
+        )
+        if any(value is not None for value in evidence):
+            if not all(value is not None for value in evidence):
+                raise ValueError(
+                    "behavior cognitive evidence must be present as one complete contract"
+                )
+            for name in (
+                "behavior_cognitive_features",
+                "behavior_workspace_features",
+                "behavior_relation_features",
+            ):
+                value = getattr(self, name)
+                if value.shape != (*base, width) or not value.is_floating_point():
+                    raise ValueError(
+                        f"{name} must be floating point (batch,time,cognitive_width)"
+                    )
+            relation = self.behavior_relation_type_probabilities
+            if (
+                relation.ndim != 3
+                or relation.shape[:2] != base
+                or relation.shape[-1] != len(RelationFamily)
+                or not relation.is_floating_point()
+            ):
+                raise ValueError(
+                    "behavior relation probabilities have an invalid shape"
+                )
+            receipt_shape = self.behavior_internal_actions.shape
+            if (
+                len(receipt_shape) != 3
+                or receipt_shape[:2] != base
+                or self.behavior_internal_statuses.shape != receipt_shape
+                or self.behavior_internal_mask.shape != receipt_shape
+                or self.behavior_internal_actions.dtype != torch.int64
+                or self.behavior_internal_statuses.dtype != torch.int64
+                or self.behavior_internal_mask.dtype != torch.bool
+            ):
+                raise ValueError(
+                    "behavior internal receipts must align as (batch,time,steps)"
+                )
+            for value in evidence[:4]:
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError("behavior cognitive evidence must be finite")
+            valid_relation = relation[self.mask]
+            relation_mass = valid_relation.sum(-1)
+            normalized_or_empty = torch.isclose(
+                relation_mass,
+                torch.ones_like(relation_mass),
+                atol=1e-4,
+                rtol=1e-4,
+            ) | torch.isclose(
+                relation_mass,
+                torch.zeros_like(relation_mass),
+                atol=1e-6,
+                rtol=0,
+            )
+            if (
+                bool((valid_relation < 0).any())
+                or not bool(normalized_or_empty.all())
+            ):
+                raise ValueError(
+                    "behavior relation probabilities must be normalized or empty"
+                )
+            active_actions = self.behavior_internal_actions[
+                self.behavior_internal_mask
+            ]
+            active_statuses = self.behavior_internal_statuses[
+                self.behavior_internal_mask
+            ]
+            if (
+                active_actions.numel()
+                and (
+                    int(active_actions.min()) < 0
+                    or int(active_actions.max()) >= len(InternalAction)
+                )
+            ) or (
+                active_statuses.numel()
+                and (
+                    int(active_statuses.min()) < 0
+                    or int(active_statuses.max()) >= 9
+                )
+            ):
+                raise ValueError(
+                    "behavior internal receipts contain invalid action/status IDs"
+                )
+        if self.reward_source not in {
+            "environment", "human", "verifier", "learning_progress", "task_loss"
+        }:
             raise ValueError("unknown cognitive trajectory reward source")
         if self.importance_weights is not None and (
             self.importance_weights.shape != (base[0],)
@@ -192,17 +309,14 @@ class CognitiveTrajectoryBatch:
         def move(value):
             return None if value is None else value.detach().cpu().clone()
 
-        return CognitiveTrajectoryBatch(
-            move(self.input_ids), move(self.behavior_tokens),
-            move(self.candidate_token_ids),
-            move(self.candidate_sampling_log_probabilities),
-            move(self.sampled_candidate_mask), move(self.rewards), move(self.dones),
-            move(self.mask), move(self.segment_ids), move(self.boundary_classes),
-            move(self.task_targets), move(self.behavior_candidate_logits),
-            move(self.goal_features), move(self.relation_transition_targets),
-            move(self.memory_utility_targets), move(self.cognitive_transition_targets),
-            self.reward_source, self.burn_in_steps, move(self.importance_weights),
-        )
+        return CognitiveTrajectoryBatch(**{
+            name: (
+                getattr(self, name)
+                if name in {"reward_source", "burn_in_steps"}
+                else move(getattr(self, name))
+            )
+            for name in self.__dataclass_fields__
+        })
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +342,10 @@ class CognitiveTrajectoryReplay:
         "rewards", "dones", "mask", "segment_ids", "boundary_classes",
         "task_targets", "behavior_candidate_logits", "goal_features",
         "relation_transition_targets", "memory_utility_targets",
-        "cognitive_transition_targets",
+        "cognitive_transition_targets", "behavior_cognitive_features",
+        "behavior_workspace_features", "behavior_relation_features",
+        "behavior_relation_type_probabilities", "behavior_internal_actions",
+        "behavior_internal_statuses", "behavior_internal_mask",
     )
 
     def __init__(
@@ -258,6 +375,18 @@ class CognitiveTrajectoryReplay:
         return self._transitions
 
     @property
+    def storage_bytes(self) -> int:
+        """Exact tensor payload retained by the bounded CPU replay."""
+
+        total = 0
+        for item in self._items:
+            for name in self._tensor_names:
+                value = getattr(item.trajectory, name)
+                if value is not None:
+                    total += value.numel() * value.element_size()
+        return total
+
+    @property
     def priorities(self) -> tuple[float, ...]:
         return tuple(item.priority for item in self._items)
 
@@ -267,7 +396,10 @@ class CognitiveTrajectoryReplay:
             "segment_ids", "boundary_classes", "task_targets",
             "behavior_candidate_logits", "goal_features",
             "relation_transition_targets", "memory_utility_targets",
-            "cognitive_transition_targets",
+            "cognitive_transition_targets", "behavior_cognitive_features",
+            "behavior_workspace_features", "behavior_relation_features",
+            "behavior_relation_type_probabilities", "behavior_internal_actions",
+            "behavior_internal_statuses", "behavior_internal_mask",
         ))
 
     def add(
@@ -319,6 +451,15 @@ class CognitiveTrajectoryReplay:
                 relation_transition_targets=part("relation_transition_targets"),
                 memory_utility_targets=part("memory_utility_targets"),
                 cognitive_transition_targets=part("cognitive_transition_targets"),
+                behavior_cognitive_features=part("behavior_cognitive_features"),
+                behavior_workspace_features=part("behavior_workspace_features"),
+                behavior_relation_features=part("behavior_relation_features"),
+                behavior_relation_type_probabilities=part(
+                    "behavior_relation_type_probabilities"
+                ),
+                behavior_internal_actions=part("behavior_internal_actions"),
+                behavior_internal_statuses=part("behavior_internal_statuses"),
+                behavior_internal_mask=part("behavior_internal_mask"),
                 reward_source=cpu.reward_source, burn_in_steps=self.burn_in_steps,
             )
             valid = batch.loss_mask[row]
@@ -384,6 +525,15 @@ class CognitiveTrajectoryReplay:
             relation_transition_targets=padded("relation_transition_targets"),
             memory_utility_targets=padded("memory_utility_targets"),
             cognitive_transition_targets=padded("cognitive_transition_targets"),
+            behavior_cognitive_features=padded("behavior_cognitive_features"),
+            behavior_workspace_features=padded("behavior_workspace_features"),
+            behavior_relation_features=padded("behavior_relation_features"),
+            behavior_relation_type_probabilities=padded(
+                "behavior_relation_type_probabilities"
+            ),
+            behavior_internal_actions=padded("behavior_internal_actions", -1),
+            behavior_internal_statuses=padded("behavior_internal_statuses"),
+            behavior_internal_mask=padded("behavior_internal_mask", False),
             reward_source=self._reward_source or "environment",
             burn_in_steps=self.burn_in_steps,
         )
@@ -501,31 +651,45 @@ def build_language_candidate_set(
     for row in range(batch):
         for time in range(length):
             chosen: list[int] = []
+            chosen_set: set[int] = set()
             behavior = int(behavior_tokens[row, time])
             if not 0 <= behavior < vocabulary:
                 raise ValueError("behavior token lies outside vocabulary")
             chosen.append(behavior)
+            chosen_set.add(behavior)
             if verifier_alternatives is not None:
                 for token in verifier_alternatives[row, time].tolist():
-                    if 0 <= int(token) < vocabulary and int(token) not in chosen:
-                        chosen.append(int(token))
+                    token = int(token)
+                    if 0 <= token < vocabulary and token not in chosen_set:
+                        chosen.append(token)
+                        chosen_set.add(token)
                         if len(chosen) == candidate_count:
                             break
             if len(chosen) < candidate_count:
                 for token in top[row, time].tolist():
-                    if int(token) not in chosen:
-                        chosen.append(int(token))
+                    token = int(token)
+                    if token not in chosen_set:
+                        chosen.append(token)
+                        chosen_set.add(token)
                         if len(chosen) == candidate_count:
                             break
             while len(chosen) < candidate_count:
-                available = torch.ones(vocabulary, dtype=torch.bool, device=target_logits.device)
-                available[torch.tensor(chosen, device=target_logits.device)] = False
-                remaining = int(available.sum())
-                draw = int(torch.multinomial(
-                    available.to(target_logits.dtype), 1, generator=generator
-                ).item())
+                # Rejection from the full uniform distribution, conditioned on
+                # accepting an unchosen token, is exactly uniform over the
+                # remaining set.  This avoids allocating and multinomial-
+                # scanning a vocabulary-sized mask for every negative draw.
+                draw = int(torch.randint(
+                    vocabulary,
+                    (),
+                    generator=generator,
+                    device=target_logits.device,
+                ))
+                if draw in chosen_set:
+                    continue
+                remaining = vocabulary - len(chosen)
                 position = len(chosen)
                 chosen.append(draw)
+                chosen_set.add(draw)
                 sampled[row, time, position] = True
                 log_probability[row, time, position] = -log(remaining)
             candidates[row, time] = torch.tensor(chosen, device=target_logits.device)
@@ -547,6 +711,10 @@ class CognitiveCriticOutput:
     epistemic_uncertainty: Tensor
     aleatoric_uncertainty: Tensor
     mask: Tensor
+    progress_return: Tensor
+    internal_action_values: Tensor
+    internal_actions: Tensor
+    internal_action_mask: Tensor
 
     def quantiles_for(self, actions: Tensor) -> Tensor:
         if actions.shape != self.mask.shape or actions.dtype != torch.int64:
@@ -607,23 +775,58 @@ class CognitiveAdjointCritic(nn.Module):
             self.width + core.action_rank,
             len(core.horizons) * cognitive_width,
         )
+        self.progress_return = nn.Linear(self.width, len(core.horizons))
+        self.internal_action_value = nn.Linear(
+            self.width, len(InternalAction)
+        )
 
     def _receipt_summary(self, receipts: CognitiveActionReceipts) -> Tensor:
-        actions = receipts.actions.clamp_min(-1) + 1
-        statuses = receipts.statuses.clamp(0, self.receipt_status.num_embeddings - 1)
+        return self._receipt_tensor_summary(
+            receipts.actions, receipts.statuses, receipts.mask
+        )
+
+    def _receipt_tensor_summary(
+        self, actions: Tensor, statuses: Tensor, mask: Tensor,
+    ) -> Tensor:
+        actions = actions.clamp_min(-1) + 1
+        statuses = statuses.clamp(0, self.receipt_status.num_embeddings - 1)
         value = self.receipt_action(actions) + self.receipt_status(statuses)
-        weight = receipts.mask.to(value.dtype)
+        weight = mask.to(value.dtype)
         return (value * weight.unsqueeze(-1)).sum(2) / weight.sum(2, keepdim=True).clamp_min(1)
 
     def _causal_features(
         self, output: MRCRAOutput, goal_features: Tensor, mask: Tensor,
         boundary_classes: Tensor | None,
+        *,
+        behavior_cognitive_features: Tensor | None = None,
+        behavior_workspace_features: Tensor | None = None,
+        behavior_relation_features: Tensor | None = None,
+        behavior_relation_type_probabilities: Tensor | None = None,
+        behavior_internal_actions: Tensor | None = None,
+        behavior_internal_statuses: Tensor | None = None,
+        behavior_internal_mask: Tensor | None = None,
     ) -> Tensor:
-        receipt = self._receipt_summary(output.action_receipts).detach()
+        if behavior_cognitive_features is None:
+            cognitive_features = output.cognitive_features
+            workspace_features = output.workspace_features
+            relation_features = output.relation_features
+            relation_probabilities = output.relation_type_probabilities
+            receipt = self._receipt_summary(output.action_receipts)
+        else:
+            cognitive_features = behavior_cognitive_features
+            workspace_features = behavior_workspace_features
+            relation_features = behavior_relation_features
+            relation_probabilities = behavior_relation_type_probabilities
+            receipt = self._receipt_tensor_summary(
+                behavior_internal_actions,
+                behavior_internal_statuses,
+                behavior_internal_mask,
+            )
         features = F.silu(self.input(torch.cat((
-            output.cognitive_features.detach(), output.workspace_features.detach(),
-            output.relation_features.detach(), goal_features.detach(),
-            self.relation_types(output.relation_type_probabilities.detach()), receipt,
+            cognitive_features.detach(), workspace_features.detach(),
+            relation_features.detach(), goal_features.detach(),
+            self.relation_types(relation_probabilities.detach()),
+            receipt.detach(),
         ), -1)))
         batch, length = mask.shape
         hidden = features.new_zeros(batch, self.width)
@@ -670,6 +873,13 @@ class CognitiveAdjointCritic(nn.Module):
         local_actions: Tensor, rewards: Tensor, dones: Tensor, mask: Tensor,
         *, goal_features: Tensor | None = None,
         boundary_classes: Tensor | None = None,
+        behavior_cognitive_features: Tensor | None = None,
+        behavior_workspace_features: Tensor | None = None,
+        behavior_relation_features: Tensor | None = None,
+        behavior_relation_type_probabilities: Tensor | None = None,
+        behavior_internal_actions: Tensor | None = None,
+        behavior_internal_statuses: Tensor | None = None,
+        behavior_internal_mask: Tensor | None = None,
     ) -> CognitiveCriticOutput:
         if candidate_embeddings.ndim != 4 or candidate_embeddings.shape[:2] != mask.shape:
             raise ValueError("candidate embeddings must be (batch,time,candidates,width)")
@@ -683,7 +893,34 @@ class CognitiveAdjointCritic(nn.Module):
             candidate_embeddings.new_zeros(*mask.shape, self.cognitive_width)
             if goal_features is None else goal_features
         )
-        forward = self._causal_features(output, goal_features, mask, boundary_classes)
+        behavior_values = (
+            behavior_cognitive_features,
+            behavior_workspace_features,
+            behavior_relation_features,
+            behavior_relation_type_probabilities,
+            behavior_internal_actions,
+            behavior_internal_statuses,
+            behavior_internal_mask,
+        )
+        if any(value is not None for value in behavior_values) and not all(
+            value is not None for value in behavior_values
+        ):
+            raise ValueError("critic behavior evidence must be complete")
+        forward = self._causal_features(
+            output,
+            goal_features,
+            mask,
+            boundary_classes,
+            behavior_cognitive_features=behavior_cognitive_features,
+            behavior_workspace_features=behavior_workspace_features,
+            behavior_relation_features=behavior_relation_features,
+            behavior_relation_type_probabilities=(
+                behavior_relation_type_probabilities
+            ),
+            behavior_internal_actions=behavior_internal_actions,
+            behavior_internal_statuses=behavior_internal_statuses,
+            behavior_internal_mask=behavior_internal_mask,
+        )
         quantiles, action_values, epistemic, aleatoric, keys = self.value_distribution(
             forward, candidate_embeddings
         )
@@ -731,10 +968,24 @@ class CognitiveAdjointCritic(nn.Module):
         adjoint_credit = torch.einsum(
             "btr,btcr->btc", self.adjoint_query(adjoint), keys
         ) / sqrt(keys.shape[-1])
+        progress_return = self.progress_return(forward)
+        internal_action_values = self.internal_action_value(forward)
+        internal_actions = (
+            output.action_receipts.actions
+            if behavior_internal_actions is None
+            else behavior_internal_actions
+        )
+        internal_mask = (
+            output.action_receipts.mask
+            if behavior_internal_mask is None
+            else behavior_internal_mask
+        )
         return CognitiveCriticOutput(
             quantiles, action_values, reward, termination, relation,
             memory_utility, cognitive, adjoint_credit, forward, adjoint,
-            epistemic, aleatoric, mask,
+            epistemic, aleatoric, mask, progress_return,
+            internal_action_values, internal_actions.detach(),
+            internal_mask.detach(),
         )
 
 
@@ -750,6 +1001,8 @@ class CognitiveCriticLosses:
     memory_utility: Tensor
     cognitive_transition: Tensor
     reverse_credit: Tensor
+    progress_return: Tensor
+    internal_action_value: Tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,6 +1011,7 @@ class CognitiveActorLosses:
     task: Tensor
     functional_cross_entropy: Tensor
     trust_region: Tensor
+    internal_policy: Tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -854,6 +1108,34 @@ def cognitive_critic_losses(
         (credit - credit_target.detach()).square(), loss_mask,
         batch.importance_weights,
     )
+    progress = _weighted_mean(
+        (output.progress_return - returns.detach()).square(),
+        loss_mask, batch.importance_weights,
+    )
+    internal_mask = (
+        output.internal_action_mask
+        & loss_mask.unsqueeze(-1)
+        & (output.internal_actions >= 0)
+        & (output.internal_actions < len(InternalAction))
+    )
+    safe_internal = output.internal_actions.clamp(0, len(InternalAction) - 1)
+    expanded_internal_values = output.internal_action_values.unsqueeze(
+        -2
+    ).expand(
+        *output.internal_actions.shape,
+        output.internal_action_values.shape[-1],
+    )
+    selected_internal = expanded_internal_values.gather(
+        -1, safe_internal.unsqueeze(-1)
+    ).squeeze(-1)
+    internal_target = returns[..., -1].detach().unsqueeze(-1).expand_as(
+        selected_internal
+    )
+    internal_value = _weighted_mean(
+        (selected_internal - internal_target).square(),
+        internal_mask,
+        batch.importance_weights,
+    )
     total = (
         core.critic_return_weight * distribution
         + core.critic_reward_weight * reward
@@ -862,10 +1144,12 @@ def cognitive_critic_losses(
         + config.memory_utility_weight * memory
         + config.cognitive_transition_weight * cognitive
         + config.reverse_credit_weight * reverse
+        + config.progress_return_weight * progress
+        + config.internal_action_value_weight * internal_value
     )
     return CognitiveCriticLosses(
         total, returns, return_mask, distribution, reward, termination,
-        relation, memory, cognitive, reverse,
+        relation, memory, cognitive, reverse, progress, internal_value,
     )
 
 
@@ -874,6 +1158,8 @@ def cognitive_actor_losses(
     target_candidate_logits: Tensor, surprise: FunctionalSurpriseTarget,
     batch: CognitiveTrajectoryBatch, config: CognitiveRASLConfig,
     *, task_loss: Tensor | None = None,
+    actor_output: MRCRAOutput | None = None,
+    critic_output: CognitiveCriticOutput | None = None,
 ) -> CognitiveActorLosses:
     loss_mask = batch.loss_mask
     if task_loss is not None and batch.task_targets is not None:
@@ -899,12 +1185,46 @@ def cognitive_actor_losses(
         (target_policy * (target_policy.clamp_min(1e-8).log() - log_policy)).sum(-1),
         loss_mask, batch.importance_weights,
     )
+    internal_policy = actor_logits.sum() * 0
+    if actor_output is not None and critic_output is not None:
+        receipts = actor_output.action_receipts
+        if receipts.action_logits.shape[:-1] != critic_output.internal_actions.shape:
+            raise ValueError("internal action logits do not align to critic receipts")
+        valid_internal = (
+            critic_output.internal_action_mask
+            & loss_mask.unsqueeze(-1)
+            & (critic_output.internal_actions >= 0)
+            & (critic_output.internal_actions < len(InternalAction))
+        )
+        safe_internal = critic_output.internal_actions.clamp(
+            0, len(InternalAction) - 1
+        )
+        log_internal = F.log_softmax(receipts.action_logits, -1)
+        nll = -log_internal.gather(
+            -1, safe_internal.unsqueeze(-1)
+        ).squeeze(-1)
+        values = critic_output.internal_action_values.detach()
+        policy = torch.softmax(receipts.action_logits.detach(), -1)
+        baseline = (policy * values.unsqueeze(-2)).sum(-1)
+        chosen = values.unsqueeze(-2).expand(
+            *safe_internal.shape, values.shape[-1]
+        ).gather(-1, safe_internal.unsqueeze(-1)).squeeze(-1)
+        advantage = (chosen - baseline).clamp(
+            -config.core.maximum_surprise,
+            config.core.maximum_surprise,
+        )
+        internal_policy = _weighted_mean(
+            advantage.detach() * nll,
+            valid_internal,
+            batch.importance_weights,
+        )
     total = (
         config.core.task_weight * task
         + config.core.surprise_cross_entropy_weight * fsce
         + config.core.trust_region_weight * trust
+        + config.internal_policy_weight * internal_policy
     )
-    return CognitiveActorLosses(total, task, fsce, trust)
+    return CognitiveActorLosses(total, task, fsce, trust, internal_policy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -950,7 +1270,10 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
         if critic is None:
             raise ValueError("minimum cognitive critic exceeds configured actor fraction")
         self.critic = critic
-        self.target_actor = deepcopy(actor).requires_grad_(False).eval()
+        self.target_actor = (
+            deepcopy(actor).requires_grad_(False).eval()
+            if config.maintain_target_actor else None
+        )
         self.target_critic = deepcopy(critic).requires_grad_(False).eval()
         self.calibrator = FunctionalSurpriseCalibrator(
             len(config.core.horizons), 1, decay=config.core.calibration_decay
@@ -966,7 +1289,8 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.target_actor.eval()
+        if self.target_actor is not None:
+            self.target_actor.eval()
         self.target_critic.eval()
         return self
 
@@ -998,7 +1322,7 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
                 if name in target_buffers:
                     target_buffers[name].copy_(buffer)
 
-        if actor_updated:
+        if actor_updated and self.target_actor is not None:
             update(self.target_actor, self.actor)
         update(self.target_critic, self.critic)
 
@@ -1042,6 +1366,15 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
             batch.rewards, batch.dones, batch.mask,
             goal_features=batch.goal_features,
             boundary_classes=batch.boundary_classes,
+            behavior_cognitive_features=batch.behavior_cognitive_features,
+            behavior_workspace_features=batch.behavior_workspace_features,
+            behavior_relation_features=batch.behavior_relation_features,
+            behavior_relation_type_probabilities=(
+                batch.behavior_relation_type_probabilities
+            ),
+            behavior_internal_actions=batch.behavior_internal_actions,
+            behavior_internal_statuses=batch.behavior_internal_statuses,
+            behavior_internal_mask=batch.behavior_internal_mask,
         )
         with torch.no_grad():
             target_quantiles, target_action_values, _, _, _ = self.target_critic.value_distribution(
@@ -1055,9 +1388,14 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
             critic_output, batch, local_actions, target_values, self.config
         )
         predicted_cognitive = critic_output.cognitive_transition[..., 0, :]
+        cognitive_evidence = (
+            actor_output.cognitive.cognitive_features
+            if batch.behavior_cognitive_features is None
+            else batch.behavior_cognitive_features
+        )
         actual_next = torch.cat((
-            actor_output.cognitive.cognitive_features[:, 1:].detach(),
-            actor_output.cognitive.cognitive_features[:, -1:].detach(),
+            cognitive_evidence[:, 1:].detach(),
+            cognitive_evidence[:, -1:].detach(),
         ), 1)
         phase_error = (
             predicted_cognitive.detach() - actual_next
@@ -1071,6 +1409,8 @@ class CognitiveResonantAdjointSurpriseLearner(nn.Module):
         actor_losses = cognitive_actor_losses(
             actor_logits, corrected, target_candidate_logits, surprise,
             batch, self.config, task_loss=task_loss,
+            actor_output=actor_output.cognitive,
+            critic_output=critic_output,
         )
         return CognitiveRASLLosses(
             actor_losses, critic_losses, surprise, actor_output,
@@ -1233,7 +1573,8 @@ def load_cognitive_rasl_checkpoint(
         torch.mps.set_rng_state(payload["mps_rng"].cpu())
     if payload.get("cuda_rng") is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(payload["cuda_rng"])
-    learner.target_actor.eval()
+    if learner.target_actor is not None:
+        learner.target_actor.eval()
     learner.target_critic.eval()
     step = int(payload.get("step", -1))
     if step < 0:

@@ -9,7 +9,7 @@
     {
       "direction": "at_most",
       "measurement": "median ABBA-paired single-thread CPU-time overhead with event path dormant",
-      "metric": 0.11818849273839138,
+      "metric": -0.16259271438490153,
       "name": "dormant_cognitive_overhead",
       "passed": true,
       "repeats": 41,
@@ -19,7 +19,7 @@
     {
       "direction": "at_most",
       "measurement": "median ABBA-paired single-thread CPU-time overhead at matched capacities",
-      "metric": 5.669573579873699,
+      "metric": 7.021637044524565,
       "name": "ordinary_event_cycle_overhead",
       "passed": true,
       "repeats": 41,
@@ -59,7 +59,7 @@
     {
       "direction": "at_least",
       "measurement": "median alternating single-thread CPU time for vectorized prefill versus identical token transitions",
-      "metric": 6.561875215442462,
+      "metric": 6.605773517610181,
       "name": "complete_state_prefill_speedup",
       "passed": true,
       "repeats": 7,
@@ -70,13 +70,13 @@
   "suite": "mrcra-relative-performance-budgets-v3",
   "telemetry": {
     "checkpoint_embeds_model_weights": false,
-    "complete_state_prefill_median_ms": 8.703000000000571,
-    "cycle_baseline_median_ms": 4.290375000000013,
-    "cycle_integrated_median_ms": 4.571343749999956,
-    "cycle_paired_overhead_mad_percent": 2.281018054005113,
-    "dormant_baseline_median_ms": 1.7739375000000028,
-    "dormant_integrated_median_ms": 1.754249999999999,
-    "dormant_paired_overhead_mad_percent": 1.9189763374202307,
+    "complete_state_prefill_median_ms": 8.97199999999998,
+    "cycle_baseline_median_ms": 4.253125000000024,
+    "cycle_integrated_median_ms": 4.536875000000052,
+    "cycle_paired_overhead_mad_percent": 2.6796804276856045,
+    "dormant_baseline_median_ms": 1.7649062500000035,
+    "dormant_integrated_median_ms": 1.7776874999999999,
+    "dormant_paired_overhead_mad_percent": 2.053186515538785,
     "latency_arm_observations_per_repeat": 2,
     "latency_calls_per_arm_observation": 16,
     "latency_clock": "process_time",
@@ -90,7 +90,7 @@
     "planning_hypothesis_top_k": 4,
     "runtime_declared_tensor_bytes": 21524,
     "short_context_allocated_node_slots": 4,
-    "tokenwise_transition_median_ms": 57.10799999999949
+    "tokenwise_transition_median_ms": 59.266999999998404
   },
   "torch_threads": 1
 }

@@ -55,13 +55,19 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
             if record.get("kind") != "metrics" or not isinstance(metrics, dict):
                 continue
             step = int(record["step"])
-            if any(name.startswith("eval/phase_ablation/") for name in metrics):
+            if (
+                any(name.startswith("eval/phase_ablation/") for name in metrics)
+                or "pc_rasl/guard_ce_nats_per_token" in metrics
+            ):
                 evaluation_rows.append((line_index, step, {
                     "ablation_full_ce": _finite(metrics.get("eval/phase_ablation/full_ce_nats_per_token")),
                     "ablation_soft_ce": _finite(metrics.get("eval/phase_ablation/soft_only_ce_nats_per_token")),
                     "ablation_off_ce": _finite(metrics.get("eval/phase_ablation/cognition_off_ce_nats_per_token")),
                     "hard_ce_gain": _finite(metrics.get("eval/phase_ablation/hard_structure_ce_gain")),
                     "soft_ce_gain": _finite(metrics.get("eval/phase_ablation/soft_bridge_ce_gain")),
+                    "pc_guard_ce": _finite(metrics.get("pc_rasl/guard_ce_nats_per_token")),
+                    "pc_guard_best_ce": _finite(metrics.get("pc_rasl/guard_best_ce_nats_per_token")),
+                    "pc_guard_allows_positive": _finite(metrics.get("pc_rasl/guard_allows_positive_pressure")),
                 }))
             pre = metrics.get("optimization/gradient_norm_before_clip")
             if pre is None:
@@ -84,6 +90,9 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
                     "ce": _finite(metrics.get("train/cross_entropy_nats_per_token")),
                     "ece": _finite(metrics.get("train/effective_cross_entropy_nats_per_byte")),
                     "tokens_per_second": _finite(metrics.get("performance/tokens_per_second")),
+                    "step_seconds": _finite(metrics.get("performance/step_seconds")),
+                    "pc_update_seconds": _finite(metrics.get("performance/pc_rasl_seconds")),
+                    "pc_capture_seconds": _finite(metrics.get("performance/pc_rasl_capture_seconds")),
                     "proposal_mean": _finite(metrics.get("architecture/event_proposal_probability_mean")),
                     "proposal_median": _finite(metrics.get("architecture/event_proposal_probability_median")),
                     "proposal_p90": _finite(metrics.get("architecture/event_proposal_probability_p90")),
@@ -112,6 +121,36 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
                     "ablation_off_ce": None,
                     "hard_ce_gain": None,
                     "soft_ce_gain": None,
+                    "pc_pressure": _finite(metrics.get("pc_rasl/progress_pressure")),
+                    "pc_raw_pressure": _finite(metrics.get("pc_rasl/raw_progress_pressure")),
+                    "pc_confidence": _finite(metrics.get("pc_rasl/progress_confidence")),
+                    "pc_probe_ce": _finite(metrics.get("pc_rasl/probe_ce_nats_per_token")),
+                    "pc_probe_seconds": _finite(metrics.get("pc_rasl/probe_seconds")),
+                    "pc_expected_ce": _finite(metrics.get("pc_rasl/expected_ce_nats_per_token")),
+                    "pc_observed_slope": _finite(metrics.get("pc_rasl/observed_ce_slope_per_million_tokens")),
+                    "pc_expected_slope": _finite(metrics.get("pc_rasl/expected_ce_slope_per_million_tokens")),
+                    "pc_slope_advantage_z": _finite(metrics.get("pc_rasl/slope_advantage_z")),
+                    "pc_debt": _finite(metrics.get("pc_rasl/progress_debt_nats_per_token")),
+                    "pc_debt_z": _finite(metrics.get("pc_rasl/debt_z")),
+                    "pc_baseline_ready": _finite(metrics.get("pc_rasl/baseline_ready")),
+                    "pc_warmup_complete": _finite(metrics.get("pc_rasl/warmup_complete")),
+                    "pc_guard_allows_positive": _finite(metrics.get("pc_rasl/guard_allows_positive_pressure")),
+                    "pc_guard_ce": None,
+                    "pc_guard_best_ce": None,
+                    "pc_critic_loss": _finite(metrics.get("pc_rasl/critic_loss")),
+                    "pc_fsce": _finite(metrics.get("pc_rasl/functional_cross_entropy")),
+                    "pc_internal_policy_loss": _finite(metrics.get("pc_rasl/internal_policy_loss")),
+                    "pc_progress_return_loss": _finite(metrics.get("pc_rasl/progress_return_loss")),
+                    "pc_internal_value_loss": _finite(metrics.get("pc_rasl/internal_action_value_loss")),
+                    "pc_aux_gradient_before": _finite(metrics.get("pc_rasl/actor_auxiliary_gradient_norm_before")),
+                    "pc_aux_gradient_after": _finite(metrics.get("pc_rasl/actor_auxiliary_gradient_norm_after")),
+                    "pc_actor_ready": _finite(metrics.get("pc_rasl/actor_auxiliary_ready")),
+                    "pc_performance_guard_allows": _finite(metrics.get("pc_rasl/performance_guard_allows_actor")),
+                    "pc_performance_guard_rejections": _finite(metrics.get("pc_rasl/performance_guard_rejections")),
+                    "pc_actor_warmup_ready": _finite(metrics.get("pc_rasl/actor_warmup_ready")),
+                    "pc_replay_transitions": _finite(metrics.get("pc_rasl/replay_transitions")),
+                    "pc_replay_storage_bytes": _finite(metrics.get("pc_rasl/replay_storage_bytes")),
+                    "pc_behavior_evidence_bound": _finite(metrics.get("pc_rasl/behavior_evidence_bound")),
                 }
             )
     if not samples:
@@ -125,10 +164,12 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
             latest_start = index
     samples = samples[latest_start:]
     latest_line = int(samples[0]["_line"])
-    evaluation_by_step = {
-        step: values for line_index, step, values in evaluation_rows
-        if line_index >= latest_line
-    }
+    evaluation_by_step: dict[int, dict[str, float | None]] = {}
+    for line_index, step, values in evaluation_rows:
+        if line_index < latest_line:
+            continue
+        retained = {name: value for name, value in values.items() if value is not None}
+        evaluation_by_step.setdefault(step, {}).update(retained)
     for sample in samples:
         sample.update(evaluation_by_step.get(int(sample["step"]), {}))
         sample.pop("_line")

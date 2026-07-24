@@ -31,6 +31,7 @@ def test_packaged_frontend_has_spectral_and_mrcra_cognitive_views(tmp_path):
     assert (source / "mrrn-spectral-view.html").is_file()
     spectral_view = (source / "mrrn-spectral-view.html").read_text(encoding="utf-8")
     assert "Cognitive Atlas" in spectral_view
+    assert "Learning Progress" in spectral_view
     assert "Phase Transition" in spectral_view
     assert "hyperedge-hub" in spectral_view
     assert "cognition/active_hyperrelations" in spectral_view
@@ -38,6 +39,9 @@ def test_packaged_frontend_has_spectral_and_mrcra_cognitive_views(tmp_path):
     assert "phase_distance" in spectral_view
     assert "hard_structure_ce_gain" not in spectral_view
     assert "hard_ce_gain" in spectral_view
+    assert "pc_pressure" in spectral_view
+    assert "pc_observed_slope" in spectral_view
+    assert "phase-transition telemetry is not an input" in spectral_view
     javascript = "".join(path.read_text(encoding="utf-8") for path in (source / "assets").glob("*.js"))
     assert "Spectral Network" in javascript
     assert "MRCRA Cognition" in javascript

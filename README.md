@@ -369,52 +369,135 @@ unrestricted autonomous weight modification.
 
 ```mermaid
 flowchart LR
-    A["MRCRA actor trajectory"] --> B["Detached cognitive state<br/>+ action receipts"]
-    B --> C["Bounded adjoint critic"]
-    D["Environment / human / verifier<br/>consequences"] --> C
-    C --> E["Returns, uncertainty,<br/>transition and reverse-credit estimates"]
-    E --> F["Functional-surprise<br/>target distribution"]
-    F --> G["Task loss + FSCE<br/>+ trust region"]
-    G --> H{"Performance guard"}
-    H -- "accepted" --> I["Actor update"]
-    H -- "vetoed" --> J["Discard actor update"]
-    C --> K["Critic update"]
-    I --> L["EMA target actor / critic"]
-    K --> L
+    A["Ordinary FineWeb update"] --> B["Exact task gradient"]
+    A --> C["Bounded single-document<br/>cognitive trajectory"]
+    D["Disjoint progress probe<br/>exact CE over valid tokens"] --> E["Causal learning-progress authority"]
+    E --> F["Signed delayed consequence<br/>for the preceding interval"]
+    C --> G["Prioritized recurrent replay"]
+    F --> G
+    G --> H["Detached bounded-candidate<br/>adjoint critic"]
+    H --> I["Functional-surprise target<br/>+ internal-action values"]
+    I --> J["Actor auxiliary gradient"]
+    K["Independent held-out guard"] --> L{"Positive pressure and<br/>performance veto"}
+    J --> L
+    L --> M["Conflict projection<br/>+ subsystem-relative caps"]
+    B --> M
+    M --> N["One governed actor update"]
+    H --> O["Critic update + EMA target critic"]
 ```
 
-The learning path has several important safeguards:
+The canonical FineWeb trainer enables **Progress-Conditioned RASL (PC-RASL)**
+by default. This is deliberately not described as ordinary environment
+reinforcement learning. It is an optimization-level meta-consequence: the
+system receives positive pressure when held-out CE is falling faster than its
+own causal learning curve, negative pressure when learning plateaus or
+regresses, and no positive pressure before the evidence is mature.
 
-1. **Bounded actions.** For language, the critic evaluates at most 64 explicit
-   candidates per position: the behavior token, high-policy candidates,
-   verifier alternatives when available, and sampled negatives with recorded
-   proposal probabilities. It never constructs a
+Let \(t_i\) be the cumulative number of valid target tokens and \(C_i\) the
+exact CE in nats per token on a fixed, disjoint progress probe. A Huber-robust
+line over the recent window gives the active slope \(m_{\text{fast}}\). Older
+observations, separated from the present by a configurable lag, fit the shifted
+power-law baseline
+
+$$
+\widehat C(t)=C_\infty+A(t+t_0)^{-b},
+\qquad
+\widehat m(t)=-bA(t+t_0)^{-b-1}.
+$$
+
+The authority compares both rate and level:
+
+$$
+z_s=\frac{\widehat m-m_{\text{fast}}}{\sigma_m},
+\qquad
+d=C-\widehat C,
+\qquad
+z_d=-\frac{d}{\sigma_C},
+$$
+
+$$
+u=\frac{w_sz_s+w_dz_d}{w_s+w_d},
+\qquad
+p=p_{\max}\,\operatorname{tanh}
+\left(\frac{\operatorname{deadband}(u)}{\tau}\right)c.
+$$
+
+Here \(d\) is **progress debt** and \(c\in[0,1]\) is evidence confidence. Debt
+prevents a regress-then-drop strategy from earning positive pressure merely
+because its latest local slope looks good. Positive pressure is also
+categorically forbidden when the observed CE slope is nonnegative. A separate
+held-out guard can veto positive pressure after persistent regression and
+requires sustained recovery before re-enabling it.
+
+This signal is not the current training token's negative loss. It is computed
+only after an interval from a fixed held-out stream, then assigned as a bounded
+delayed consequence to trajectories retained from that earlier interval:
+
+$$
+r^{\text{progress}}_t=\lambda_p\,p_i,
+\qquad t\in(t_{i-1},t_i].
+$$
+
+The critic learns multihorizon returns, progress return, immediate consequence,
+termination, reverse credit, latent/cognitive transitions, memory utility,
+uncertainty, and the value of internal cognitive actions. Its functional-
+surprise distribution provides two actor-side routes: candidate-bounded
+language credit and an internal-policy loss for the live cognitive controller.
+
+The complete learning path has the following safeguards:
+
+1. **Three pairwise-disjoint data roles.** A stable document-ID hash assigns
+   every FineWeb document to training, progress-probe, or independent guard
+   evaluation. The probe and guard identities are bound into the checkpoint.
+2. **Causal estimation.** Only monotonically increasing valid-token counts,
+   exact probe CE, and current learning rate enter the progress authority.
+   Baseline lag and refit freezing prevent the forecast from chasing the
+   observation it is judging.
+3. **No phase-metric authority.** Event proposal probabilities, threshold
+   distance, hard-event counts, and all phase-transition dashboard telemetry are
+   absent from the authority API and checkpoint state. They remain observers.
+4. **Bounded actions.** The critic evaluates at most 64 explicit language
+   candidates per position and always retains the behavior token. The default
+   PC-RASL path uses 48. It never constructs a
    `time × vocabulary × critic` tensor.
-2. **Critic gradient firewall.** Cognitive features, workspace state, relation
-   probabilities, action receipts, goals, and candidate embeddings are detached
-   before critic evaluation. Critic optimization therefore cannot update the
-   actor through a hidden gradient path.
-3. **Consequence modeling.** The critic estimates return quantiles, immediate
-   reward, termination, relation transitions, memory utility, cognitive-state
-   transitions, epistemic/aleatoric uncertainty, and reverse consequence credit.
-4. **Functional surprise.** A stop-gradient target combines signed return
-   surprise, counterfactual advantage, reverse credit, phase/transition error,
-   learning progress, uncertainty, and estimated controllability. The actor is
-   trained by cross-entropy toward that bounded target while retaining the
-   ordinary task objective and a KL trust region.
-5. **Target networks and replay.** EMA actor and critic copies are maintained;
-   the current cognitive learner uses the target critic for bootstrapped value
-   targets. Bounded prioritized replay preserves recurrent burn-in and
-   prioritizes experience only when surprise is also learnable and controllable.
-6. **Performance veto.** If the proxy surprise loss improves while measured
-   downstream performance regresses beyond tolerance, the actor step is
-   rejected. Proxy optimization is never allowed to redefine success.
-7. **Transactional continual adaptation.** A separate optional adapter path can
-   modify only an explicit parameter allowlist. Base weights are fingerprinted;
-   candidate changes are committed only after an application-supplied retention
-   evaluation, otherwise parameters and optimizer state are rolled back.
+5. **Delayed bounded replay.** At most a configured number of single-document
+   trajectories are retained per progress interval. Recurrent burn-in,
+   boundaries, candidate-policy logits and proposal probabilities, cognitive,
+   workspace, and relational features, internal-action receipts, and terminal
+   masks are captured before the outcome and preserved. The critic therefore
+   evaluates the historical behavior that earned the delayed consequence,
+   while the current actor is re-evaluated only to obtain a live auxiliary
+   gradient. One finalized trajectory is admitted per update to smooth cost.
+6. **Critic gradient firewall.** Cognitive features and action receipts are
+   detached before critic evaluation. Critic backpropagation cannot mutate the
+   actor through a hidden path. The target critic is updated by EMA; PC-RASL
+   does not keep an unused full target-actor copy.
+7. **Warmup and independent vetoes.** Actor auxiliary gradients wait for both
+   progress-estimator and critic warmup. The disjoint CE guard controls positive
+   pressure, while RASL's performance guard can independently suppress an actor
+   auxiliary update.
+8. **Task-gradient authority.** The ordinary exact next-token gradient is
+   computed first. Auxiliary gradients are rejected for parameters without a
+   live task path, projected away from aggregate subsystem conflicts, and
+   capped relative to the task-gradient norm. Defaults cap carrier, general
+   cognition, and controller contributions at 2%, 10%, and 15% respectively.
+9. **Exact continuation.** Progress observations, fitted baseline, guard state,
+   pending and finalized delayed trajectories, replay contents and priorities,
+   critic and target critic, calibrator, performance guard, critic optimizer,
+   RNG, streams, and identities are checkpointed. Resume rejects evidence or
+   configuration drift.
+10. **Durable observability.** Every causal observation is fsynced to
+    `progress_metrics.jsonl` and logged to Trackio. The dedicated **Learning
+    Progress** instrument exposes CE evidence, slopes, debt, pressure, guard,
+    exact behavior-evidence status, replay memory, critic/controller losses,
+    gradient governance, and component timing.
+11. **Transactional continual adaptation.** A separate optional adapter path
+    can modify only an explicit parameter allowlist. Base weights are
+    fingerprinted; candidates commit only after an application-supplied
+    retention evaluation, otherwise parameters and optimizer state roll back.
 
-The actor objective is conceptually
+For an environment, human, or verifier consequence, the general RASL actor
+objective can be written conceptually as
 
 $$
 \begin{aligned}
@@ -426,18 +509,19 @@ D_{\mathrm{KL}}(\pi_{\text{target}}\|\pi_{\text{actor}}).
 \end{aligned}
 $$
 
-Functional-surprise learning is **genuine reinforcement only when the reward is
-an external downstream consequence** supplied by an environment, human, or
-verifier. If reward is merely negative next-token cross-entropy, the mechanism
-is hard-example reweighting, not reinforcement learning. The production
-FineWeb trainer therefore leaves RASL disabled.
+PC-RASL implements this conservatively as a separately computed auxiliary
+gradient merged into the live task gradient under the governor above. Calling
+the mechanism “reinforcement learning” is optional terminology: the important
+fact is that its authority is a delayed change in held-out learning progress,
+not instantaneous task loss. External-consequence RASL remains available for
+applications with an environment, human, or verifier.
 
 | Learning timescale | What changes | Authority |
 | --- | --- | --- |
 | Every valid position | MRRN recurrent state | Current causal input and retained stream state |
 | Event/cognitive cycle | Nodes, relations, workspace, hypotheses, uncertainty, memory proposals | Learned proposals under hard capacities and type/provenance rules |
 | Supervised training | Carrier and cognitive actor parameters | Exact task loss plus evidence-backed auxiliary targets |
-| Consequence learning | Critic, then guarded actor update | Environment/human/verifier outcomes, gradient firewall, trust region, performance veto |
+| Consequence learning | Critic, then guarded actor auxiliary update | Delayed held-out learning progress or environment/human/verifier outcomes, gradient firewall, task-gradient governor, performance veto |
 | Continual adaptation | Explicit adapter allowlist only | Replay, retention evaluator, exact commit or rollback |
 | Semantic consolidation | Accepted reusable knowledge | Repeated support, prediction/reconstruction validity, distortion and provenance gates |
 
@@ -706,18 +790,36 @@ The complete relational cognitive authority path remains the PyTorch reference.
 | Carrier TBPTT span | 4,096 tokens |
 | Cognitive TBPTT horizon | 4 event cycles |
 | Full-softmax tile | 2,048 vocabulary entries |
-| Held-out split | Stable document-ID hash, 1% |
+| Held-out split | Stable document-ID hash: 99% train, 0.5% progress probe, 0.5% independent guard |
 | Evaluation/checkpoint interval | 25 optimizer updates |
+| Progress observation interval | 5 optimizer updates |
+| Progress probe | 2 fixed batches × 4,096 tokens |
+| PC-RASL trajectory / candidates | 256 valid single-document positions / 48 bounded candidates |
+| 8.4M-profile PC-RASL critic | 139,537 parameters (1.66% of the 8,413,442-parameter actor); target critic only |
 
 Dataset and tokenizer revisions are pinned before training. Documents are packed
 for throughput, but document transitions are excluded from next-token loss and
 reset recurrent and cognitive state. Full-vocabulary cross entropy is exact and
 tiled for memory control; it is not sampled or approximated.
 
-Raw FineWeb supplies language targets but no external downstream consequence.
-The FineWeb stage therefore does **not** enable functional-surprise reinforcement
-learning by treating task loss as reward. RASL is available only for trajectories
-with a legitimate environment, verifier, or preference consequence.
+Raw FineWeb supplies language targets but no external downstream consequence,
+so the trainer never relabels instantaneous task loss as reward. It does enable
+PC-RASL by default: a separate held-out CE trajectory supplies delayed signed
+learning-progress consequences as described above. Disable this explicitly
+only for a matched ablation:
+
+```bash
+python scripts/train_fineweb.py \
+  --lightmodel \
+  --no-progress-conditioned-rasl
+```
+
+The estimator, critic, replay, and gradient-governor controls are exposed under
+`--progress-*` and `--pc-rasl-*`; run `python scripts/train_fineweb.py --help`
+for the complete contract. Checkpoints through format 9 migrate by starting a
+fresh causal PC-RASL subsystem while preserving actor/training continuation:
+historical pre-consequence behavior logits, cognitive features, and action
+receipts cannot be reconstructed honestly after the outcome.
 
 ### Run outputs
 
@@ -726,22 +828,29 @@ Each run directory contains the durable state required for exact continuation:
 ```text
 run_manifest.json
 metrics.jsonl
+progress_metrics.jsonl
+evaluation_metrics.jsonl
 checkpoints/
 diagnostics/
 ```
 
 Checkpoints include model, optimizer, scheduler, AMP scaler, stream position,
-packer buffers, retained runtime state, provenance ledger, and random state.
+packer buffers, retained runtime state, provenance ledger, random state, the
+complete progress authority, delayed trajectories, replay, critic/target
+critic, critic optimizer, calibrator, and both performance guards.
 Local run directories and weight files are excluded from Git by default.
 
 ## Trackio dashboard
 
 Trackio logging and the local dashboard are enabled by default during training.
-MRCRA adds two architecture-specific tabs:
+MRCRA adds two architecture-specific top-level tabs. The **Spectral Network**
+tab contains a dedicated **Learning Progress** instrument alongside the carrier
+and phase observers:
 
 - **Spectral Network:** training stability, token-scale resonance, learned
-  spectral activation triads, pole/phase structure, and phase-transition
-  telemetry.
+  spectral activation triads, pole/phase structure, causal learning-progress
+  evidence, PC-RASL critic/controller learning, gradient governance, and
+  phase-transition telemetry.
 - **MRCRA Cognition:** typed event graphs, reconstruction, deliberation,
   hypotheses, viability, invariant transfer, uncertainty, memory, provenance,
   and action authorization.
@@ -806,6 +915,8 @@ training runs are intentionally not stored in the public repository.
 | [MRRN mathematical specification](outputs/multiresolution_resonance_network_spec.md) | Spectral carrier equations, attention, recurrent state, activation, input/output contracts, and scaling behavior |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
 | [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
+| [PC-RASL implementation report](outputs/progress_conditioned_rasl_implementation_report.md) | Causal authority, exact delayed replay, critic/controller path, gradient governance, resources, migration, observability, and claim boundaries |
+| [PC-RASL empirical acceptance](outputs/pc_rasl_empirical_acceptance.json) | Signed progress pressure, plateau/regression and anti-gaming behavior, guard recovery, critic learning, controller credit, gradient firewall, and subsystem-cap evidence |
 | [Acceptance manifest](outputs/mrcra_acceptance_manifest.json) | Environment, commands, source hashes, and retained verification results |
 | [Evidence ledger](spec/mrcra_evidence.json) | Machine-readable mapping from specification requirements to implementation and tests |
 
@@ -818,9 +929,17 @@ python scripts/run_mrcra_acceptance.py
 python scripts/build_mrcra_evidence.py
 ```
 
+Run only the focused PC-RASL mechanism gates with:
+
+```bash
+python scripts/run_pc_rasl_acceptance.py
+```
+
 The retained initial-public-release evidence records:
 
-- 536 passing Python tests and 1 skipped test;
+- 567 passing Python tests and 1 intentionally skipped self-referential
+  hash-ledger test during manifest construction; the same ledger test passes
+  after the evidence file is rebuilt;
 - passing frontend tests, lint, and production build;
 - passing empirical mechanism acceptance;
 - passing integrated cognitive-path acceptance;

@@ -16,6 +16,7 @@ os.environ.setdefault("PYTHONWARNINGS", "ignore:resource_tracker:UserWarning")
 import torch
 
 from mrrn.cognitive_training import MRCRANextTokenTrainer, MRCRATrainingConfig
+from mrrn.learning_progress import LearningProgressConfig
 from mrrn.config import CognitiveConfig, MRCRAConfig, MRRNConfig
 from mrrn.language import MRCRALanguageModel
 from mrrn.lm_training import (
@@ -172,6 +173,48 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--checkpoint-interval", type=int, default=25)
     result.add_argument("--eval-interval", type=int, default=25)
     result.add_argument("--eval-batches", type=int, default=4)
+    result.add_argument(
+        "--progress-conditioned-rasl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable delayed CE-learning-progress pressure through the cognitive "
+            "resonant adjoint surprise learner (default: enabled)."
+        ),
+    )
+    result.add_argument("--progress-probe-interval", type=int, default=5)
+    result.add_argument("--progress-probe-batches", type=int, default=2)
+    result.add_argument("--progress-probe-length", type=int, default=4_096)
+    result.add_argument("--progress-warmup-observations", type=int, default=8)
+    result.add_argument("--progress-fast-window", type=int, default=6)
+    result.add_argument("--progress-baseline-min-observations", type=int, default=12)
+    result.add_argument("--progress-baseline-window", type=int, default=24)
+    result.add_argument("--progress-baseline-lag", type=int, default=6)
+    result.add_argument("--progress-baseline-freeze", type=int, default=4)
+    result.add_argument("--progress-deadband", type=float, default=0.5)
+    result.add_argument("--progress-temperature", type=float, default=1.0)
+    result.add_argument("--progress-slope-weight", type=float, default=0.75)
+    result.add_argument("--progress-debt-weight", type=float, default=0.25)
+    result.add_argument("--progress-guard-tolerance", type=float, default=0.02)
+    result.add_argument("--progress-guard-patience", type=int, default=2)
+    result.add_argument("--pc-rasl-trajectory-length", type=int, default=256)
+    result.add_argument("--pc-rasl-candidates", type=int, default=48)
+    result.add_argument("--pc-rasl-replay-batch-size", type=int, default=1)
+    result.add_argument("--pc-rasl-max-interval-trajectories", type=int, default=5)
+    result.add_argument(
+        "--pc-rasl-critic-warmup-observations",
+        type=int,
+        default=4,
+        help=(
+            "Additional critic-only progress observations required after the "
+            "causal baseline first becomes ready."
+        ),
+    )
+    result.add_argument("--pc-rasl-consequence-weight", type=float, default=0.025)
+    result.add_argument("--pc-rasl-critic-learning-rate", type=float, default=6e-5)
+    result.add_argument("--pc-rasl-carrier-gradient-cap", type=float, default=0.02)
+    result.add_argument("--pc-rasl-cognitive-gradient-cap", type=float, default=0.10)
+    result.add_argument("--pc-rasl-controller-gradient-cap", type=float, default=0.15)
     result.add_argument("--device", default="auto")
     result.add_argument("--precision", choices=("auto", "fp32", "bf16", "fp16"), default="auto")
     result.add_argument(
@@ -249,10 +292,35 @@ def main() -> None:
         args.cpu_threads, args.cpu_interop_threads,
         args.maximum_retained_loss_mib, args.phase_ablation_batches,
         args.low_clip_coefficient_patience,
+        args.progress_probe_interval, args.progress_probe_batches,
+        args.progress_probe_length, args.progress_warmup_observations,
+        args.progress_fast_window, args.progress_baseline_min_observations,
+        args.progress_baseline_window, args.progress_baseline_freeze,
+        args.progress_guard_patience,
+        args.pc_rasl_trajectory_length, args.pc_rasl_candidates,
+        args.pc_rasl_replay_batch_size,
+        args.pc_rasl_max_interval_trajectories,
+        args.pc_rasl_critic_warmup_observations,
     ) <= 0:
         raise ValueError(
-            "thread, workspace, phase-ablation, and clip-patience controls must be positive"
+            "thread, workspace, evaluation, and progress controls must be positive"
         )
+    progress_configuration = LearningProgressConfig(
+        observation_interval=args.progress_probe_interval,
+        warmup_observations=args.progress_warmup_observations,
+        fast_window=args.progress_fast_window,
+        baseline_min_observations=args.progress_baseline_min_observations,
+        baseline_window=args.progress_baseline_window,
+        baseline_lag=args.progress_baseline_lag,
+        baseline_freeze_observations=args.progress_baseline_freeze,
+        deadband_standard_deviations=args.progress_deadband,
+        pressure_temperature=args.progress_temperature,
+        slope_weight=args.progress_slope_weight,
+        debt_weight=args.progress_debt_weight,
+        guard_regression_tolerance=args.progress_guard_tolerance,
+        guard_regression_patience=args.progress_guard_patience,
+        guard_recovery_patience=args.progress_guard_patience,
+    )
     torch.set_num_threads(args.cpu_threads)
     if torch.get_num_interop_threads() != args.cpu_interop_threads:
         torch.set_num_interop_threads(args.cpu_interop_threads)
@@ -282,9 +350,23 @@ def main() -> None:
             "Retained evidence is disjoint from optimization.",
             "Checkpoint identity binds the complete evaluation context.",
         ))
+        progress_source = (
+            SequenceTextSource((
+                "Learning progress is measured without reading phase telemetry.",
+                "Delayed consequences are assigned to earlier cognitive operations.",
+            ))
+            if args.progress_conditioned_rasl else None
+        )
         evaluation_batches = build_evaluation_batches(
             PackedTokenStream(evaluation_source, tokenizer),
             count=1, batch_size=1, sequence_length=8,
+        )
+        progress_probe_batches = (
+            build_evaluation_batches(
+                PackedTokenStream(progress_source, tokenizer),
+                count=1, batch_size=1, sequence_length=8,
+            )
+            if progress_source is not None else ()
         )
         configuration = MRCRATrainingConfig(
             output_dir=str(output_dir), total_tokens=16, context_length=8,
@@ -294,6 +376,23 @@ def main() -> None:
             warmup_tokens=8, checkpoint_interval=2, device="cpu", precision="fp32",
             evaluation_interval=1, evaluation_batches=1,
             require_evaluation=True,
+            progress_conditioned_rasl=args.progress_conditioned_rasl,
+            progress_probe_batches=(
+                1 if args.progress_conditioned_rasl else 0
+            ),
+            progress_probe_length=8,
+            pc_rasl_trajectory_length=8,
+            pc_rasl_candidate_count=8,
+            pc_rasl_max_interval_trajectories=1,
+            learning_progress=LearningProgressConfig(
+                observation_interval=1,
+                warmup_observations=4,
+                fast_window=3,
+                baseline_min_observations=4,
+                baseline_window=8,
+                baseline_lag=0,
+                baseline_freeze_observations=1,
+            ),
             trackio_enabled=args.trackio, show_dashboard=args.dashboard,
             spectral_dashboard=args.spectral_dashboard,
             spectral_snapshot_interval=1, spectral_snapshot_tokens=8,
@@ -342,10 +441,25 @@ def main() -> None:
             evaluation_fraction_permyriad=args.eval_fraction_permyriad,
             shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
         )
+        progress_source = FineWebTextSource(
+            dataset_id=args.dataset_id, dataset_config=args.dataset_config,
+            split="train", revision=dataset_revision, partition="progress",
+            evaluation_fraction_permyriad=args.eval_fraction_permyriad,
+            shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+        )
         evaluation_batches = build_evaluation_batches(
             PackedTokenStream(evaluation_source, tokenizer),
             count=args.eval_batches, batch_size=1,
             sequence_length=args.context_length,
+        )
+        progress_probe_batches = (
+            build_evaluation_batches(
+                PackedTokenStream(progress_source, tokenizer),
+                count=args.progress_probe_batches,
+                batch_size=1,
+                sequence_length=args.progress_probe_length,
+            )
+            if args.progress_conditioned_rasl else ()
         )
         configuration = MRCRATrainingConfig(
             output_dir=str(output_dir), total_tokens=args.total_tokens,
@@ -373,6 +487,27 @@ def main() -> None:
             evaluation_interval=args.eval_interval,
             evaluation_batches=args.eval_batches,
             require_evaluation=True,
+            progress_conditioned_rasl=args.progress_conditioned_rasl,
+            progress_probe_batches=(
+                args.progress_probe_batches
+                if args.progress_conditioned_rasl else 0
+            ),
+            progress_probe_length=args.progress_probe_length,
+            learning_progress=progress_configuration,
+            pc_rasl_trajectory_length=args.pc_rasl_trajectory_length,
+            pc_rasl_candidate_count=args.pc_rasl_candidates,
+            pc_rasl_replay_batch_size=args.pc_rasl_replay_batch_size,
+            pc_rasl_max_interval_trajectories=(
+                args.pc_rasl_max_interval_trajectories
+            ),
+            pc_rasl_critic_warmup_observations=(
+                args.pc_rasl_critic_warmup_observations
+            ),
+            pc_rasl_consequence_weight=args.pc_rasl_consequence_weight,
+            pc_rasl_critic_learning_rate=args.pc_rasl_critic_learning_rate,
+            pc_rasl_carrier_gradient_cap=args.pc_rasl_carrier_gradient_cap,
+            pc_rasl_cognitive_gradient_cap=args.pc_rasl_cognitive_gradient_cap,
+            pc_rasl_controller_gradient_cap=args.pc_rasl_controller_gradient_cap,
             device=args.device, precision=args.precision, seed=args.seed,
             cpu_threads=args.cpu_threads,
             cpu_interop_threads=args.cpu_interop_threads,
@@ -401,7 +536,7 @@ def main() -> None:
         )
     trainer = MRCRANextTokenTrainer(
         model, tokenizer, PackedTokenStream(source, tokenizer), configuration,
-        evaluation_batches,
+        evaluation_batches, progress_probe_batches=progress_probe_batches,
     )
     manifest = {
         "model_parameters": model.parameter_count,
@@ -415,8 +550,19 @@ def main() -> None:
             None if evaluation_source is None else evaluation_source.state_dict()
         ),
         "evaluation_identity": trainer.evaluation_identity,
+        "progress_probe_source": (
+            None if progress_source is None else progress_source.state_dict()
+        ),
+        "progress_probe_identity": (
+            trainer.progress_probe_identity
+            if configuration.progress_conditioned_rasl else None
+        ),
         "runtime": trainer.runtime,
-        "functional_surprise_enabled": False,
+        "functional_surprise_enabled": configuration.progress_conditioned_rasl,
+        "functional_surprise_mode": (
+            "progress_conditioned_rasl"
+            if configuration.progress_conditioned_rasl else "disabled"
+        ),
         "training_profile": configuration.training_profile,
         "trainer_mode": configuration.trainer_mode,
         "claim_boundary": (
@@ -425,8 +571,11 @@ def main() -> None:
         ),
         "evidence_maturity": "mechanism",
         "functional_surprise_reason": (
-            "FineWeb supplies text targets but no external downstream consequence; "
-            "RASL task-loss-as-reward is forbidden."
+            "A disjoint progress-probe CE slope supplies a delayed, bounded "
+            "optimization-derived meta-consequence; instantaneous task loss is "
+            "never used as reward and a separate held-out guard can veto positive pressure."
+            if configuration.progress_conditioned_rasl
+            else "Progress-Conditioned RASL was explicitly disabled."
         ),
     }
     manifest_path = output_dir / "run_manifest.json"

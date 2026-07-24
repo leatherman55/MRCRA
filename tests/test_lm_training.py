@@ -26,6 +26,7 @@ from mrrn.lm_training import (
     _configure_cuda,
     _MetricAccumulator,
     _device_for,
+    _heldout_role,
     _is_evaluation_document,
     _memory_metrics,
     _precision_for,
@@ -94,6 +95,50 @@ def test_fineweb_stream_validates_schema_partitions_and_resume(monkeypatch):
             revision="fixed", partition="train", evaluation_fraction_permyriad=100,
             shuffle_seed=9, shuffle_buffer=4,
         ).load_state_dict(bad_counters)
+
+
+def test_fineweb_progress_and_guard_partitions_are_pairwise_disjoint(monkeypatch):
+    progress_id = next(
+        f"progress-{index}" for index in range(100_000)
+        if _heldout_role(f"progress-{index}", 100) == "progress"
+    )
+    guard_id = next(
+        f"guard-{index}" for index in range(100_000)
+        if _heldout_role(f"guard-{index}", 100) == "eval"
+    )
+    train_id = next(
+        f"train-{index}" for index in range(100_000)
+        if _heldout_role(f"train-{index}", 100) == "train"
+    )
+    rows = [
+        {"id": progress_id, "text": "progress"},
+        {"id": guard_id, "text": "guard"},
+        {"id": train_id, "text": "train"},
+    ]
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        SimpleNamespace(load_dataset=lambda *args, **kwargs: _FakeDataset(rows)),
+    )
+    partitions = {}
+    for partition in ("train", "progress", "eval"):
+        source = FineWebTextSource(
+            partition=partition,
+            evaluation_fraction_permyriad=100,
+            shuffle_seed=9,
+            shuffle_buffer=4,
+        )
+        partitions[partition] = {row.identifier for row in source}
+    assert partitions == {
+        "train": {train_id},
+        "progress": {progress_id},
+        "eval": {guard_id},
+    }
+    assert not (
+        partitions["train"] & partitions["progress"]
+        or partitions["train"] & partitions["eval"]
+        or partitions["progress"] & partitions["eval"]
+    )
 
 
 def test_fineweb_stream_fails_closed_on_schema_drift_and_invalid_configuration(monkeypatch):

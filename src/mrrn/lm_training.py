@@ -173,6 +173,18 @@ def _is_evaluation_document(identifier: str, fraction_permyriad: int) -> bool:
     return value % 10_000 < fraction_permyriad
 
 
+def _heldout_role(identifier: str, fraction_permyriad: int) -> str:
+    """Return train/progress/eval using one stable, pairwise-disjoint hash split."""
+
+    digest = sha256(identifier.encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big") % 10_000
+    if value >= fraction_permyriad:
+        return "train"
+    # Use independent digest bytes instead of parity of the inclusion bucket so
+    # changing the retained fraction does not systematically bias either role.
+    return "progress" if int.from_bytes(digest[8:16], "big") & 1 == 0 else "eval"
+
+
 class FineWebTextSource:
     """Deterministic stateful stream over the original English FineWeb dataset."""
 
@@ -188,8 +200,8 @@ class FineWebTextSource:
         shuffle_seed: int = 20260721,
         shuffle_buffer: int = 10_000,
     ) -> None:
-        if partition not in {"train", "eval"}:
-            raise ValueError("FineWeb partition must be train or eval")
+        if partition not in {"train", "progress", "eval"}:
+            raise ValueError("FineWeb partition must be train, progress, or eval")
         if not 1 <= evaluation_fraction_permyriad < 10_000:
             raise ValueError("evaluation fraction must lie in 1..9999 permyriad")
         if shuffle_buffer <= 0:
@@ -233,8 +245,8 @@ class FineWebTextSource:
             identifier = row.get("id")
             if not isinstance(identifier, str) or not identifier:
                 raise ValueError("FineWeb row schema must contain nonempty string field 'id'")
-            is_eval = _is_evaluation_document(identifier, self.evaluation_fraction_permyriad)
-            if (self.partition == "eval") != is_eval or not row["text"]:
+            role = _heldout_role(identifier, self.evaluation_fraction_permyriad)
+            if self.partition != role or not row["text"]:
                 continue
             self.documents_yielded += 1
             yield TextDocument(identifier, row["text"])

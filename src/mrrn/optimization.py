@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import cos, pi, sqrt
+from typing import Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -39,6 +40,18 @@ class GradientReport:
     subsystem_norms_after: dict[str, Tensor]
     subsystem_tensor_counts: dict[str, int]
     finite: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AuxiliaryGradientMergeReport:
+    """Evidence from conflict projection and subsystem-relative norm caps."""
+
+    applied: bool
+    auxiliary_norm_before: Tensor
+    auxiliary_norm_after: Tensor
+    task_norm: Tensor
+    conflicting_subsystems: tuple[str, ...]
+    subsystem_scales: dict[str, Tensor]
 
 
 def gradient_subsystem(name: str) -> str:
@@ -80,6 +93,107 @@ def gradient_subsystem(name: str) -> str:
     if name.startswith("cognitive."):
         return "other_cognition"
     return "carrier"
+
+
+@torch.no_grad()
+def merge_auxiliary_gradients(
+    model: nn.Module,
+    auxiliary_gradients: Mapping[str, Tensor | None],
+    subsystem_caps: Mapping[str, float],
+    *,
+    epsilon: float = 1e-12,
+) -> AuxiliaryGradientMergeReport:
+    """Project task-conflicting auxiliary gradients and apply relative caps.
+
+    The live ``parameter.grad`` tensors are treated as the primary task
+    authority.  Auxiliary tensors are never allowed to introduce a negative
+    aggregate dot product with that authority inside an architecture
+    subsystem, and their post-projection norm is capped relative to the task
+    norm before being added.
+    """
+
+    if epsilon <= 0 or any(
+        not isinstance(value, (int, float)) or value < 0
+        for value in subsystem_caps.values()
+    ):
+        raise ValueError("auxiliary gradient caps must be finite and nonnegative")
+    named = dict(model.named_parameters())
+    unknown = set(auxiliary_gradients) - set(named)
+    if unknown:
+        raise ValueError(f"auxiliary gradients name unknown parameters: {sorted(unknown)}")
+    grouped: dict[str, list[tuple[nn.Parameter, Tensor]]] = {}
+    anchor = next(model.parameters())
+    task_total = anchor.new_zeros((), dtype=torch.float32)
+    aux_total = anchor.new_zeros((), dtype=torch.float32)
+    for name, auxiliary in auxiliary_gradients.items():
+        if auxiliary is None:
+            continue
+        parameter = named[name]
+        if auxiliary.shape != parameter.shape or auxiliary.device != parameter.device:
+            raise ValueError("auxiliary gradients must match their live parameters")
+        if not bool(torch.isfinite(auxiliary).all()):
+            raise FloatingPointError("auxiliary gradients became non-finite")
+        if parameter.grad is None:
+            # No auxiliary-only mutation: the ordinary task must expose a live
+            # path to every parameter that progress pressure may alter.
+            continue
+        grouped.setdefault(gradient_subsystem(name), []).append(
+            (parameter, auxiliary.detach())
+        )
+        task_total += parameter.grad.detach().float().square().sum()
+        aux_total += auxiliary.detach().float().square().sum()
+    conflicts: list[str] = []
+    scales: dict[str, Tensor] = {}
+    after_total = anchor.new_zeros((), dtype=torch.float32)
+    for subsystem, rows in grouped.items():
+        cap = float(subsystem_caps.get(subsystem, 0.0))
+        task_norm_sq = sum(
+            (parameter.grad.detach().float().square().sum() for parameter, _ in rows),
+            start=anchor.new_zeros((), dtype=torch.float32),
+        )
+        dot = sum(
+            (
+                parameter.grad.detach().float()
+                .mul(auxiliary.float())
+                .sum()
+                for parameter, auxiliary in rows
+            ),
+            start=anchor.new_zeros((), dtype=torch.float32),
+        )
+        projection = min(0.0, float(dot.cpu())) / max(
+            float(task_norm_sq.cpu()), epsilon
+        )
+        if projection < 0:
+            conflicts.append(subsystem)
+        projected = [
+            auxiliary - projection * parameter.grad.detach()
+            for parameter, auxiliary in rows
+        ]
+        projected_norm = torch.stack([
+            value.float().square().sum() for value in projected
+        ]).sum().sqrt()
+        task_norm = task_norm_sq.sqrt()
+        allowed = cap * task_norm
+        scale = torch.clamp(
+            allowed / projected_norm.clamp_min(epsilon), max=1.0
+        )
+        if cap == 0:
+            scale = scale * 0
+        scales[subsystem] = scale.detach()
+        for (parameter, _), value in zip(rows, projected, strict=True):
+            contribution = value.to(parameter.grad.dtype) * scale.to(
+                parameter.grad.dtype
+            )
+            parameter.grad.add_(contribution)
+            after_total += contribution.float().square().sum()
+    return AuxiliaryGradientMergeReport(
+        bool(grouped),
+        aux_total.sqrt(),
+        after_total.sqrt(),
+        task_total.sqrt(),
+        tuple(sorted(conflicts)),
+        scales,
+    )
 
 
 def build_adamw(

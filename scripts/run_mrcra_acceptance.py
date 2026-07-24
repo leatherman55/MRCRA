@@ -126,6 +126,7 @@ def source_hashes() -> dict[str, str]:
         ROOT / "outputs" / "mrcra_empirical_acceptance.json",
         ROOT / "outputs" / "mrcra_integrated_acceptance.json",
         ROOT / "outputs" / "mrcra_performance_acceptance.json",
+        ROOT / "outputs" / "pc_rasl_empirical_acceptance.json",
     ))
     return {
         str(path.relative_to(ROOT)): sha256(path.read_bytes()).hexdigest()
@@ -154,6 +155,10 @@ def main() -> int:
         run(
             "performance-acceptance",
             [sys.executable, "scripts/run_mrcra_performance_acceptance.py"],
+        ),
+        run(
+            "pc-rasl-acceptance",
+            [sys.executable, "scripts/run_pc_rasl_acceptance.py"],
         ),
     ]
     payload = {

@@ -39,6 +39,7 @@ from .cognitive_surprise import (
 from .cognitive_training import (
     CognitiveSupervisionProvider, MRCRANextTokenTrainer, MRCRATrainingConfig,
     MRCRATrainingState, TiledCrossEntropy, exact_tiled_cross_entropy,
+    progress_conditioned_rasl_configuration,
 )
 from .empirical_acceptance import (
     BENCHMARKS, EmpiricalAcceptanceReport, EmpiricalBenchmarkResult,
@@ -106,12 +107,21 @@ from .language import (
     fineweb_27m_config,
     tiny_language_config,
 )
+from .learning_progress import (
+    LearningProgressAuthority, LearningProgressConfig, LearningProgressReport,
+    PowerLawBaseline, ProgressObservation, robust_line,
+)
 from .resonance import ComplexResonator, ResonatorState
 from .observation import ObservationPacket, register_external_observations, register_internal_inputs
 from .provenance import ProvenanceLedger, ProvenanceRecord, VerificationEvent
 from .performance_acceptance import (
     PerformanceAcceptanceReport, PerformanceGateResult,
     run_performance_acceptance,
+)
+from .pc_rasl_acceptance import (
+    PCRASLAcceptanceReport, PCRASLCriterion, PCRASLExperiment,
+    benchmark_critic_and_internal_credit, benchmark_gradient_governor,
+    benchmark_progress_authority, run_pc_rasl_acceptance,
 )
 from .serious_acceptance import (
     REQUIRED_HELD_OUT_TASKS, SeriousCheckpointAcceptanceReport,
@@ -241,6 +251,9 @@ __all__ = [
     "MRRNState",
     "MRRNStreamState",
     "LanguageModelOutput",
+    "LearningProgressAuthority",
+    "LearningProgressConfig",
+    "LearningProgressReport",
     "KnowledgeKind",
     "KnowledgeProposalBank",
     "KnowledgeProposalBatch",
@@ -278,7 +291,9 @@ __all__ = [
     "PerformanceAcceptanceReport",
     "PerformanceGateResult",
     "PerformanceGuard",
+    "PowerLawBaseline",
     "PreparedModality",
+    "ProgressObservation",
     "PrioritizedTrajectoryReplay",
     "RASLLosses",
     "RASLParameterReport",
@@ -356,10 +371,18 @@ __all__ = [
     "save_stream_checkpoint",
     "register_external_observations",
     "register_internal_inputs",
+    "robust_line",
     "record_external_artifact",
     "run_empirical_acceptance",
     "run_integrated_acceptance",
     "run_performance_acceptance",
+    "run_pc_rasl_acceptance",
+    "PCRASLAcceptanceReport",
+    "PCRASLCriterion",
+    "PCRASLExperiment",
+    "benchmark_progress_authority",
+    "benchmark_critic_and_internal_credit",
+    "benchmark_gradient_governor",
     "audit_serious_checkpoint",
     "build_serious_evaluation_artifact",
     "REQUIRED_HELD_OUT_TASKS",

@@ -4,7 +4,7 @@
 The prior 4.695M sequence-only MRRN trainer remains available solely through
 the explicit ``--legacy-mrrn`` compatibility switch.  A normal invocation is
 delegated to :mod:`train_mrcra_fineweb`, ensuring that the familiar command can
-never silently bypass the cognitive runtime, retained evaluation, or format-8
+never silently bypass the cognitive runtime, retained evaluation, or format-10
 checkpoint contract.
 """
 
