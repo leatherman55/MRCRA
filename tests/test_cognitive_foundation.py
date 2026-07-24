@@ -89,6 +89,78 @@ def test_light_8p4m_profile_preserves_integrated_cognition_and_exact_budget():
         light.require_actor_parameter_count(8_500_000)
 
 
+def test_ultralight_1p3m_profile_preserves_complete_six_scale_cognition():
+    ultralight = MRCRAConfig.ultralight_1p3m(output_dim=50_257)
+    carrier = ultralight.carrier
+    cognition = ultralight.cognitive
+
+    assert carrier.model_dim == cognition.workspace_dim == 20
+    assert carrier.layers == carrier.scales == 6
+    assert carrier.share_depth_parameters is True
+    assert carrier.structured_mixer_rank == 8
+    assert carrier.relational_branch is True
+    assert carrier.spectral_activation is True
+    assert carrier.spectral_modes == carrier.spectral_basis_order == 5
+    assert [item.width for item in carrier.scale_configs()] == [20, 24, 24, 24, 24, 24]
+    assert [item.modes for item in carrier.scale_configs()] == [8, 11, 11, 11, 11, 11]
+    assert cognition.active_event_capacity == 64
+    assert cognition.pair_edge_capacity == 256
+    assert cognition.hyperedge_capacity == 32
+    assert cognition.global_workspace_slots == 6
+    assert cognition.episodic_memory_capacity == 1024
+    assert cognition.semantic_memory_capacity == 256
+    assert cognition.world_model_horizons == (1, 4, 16, 64)
+    assert all(
+        getattr(cognition, name)
+        for name in (
+            "enable_conditional_reconstruction",
+            "enable_abstraction_validity_control",
+            "enable_post_deliberation_action_selection",
+            "enable_multi_hypothesis_planning",
+            "enable_agent_session_loop",
+            "enable_viability_gate",
+            "enable_integrated_invariant_discovery",
+            "enable_persistent_session_training",
+            "enable_metacognitive_routing",
+        )
+    )
+
+    model = MRCRALanguageModel(
+        ultralight, model_authority="ultralight-profile-test"
+    )
+    assert model.parameter_count == 1_299_669
+    assert (
+        model.token_embedding.weight
+        is model.cognitive.carrier.output_head.weight
+    )
+    parameter_groups = {
+        ".".join(name.split(".")[:2])
+        for name, _ in model.named_parameters()
+        if name.startswith("cognitive.")
+    }
+    assert {
+        "cognitive.carrier",
+        "cognitive.event_extractor",
+        "cognitive.event_allocator",
+        "cognitive.workspace_graph",
+        "cognitive.graph_compressor",
+        "cognitive.reconstructor",
+        "cognitive.abstraction_applicability",
+        "cognitive.invariant_discoverer",
+        "cognitive.hypothesis_bank",
+        "cognitive.world_model",
+        "cognitive.uncertainty_head",
+        "cognitive.memory_write_policy",
+        "cognitive.metacognitive_router",
+        "cognitive.viability_forecaster",
+        "cognitive.controller",
+        "cognitive.external_action_policy",
+    } <= parameter_groups
+    ultralight.require_actor_parameter_count(model.parameter_count)
+    with pytest.raises(ValueError):
+        ultralight.require_actor_parameter_count(1_320_000)
+
+
 def test_node_and_relation_slots_enforce_authoritative_masks():
     nodes = NodeSlots.empty(
         2, 5, 8, heads=2, modes=3, node_types=len(NodeType), modalities=16,

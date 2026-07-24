@@ -23,9 +23,14 @@ from mrrn.language import MRCRALanguageModel  # noqa: E402
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vocabulary-size", type=int, default=50_257)
-    parser.add_argument(
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument(
         "--lightmodel", action="store_true",
         help="Audit the integrated 8.4M light profile instead of the 120M class.",
+    )
+    profile.add_argument(
+        "--ultralightmodel", action="store_true",
+        help="Audit the integrated 1.3M ultralight profile instead of the 120M class.",
     )
     parser.add_argument(
         "--output",
@@ -36,9 +41,17 @@ def arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = arguments()
-    profile = "mrcra_8p4m_light" if args.lightmodel else "mrcra_120m_serious"
+    profile = (
+        "mrcra_1p3m_ultralight"
+        if args.ultralightmodel
+        else "mrcra_8p4m_light"
+        if args.lightmodel
+        else "mrcra_120m_serious"
+    )
     config = (
-        MRCRAConfig.light_8p4m(output_dim=args.vocabulary_size)
+        MRCRAConfig.ultralight_1p3m(output_dim=args.vocabulary_size)
+        if args.ultralightmodel
+        else MRCRAConfig.light_8p4m(output_dim=args.vocabulary_size)
         if args.lightmodel
         else MRCRAConfig.serious_120m(output_dim=args.vocabulary_size)
     )
@@ -89,8 +102,11 @@ def main() -> None:
     destination = Path(
         args.output
         or (
-            "outputs/mrcra_8p4m_parameter_report.json"
-            if args.lightmodel else "outputs/mrcra_120m_parameter_report.json"
+            "outputs/mrcra_1p3m_parameter_report.json"
+            if args.ultralightmodel
+            else "outputs/mrcra_8p4m_parameter_report.json"
+            if args.lightmodel
+            else "outputs/mrcra_120m_parameter_report.json"
         )
     )
     destination.parent.mkdir(parents=True, exist_ok=True)

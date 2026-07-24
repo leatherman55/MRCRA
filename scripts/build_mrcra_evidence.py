@@ -85,7 +85,17 @@ PATHS = {
     19: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/training_profiles.py", "src/mrrn/gradient_governance.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"], ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_training_profiles.py", "tests/test_production_objectives.py", "tests/test_gradient_governance.py", "tests/test_fineweb_entrypoint.py"]),
     20: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/cognitive_surprise.py", "src/mrrn/learning_progress.py", "src/mrrn/pc_rasl_acceptance.py", "src/mrrn/continual_adaptation.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py", "scripts/run_pc_rasl_acceptance.py"], ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_cognitive_surprise.py", "tests/test_learning_progress.py", "tests/test_pc_rasl_training.py", "tests/test_pc_rasl_acceptance.py", "tests/test_continual_adaptation.py", "tests/test_fineweb_entrypoint.py"]),
     21: (["src/mrrn/config.py", "src/mrrn/model.py", "src/mrrn/cognitive_training.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"], ["tests/test_model.py", "tests/test_cognitive_training.py", "tests/test_fineweb_entrypoint.py"]),
-    22: (["src/mrrn/config.py", "src/mrrn/cognitive_model.py", "src/mrrn/language.py"], ["tests/test_cognitive_foundation.py"]),
+    22: ([
+        "src/mrrn/config.py", "src/mrrn/cognitive_model.py",
+        "src/mrrn/language.py", "scripts/report_mrcra_parameters.py",
+        "outputs/mrcra_1p3m_design_report.md",
+        "outputs/mrcra_1p3m_parameter_report.json",
+        "outputs/mrcra_8p4m_parameter_report.json",
+        "outputs/mrcra_120m_parameter_report.json",
+    ], [
+        "tests/test_cognitive_foundation.py",
+        "tests/test_fineweb_entrypoint.py",
+    ]),
     23: ([
         "src/mrrn/attention.py", "src/mrrn/model.py",
         "src/mrrn/lifting.py", "src/mrrn/scale_exchange.py",

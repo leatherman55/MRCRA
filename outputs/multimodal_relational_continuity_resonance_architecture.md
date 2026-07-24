@@ -1679,9 +1679,24 @@ Six scales are enough for the 32K target when the coarsest coefficients have sup
 | episodic/semantic reranked candidates | 8 each when requested |
 | world-model horizons | 1, 4, 16, 64 event steps |
 
-### 22.4 Role of the retained 4.7M model
+### 22.4 Role of small profiles
 
 The 4.7M model remains a substrate and component demonstrator. It is too narrow to support the full cognitive system without displacing most carrier capacity, and its retained FineWeb run is not a trained language capability result. Small versions of the new modules may be exercised there for causal and algebraic tests, but the architecture described in this document is the serious approximately 120M target.
+
+The integrated 1.3M ultralight profile is a different object from that legacy
+4.7M carrier. It deliberately retains the complete MRCRA module graph and all
+authority boundaries by using a tied 20-wide token/output embedding, six
+independently stateful physical scales with shared learned depth, reduced
+low-rank adapters, and smaller bounded runtime capacities. It is intended for
+fast end-to-end mechanism, causality, checkpoint, and training experiments.
+Its structural completeness must not be confused with representational
+capacity: with the GPT-2 vocabulary, most of its parameters reside in the tied
+embedding, so it is not a serious language-capability target.
+
+The 8.4M integrated light profile provides substantially more representational
+and cognitive width while retaining shared learned depth. It remains the
+recommended first substantial local-training profile. Neither small profile
+changes the serious 120M configuration or its acceptance standard.
 
 Twenty million tokens are useful for integration and systems smoke tests at 120M, not serious pretraining. They provide only about 0.17 tokens per parameter. A meaningful capability judgment requires at least a low-billions token regime plus held-out structural tasks; exact scaling should be determined empirically rather than inferred from Transformer-only laws.
 

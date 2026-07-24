@@ -175,9 +175,10 @@ input to this authority.
 
 The hash-bound acceptance workflow records:
 
-- 567 passing Python tests and one intentional self-referential ledger skip
+- 572 passing Python tests and one intentional self-referential ledger skip
   while rebuilding the manifest;
-- a passing post-build executable traceability audit;
+- a passing post-build executable traceability audit, producing 573/573
+  passing tests in the ordinary final run;
 - 51 passing frontend tests, lint, and production build;
 - passing PC-RASL causal-pressure, anti-gaming, guard-recovery, signed-credit,
   critic-learning, internal-controller, gradient-firewall, and

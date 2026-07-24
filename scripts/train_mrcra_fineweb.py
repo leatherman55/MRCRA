@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -56,6 +56,25 @@ def write_json_atomic(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
+class GPT2WidthByteSmokeTokenizer(ByteTextTokenizer):
+    """Dependency-free byte encoding with the production GPT-2 tensor width.
+
+    This is used only to exercise a real production-profile construction in a
+    deterministic offline smoke test. It does not claim GPT-2 token semantics.
+    """
+
+    vocabulary_size = 50_257
+    eos_token_id = 50_256
+
+    def identity(self) -> dict:
+        return {
+            "kind": "utf8-bytes-production-width-smoke",
+            "vocabulary_size": self.vocabulary_size,
+            "eos_token_id": self.eos_token_id,
+            "semantic_tokenizer": False,
+        }
+
+
 def tiny_configuration(vocabulary_size: int) -> MRCRAConfig:
     carrier = MRRNConfig(
         input_dim=8, model_dim=8, output_dim=vocabulary_size, layers=1, scales=2,
@@ -95,16 +114,74 @@ def tiny_configuration(vocabulary_size: int) -> MRCRAConfig:
     )
 
 
-def production_configuration(vocabulary_size: int, *, lightmodel: bool) -> MRCRAConfig:
+def production_configuration(
+    vocabulary_size: int, *, lightmodel: bool,
+    ultralightmodel: bool = False,
+) -> MRCRAConfig:
     """Select the declared production actor profile without relaxing its budget."""
 
-    factory = MRCRAConfig.light_8p4m if lightmodel else MRCRAConfig.serious_120m
+    if lightmodel and ultralightmodel:
+        raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
+    factory = (
+        MRCRAConfig.ultralight_1p3m
+        if ultralightmodel
+        else MRCRAConfig.light_8p4m
+        if lightmodel
+        else MRCRAConfig.serious_120m
+    )
     return factory(output_dim=vocabulary_size)
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionProfile:
+    """Stable names and paths associated with one declared actor profile."""
+
+    name: str
+    model_authority: str
+    output_directory: str
+    run_name: str
+
+
+def production_profile(
+    *, lightmodel: bool, ultralightmodel: bool, total_tokens: int,
+) -> ProductionProfile:
+    if lightmodel and ultralightmodel:
+        raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
+    if ultralightmodel:
+        return ProductionProfile(
+            name="mrcra_1p3m_ultralight",
+            model_authority="mrcra-ultralight-1p3m-fineweb-stage1",
+            output_directory=(
+                f"outputs/mrcra-1p3m-fineweb-{total_tokens}-tokens"
+            ),
+            run_name=(
+                f"mrcra-1p3m-ultralight-integrated-fineweb-"
+                f"{total_tokens}-tokens-32k"
+            ),
+        )
+    if lightmodel:
+        return ProductionProfile(
+            name="mrcra_8p4m_light",
+            model_authority="mrcra-light-8p4m-fineweb-stage1",
+            output_directory=(
+                f"outputs/mrcra-8p4m-fineweb-{total_tokens}-tokens"
+            ),
+            run_name=(
+                f"mrcra-8p4m-light-integrated-fineweb-"
+                f"{total_tokens}-tokens-32k"
+            ),
+        )
+    return ProductionProfile(
+        name="mrcra_120m_serious",
+        model_authority="mrcra-fineweb-stage1",
+        output_directory="outputs/mrcra-120m-fineweb-20m",
+        run_name=f"mrcra-120m-fineweb-{total_tokens}-tokens-32k",
+    )
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Train the serious MRCRA actor on original English FineWeb with 32K contexts."
+        description="Train a complete MRCRA actor on original English FineWeb with 32K contexts."
     )
     result.add_argument("--dataset-id", default="HuggingFaceFW/fineweb")
     result.add_argument("--dataset-config", default="sample-10BT")
@@ -114,15 +191,23 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--output-dir",
         help=(
-            "Run directory; defaults to the profile-specific 120M or 8.4M "
-            "FineWeb directory."
+            "Run directory; defaults to the selected 120M, 8.4M, or 1.3M "
+            "FineWeb profile directory."
         ),
     )
-    result.add_argument(
+    size = result.add_mutually_exclusive_group()
+    size.add_argument(
         "--lightmodel", action="store_true",
         help=(
             "Train the complete shared-depth 8.4M MRCRA profile instead of "
             "the default 120M-class actor."
+        ),
+    )
+    size.add_argument(
+        "--ultralightmodel", action="store_true",
+        help=(
+            "Train the complete six-scale 1.3M MRCRA profile instead of the "
+            "default 120M-class actor."
         ),
     )
     result.add_argument("--total-tokens", type=int, default=20_000_000)
@@ -325,13 +410,16 @@ def main() -> None:
     if torch.get_num_interop_threads() != args.cpu_interop_threads:
         torch.set_num_interop_threads(args.cpu_interop_threads)
     torch.manual_seed(args.seed)
-    model_profile = "mrcra_8p4m_light" if args.lightmodel else "mrcra_120m_serious"
-    tbptt_length = args.tbptt_length or 4_096
-    default_output_dir = (
-        f"outputs/mrcra-8p4m-fineweb-{args.total_tokens}-tokens"
-        if args.lightmodel else "outputs/mrcra-120m-fineweb-20m"
+    selected_profile = production_profile(
+        lightmodel=args.lightmodel,
+        ultralightmodel=args.ultralightmodel,
+        total_tokens=args.total_tokens,
     )
-    output_dir = Path(args.output_dir or default_output_dir).resolve()
+    model_profile = selected_profile.name
+    tbptt_length = args.tbptt_length or 4_096
+    output_dir = Path(
+        args.output_dir or selected_profile.output_directory
+    ).resolve()
     if args.resume is None and any(
         (output_dir / name).exists()
         for name in ("metrics.jsonl", "run_manifest.json", "checkpoints")
@@ -339,9 +427,28 @@ def main() -> None:
         raise FileExistsError(f"{output_dir} already contains a run; use --resume")
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.smoke_test:
-        model_profile = "mrcra_tiny_smoke"
-        tokenizer = ByteTextTokenizer()
-        model = MRCRALanguageModel(tiny_configuration(tokenizer.vocabulary_size))
+        if args.ultralightmodel:
+            model_profile = selected_profile.name
+            tokenizer = GPT2WidthByteSmokeTokenizer()
+            model = MRCRALanguageModel(
+                production_configuration(
+                    tokenizer.vocabulary_size,
+                    lightmodel=False,
+                    ultralightmodel=True,
+                ),
+                model_authority=selected_profile.model_authority,
+            )
+            model.config.require_actor_parameter_count(model.parameter_count)
+            smoke_run_name = "mrcra-1p3m-ultralight-smoke"
+            smoke_vocabulary_tile_size = 2_048
+        else:
+            model_profile = "mrcra_tiny_smoke"
+            tokenizer = ByteTextTokenizer()
+            model = MRCRALanguageModel(
+                tiny_configuration(tokenizer.vocabulary_size)
+            )
+            smoke_run_name = "mrcra-integrated-default-smoke"
+            smoke_vocabulary_tile_size = 32
         source = SequenceTextSource((
             "Events persist through typed relations.",
             "Provenance separates observation from simulation.",
@@ -370,7 +477,8 @@ def main() -> None:
         )
         configuration = MRCRATrainingConfig(
             output_dir=str(output_dir), total_tokens=16, context_length=8,
-            execution_chunk_size=2, tbptt_length=4, vocabulary_tile_size=32,
+            execution_chunk_size=2, tbptt_length=4,
+            vocabulary_tile_size=smoke_vocabulary_tile_size,
             integrated_cognitive_path=True, cognitive_stride=2,
             cognitive_tbptt_events=2,
             warmup_tokens=8, checkpoint_interval=2, device="cpu", precision="fp32",
@@ -397,7 +505,7 @@ def main() -> None:
             spectral_dashboard=args.spectral_dashboard,
             spectral_snapshot_interval=1, spectral_snapshot_tokens=8,
             trackio_project=args.trackio_project,
-            run_name=args.run_name or "mrcra-integrated-default-smoke",
+            run_name=args.run_name or smoke_run_name,
             trackio_space_id=args.trackio_space_id,
             seed=args.seed,
             phase_transition_telemetry=args.phase_transition_telemetry,
@@ -418,15 +526,14 @@ def main() -> None:
         )
         tokenizer = HuggingFaceTextTokenizer(args.tokenizer, revision=tokenizer_revision)
         model_config = production_configuration(
-            tokenizer.vocabulary_size, lightmodel=args.lightmodel,
+            tokenizer.vocabulary_size,
+            lightmodel=args.lightmodel,
+            ultralightmodel=args.ultralightmodel,
         )
         cognitive_stride = args.cognitive_stride or model_config.cognitive.event_chunk_size
         model = MRCRALanguageModel(
             model_config,
-            model_authority=(
-                "mrcra-light-8p4m-fineweb-stage1"
-                if args.lightmodel else "mrcra-fineweb-stage1"
-            ),
+            model_authority=selected_profile.model_authority,
         )
         model.config.require_actor_parameter_count(model.parameter_count)
         source = FineWebTextSource(
@@ -514,15 +621,7 @@ def main() -> None:
             compile_tensor_cores=args.compile_tensor_cores,
             apple_mps_loss_offload=args.apple_mps_loss_offload,
             trackio_project=args.trackio_project,
-            run_name=(
-                args.run_name
-                or (
-                    f"mrcra-8p4m-light-integrated-fineweb-"
-                    f"{args.total_tokens}-tokens-32k"
-                    if args.lightmodel
-                    else f"mrcra-120m-fineweb-{args.total_tokens}-tokens-32k"
-                )
-            ),
+            run_name=args.run_name or selected_profile.run_name,
             trackio_space_id=args.trackio_space_id,
             trackio_enabled=args.trackio,
             show_dashboard=args.dashboard, spectral_dashboard=args.spectral_dashboard,

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import torch
 
 from mrrn.cognitive_surprise import CognitiveResonantAdjointSurpriseLearner
@@ -13,11 +14,14 @@ from mrrn.cognitive_training import (
     progress_conditioned_rasl_configuration,
 )
 from mrrn.language import MRCRALanguageModel
-from scripts.train_mrcra_fineweb import parser, production_configuration
+from scripts.train_mrcra_fineweb import (
+    parser, production_configuration, production_profile,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "scripts" / "train_fineweb.py"
+PARAMETER_REPORT = ROOT / "scripts" / "report_mrcra_parameters.py"
 INTEGRATED_FLAGS = (
     "enable_conditional_reconstruction",
     "enable_abstraction_validity_control",
@@ -40,13 +44,79 @@ def run_entrypoint(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_lightmodel_flag_selects_the_strict_8p4m_profile():
-    light = production_configuration(50_257, lightmodel=True)
-    serious = production_configuration(50_257, lightmodel=False)
+    light = production_configuration(
+        50_257, lightmodel=True, ultralightmodel=False
+    )
+    serious = production_configuration(
+        50_257, lightmodel=False, ultralightmodel=False
+    )
     assert light.carrier.model_dim == light.cognitive.workspace_dim == 96
     assert light.actor_parameter_minimum == 8_350_000
     assert light.actor_parameter_maximum == 8_450_000
     assert serious.carrier.model_dim == serious.cognitive.workspace_dim == 256
     assert serious.actor_parameter_minimum == 110_000_000
+
+
+def test_ultralightmodel_selects_exact_complete_1p3m_profile_and_names():
+    ultralight = production_configuration(
+        50_257, lightmodel=False, ultralightmodel=True
+    )
+    model = MRCRALanguageModel(ultralight)
+    selected = production_profile(
+        lightmodel=False, ultralightmodel=True, total_tokens=20_000_000
+    )
+
+    assert model.parameter_count == 1_299_669
+    assert ultralight.actor_parameter_minimum == 1_290_000
+    assert ultralight.actor_parameter_maximum == 1_310_000
+    assert ultralight.carrier.model_dim == ultralight.cognitive.workspace_dim == 20
+    assert ultralight.carrier.scales == 6
+    assert selected.name == "mrcra_1p3m_ultralight"
+    assert selected.model_authority == "mrcra-ultralight-1p3m-fineweb-stage1"
+    assert selected.output_directory.endswith(
+        "mrcra-1p3m-fineweb-20000000-tokens"
+    )
+    assert selected.run_name == (
+        "mrcra-1p3m-ultralight-integrated-fineweb-"
+        "20000000-tokens-32k"
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        production_configuration(
+            50_257, lightmodel=True, ultralightmodel=True
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        production_profile(
+            lightmodel=True, ultralightmodel=True, total_tokens=20_000_000
+        )
+
+
+def test_ultralight_parameter_report_is_reproducible(tmp_path):
+    output = tmp_path / "ultralight-parameters.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(PARAMETER_REPORT),
+            "--ultralightmodel",
+            "--output",
+            str(output),
+        ],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["model_profile"] == "mrcra_1p3m_ultralight"
+    assert report["parameter_count"] == report["trainable_parameter_count"] == 1_299_669
+    assert report["declared_range"]["passed"] is True
+    assert report["tied_token_and_output_weights"] is True
+    assert report["configuration"]["carrier"]["scales"] == 6
+    assert report["parameter_count_by_subsystem"]["cognitive.carrier"] > 0
+    assert report["parameter_count_by_subsystem"]["cognitive.workspace_graph"] > 0
+    assert report["parameter_count_by_subsystem"]["cognitive.controller"] > 0
+    assert report["parameter_count_by_subsystem"]["cognitive.world_model"] > 0
 
 
 def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
@@ -73,6 +143,31 @@ def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
     assert learner.target_critic is not learner.critic
     assert learner.config.core.task_weight == 0.0
     assert learner.config.core.require_external_reward is True
+
+
+def test_ultralight_pc_rasl_remains_bounded_and_does_not_duplicate_actor():
+    actor = MRCRALanguageModel(
+        production_configuration(
+            50_257, lightmodel=False, ultralightmodel=True
+        )
+    )
+    training = MRCRATrainingConfig(
+        integrated_cognitive_path=True,
+        progress_conditioned_rasl=True,
+        progress_probe_batches=2,
+    )
+    learner = CognitiveResonantAdjointSurpriseLearner(
+        actor,
+        progress_conditioned_rasl_configuration(actor, training),
+    )
+    critic_parameters = sum(
+        parameter.numel() for parameter in learner.critic.parameters()
+    )
+
+    assert critic_parameters == 94_621
+    assert critic_parameters / actor.parameter_count < 0.075
+    assert learner.target_actor is None
+    assert learner.target_critic is not learner.critic
 
 
 def test_measured_apple_optimization_policy_is_the_no_flag_default():
@@ -105,10 +200,11 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
 def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
     completed = run_entrypoint("--help")
     assert completed.returncode == 0, completed.stdout
-    assert "serious MRCRA actor" in completed.stdout
+    assert "complete MRCRA actor" in completed.stdout
     assert "--context-length" in completed.stdout
     assert "--training-profile" in completed.stdout
     assert "--lightmodel" in completed.stdout
+    assert "--ultralightmodel" in completed.stdout
     assert "--progress-interval-tokens" in completed.stdout
     assert "--cognitive-stride" in completed.stdout
     assert "--compile-tensor-cores" in completed.stdout
@@ -124,6 +220,10 @@ def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
     assert legacy.returncode == 0, legacy.stdout
     assert "4.695M MRRN" in legacy.stdout
     assert "--sequence-length" in legacy.stdout
+
+    conflicting = run_entrypoint("--lightmodel", "--ultralightmodel")
+    assert conflicting.returncode == 2
+    assert "not allowed with argument --lightmodel" in conflicting.stdout
 
 
 def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkpoint(tmp_path):
@@ -202,6 +302,45 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkp
     assert checkpoint["pc_rasl"] is not None
     assert checkpoint["last_runtime"] is not None
     assert checkpoint["last_provenance"] is not None
+
+
+def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
+    output = tmp_path / "ultralight-fineweb-smoke"
+    completed = run_entrypoint(
+        "--smoke-test",
+        "--ultralightmodel",
+        "--output-dir",
+        str(output),
+        "--no-phase-transition-ablation",
+        "--no-dashboard",
+        "--no-trackio",
+    )
+    assert completed.returncode == 0, completed.stdout
+    assert "MRCRA actor: 1,299,669 parameters" in completed.stdout
+
+    manifest = json.loads(
+        (output / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["model_profile"] == "mrcra_1p3m_ultralight"
+    assert manifest["model_parameters"] == 1_299_669
+    assert manifest["tokenizer"] == {
+        "kind": "utf8-bytes-production-width-smoke",
+        "vocabulary_size": 50_257,
+        "eos_token_id": 50_256,
+        "semantic_tokenizer": False,
+    }
+    carrier = manifest["model_config"]["carrier"]
+    cognition = manifest["model_config"]["cognitive"]
+    assert carrier["model_dim"] == cognition["workspace_dim"] == 20
+    assert carrier["scales"] == 6
+    assert carrier["share_depth_parameters"] is True
+    assert all(cognition[name] is True for name in INTEGRATED_FLAGS)
+    training = manifest["training_config"]
+    assert training["run_name"] == "mrcra-1p3m-ultralight-smoke"
+    assert training["integrated_cognitive_path"] is True
+    assert training["progress_conditioned_rasl"] is True
+    assert manifest["functional_surprise_enabled"] is True
+    assert manifest["completed"] is True
 
 
 def test_smoke_can_explicitly_disable_progress_conditioned_rasl(tmp_path):

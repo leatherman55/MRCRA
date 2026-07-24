@@ -593,19 +593,27 @@ The model sizes below use the GPT-2 vocabulary of 50,257 tokens.
 
 | Profile | Parameters | Carrier | Intended use | Selection |
 | --- | ---: | --- | --- | --- |
+| Integrated ultralight | 1,299,669 | 6 scales, shared learned depth, 20-wide base | Fast mechanism experiments and CPU-constrained training while preserving the complete architectural graph; not a serious capability scale | `--ultralightmodel` |
 | Integrated light | 8,413,442 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate | `--lightmodel` |
 | Serious | 115,925,944 | 6 scales, unshared learned depth, 256-wide base | Full architecture training and serious evaluation | Default |
 | Legacy sequence MRRN | 4,695,023 | Sequence-only spectral carrier | Compatibility and carrier-only ablation | `--legacy-mrrn` |
 
 The parameter counts are construction-time invariants, not rounded marketing
-targets. Reproduce the audits with:
+targets. The ultralight actor ties its 50,257 × 20 input/output embedding,
+shares learned carrier depth across six independently stateful resolution
+scales, and reduces ranks and bounded runtime capacities. It does **not**
+delete the relational branch, event loop, workspace, memories, reconstruction,
+world model, controller, metacognition, viability, or PC-RASL interfaces.
+Reproduce the audits with:
 
 ```bash
+python scripts/report_mrcra_parameters.py --ultralightmodel
 python scripts/report_mrcra_parameters.py --lightmodel
 python scripts/report_mrcra_parameters.py
 ```
 
 Detailed subsystem allocations are retained in
+[`outputs/mrcra_1p3m_parameter_report.json`](outputs/mrcra_1p3m_parameter_report.json),
 [`outputs/mrcra_8p4m_parameter_report.json`](outputs/mrcra_8p4m_parameter_report.json)
 and
 [`outputs/mrcra_120m_parameter_report.json`](outputs/mrcra_120m_parameter_report.json).
@@ -717,6 +725,21 @@ python scripts/train_fineweb.py \
   --total-tokens 20000000
 ```
 
+### Ultralight profile
+
+Use this for fast end-to-end architecture and training experiments under tight
+compute constraints. It runs the same integrated training authority as the
+larger profiles, including Progress-Conditioned RASL by default:
+
+```bash
+python scripts/train_fineweb.py \
+  --ultralightmodel \
+  --total-tokens 20000000
+```
+
+`--ultralightmodel` and `--lightmodel` are mutually exclusive. Checkpoints bind
+the full configuration and cannot be resumed under a different size profile.
+
 ### Serious profile
 
 ```bash
@@ -762,6 +785,7 @@ Examples:
 
 ```bash
 python scripts/train_fineweb.py --lightmodel --device cuda:0 --precision bf16
+python scripts/train_fineweb.py --ultralightmodel --device cpu --cpu-threads 4
 python scripts/train_fineweb.py --lightmodel --device cpu --cpu-threads 4
 python scripts/train_fineweb.py --lightmodel --device mps
 ```
@@ -913,6 +937,8 @@ training runs are intentionally not stored in the public repository.
 | --- | --- |
 | [MRCRA architecture specification](outputs/multimodal_relational_continuity_resonance_architecture.md) | Complete cognitive architecture, invariants, authority boundaries, training contracts, and acceptance criteria |
 | [MRRN mathematical specification](outputs/multiresolution_resonance_network_spec.md) | Spectral carrier equations, attention, recurrent state, activation, input/output contracts, and scaling behavior |
+| [1.3M ultralight design](outputs/mrcra_1p3m_design_report.md) | Parameter rationale, preserved mechanisms, carrier/cognitive allocations, training integration, verification, and claim boundary |
+| [1.3M parameter audit](outputs/mrcra_1p3m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
 | [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
 | [PC-RASL implementation report](outputs/progress_conditioned_rasl_implementation_report.md) | Causal authority, exact delayed replay, critic/controller path, gradient governance, resources, migration, observability, and claim boundaries |
@@ -937,9 +963,9 @@ python scripts/run_pc_rasl_acceptance.py
 
 The retained initial-public-release evidence records:
 
-- 567 passing Python tests and 1 intentionally skipped self-referential
+- 572 passing Python tests and 1 intentionally skipped self-referential
   hash-ledger test during manifest construction; the same ledger test passes
-  after the evidence file is rebuilt;
+  after the evidence file is rebuilt, producing 573/573 passing tests;
 - passing frontend tests, lint, and production build;
 - passing empirical mechanism acceptance;
 - passing integrated cognitive-path acceptance;

@@ -68,7 +68,7 @@
           "threshold": 0.0
         }
       ],
-      "duration_seconds": 0.03451541699178051,
+      "duration_seconds": 0.03400724999664817,
       "metrics": {
         "accelerating_pressure": 0.6183185906875217,
         "gaming_debt": 0.8435239459450128,
@@ -122,7 +122,7 @@
           "threshold": 1.0
         }
       ],
-      "duration_seconds": 1.1629663750063628,
+      "duration_seconds": 1.1358982090023346,
       "metrics": {
         "candidate_count": 5.0,
         "controller_gradient_norm": 0.0730082738247599,
@@ -163,7 +163,7 @@
           "threshold": 0.0
         }
       ],
-      "duration_seconds": 0.00044629200419876724,
+      "duration_seconds": 0.0005772080039605498,
       "metrics": {
         "carrier_mutation": 0.0,
         "conflict_detected": 1.0,

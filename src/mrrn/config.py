@@ -264,6 +264,51 @@ class MRRNConfig:
         defaults.update(overrides)
         return cls(input_dim=input_dim, **defaults)
 
+    @classmethod
+    def mrcra_ultralight_1p3m_carrier(
+        cls, input_dim: int = 20, output_dim: int | None = None, **overrides,
+    ) -> "MRRNConfig":
+        """Six-scale spectral carrier for the complete 1.3M MRCRA actor.
+
+        With a 50,257-token vocabulary, tied token/output weights consume most
+        of a 1.3M budget.  A 20-wide representation is the largest practical
+        width that still leaves enough capacity for every cognitive subsystem.
+        Learned depth is shared, but all six physical resolution scales retain
+        independent recurrent state.  The profile preserves explicit
+        resonance modes, spectral activation, structured mixing, local
+        attention, memory retrieval, and the relational feedback branch.
+        """
+
+        defaults = dict(
+            model_dim=20,
+            output_dim=output_dim,
+            layers=6,
+            scales=6,
+            heads=2,
+            modes=8,
+            mimo_rank=1,
+            attention_window=32,
+            attention_query_tile_size=256,
+            retrieved_items=4,
+            memory_capacity=1024,
+            lifting_kernel=3,
+            mixer_expansion=2.5,
+            width_growth_cap=1.25,
+            mode_growth_cap=1.33,
+            width_multiple=4,
+            share_depth_parameters=True,
+            structured_mixer_rank=8,
+            spectral_modes=5,
+            spectral_basis_order=5,
+            spectral_triads_per_mode=1,
+            enable_global_head=False,
+            activation_checkpointing=True,
+            relational_branch=True,
+            relational_context_dim=20,
+        )
+        defaults.update(overrides)
+        return cls(input_dim=input_dim, **defaults)
+
 
 @dataclass(frozen=True, slots=True)
 class CognitiveConfig:
@@ -499,6 +544,85 @@ class MRCRAConfig:
             carrier, cognitive,
             actor_parameter_minimum=8_350_000,
             actor_parameter_maximum=8_450_000,
+        )
+
+    @classmethod
+    def ultralight_1p3m(
+        cls, *, input_dim: int = 20, output_dim: int | None = None,
+        carrier_overrides: dict | None = None, cognitive_overrides: dict | None = None,
+    ) -> "MRCRAConfig":
+        """Complete 1.3M-class MRCRA profile for the GPT-2 vocabulary.
+
+        This profile compresses dimensions, ranks, and bounded runtime
+        capacities without deleting mechanisms.  It retains the six-scale
+        MRRN carrier and every integrated cognitive pathway used by the light
+        and serious actors.  Its narrow declared band fails closed if tokenizer
+        width or architecture drift makes the ``1.3M`` name inaccurate.
+        """
+
+        carrier = MRRNConfig.mrcra_ultralight_1p3m_carrier(
+            input_dim, output_dim, **(carrier_overrides or {})
+        )
+        mature = {
+            "workspace_dim": 20,
+            "provenance_features": 8,
+            "uncertainty_channels": 8,
+            "relation_heads": 2,
+            "relation_modes": 8,
+            "relation_adapter_rank": 6,
+            "goal_slots": 4,
+            "goal_constraint_dim": 4,
+            "system_action_channels": 4,
+            "calibration_regimes": 4,
+            "calibration_bins": 15,
+            "operational_schema_count": 4,
+            "knowledge_candidate_capacity": 8,
+            "knowledge_support_capacity": 8,
+            "reconstruction_capacity": 8,
+            "action_candidate_capacity": 4,
+            "action_argument_dim": 4,
+            "evidence_request_capacity": 2,
+            "external_artifact_capacity": 8,
+            "external_artifact_digest_width": 16,
+            "viability_channels": 8,
+            "metacognitive_capacity": 8,
+            "active_event_capacity": 64,
+            "pair_edge_capacity": 256,
+            "hyperedge_capacity": 32,
+            "maximum_hyperedge_arity": 4,
+            "graph_neighbors": 4,
+            "global_workspace_slots": 6,
+            "hypothesis_slots": 2,
+            "maximum_hypothesis_slots": 4,
+            "planning_hypothesis_top_k": 2,
+            "maximum_cognitive_steps": 4,
+            "event_chunk_size": 64,
+            "event_proposals_per_chunk": 4,
+            "recent_candidates": 12,
+            "landmark_candidates": 4,
+            "episodic_candidates": 4,
+            "semantic_candidates": 4,
+            "episodic_memory_capacity": 1024,
+            "semantic_memory_capacity": 256,
+            "associative_depth": 2,
+            "associative_budget": 8,
+            "world_model_horizons": (1, 4, 16, 64),
+            "enable_conditional_reconstruction": True,
+            "enable_abstraction_validity_control": True,
+            "enable_post_deliberation_action_selection": True,
+            "enable_multi_hypothesis_planning": True,
+            "enable_agent_session_loop": True,
+            "enable_viability_gate": True,
+            "enable_integrated_invariant_discovery": True,
+            "enable_persistent_session_training": True,
+            "enable_metacognitive_routing": True,
+        }
+        mature.update(cognitive_overrides or {})
+        cognitive = CognitiveConfig(**mature)
+        return cls(
+            carrier, cognitive,
+            actor_parameter_minimum=1_290_000,
+            actor_parameter_maximum=1_310_000,
         )
 
     def require_actor_parameter_count(self, count: int) -> None:

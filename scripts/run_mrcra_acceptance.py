@@ -127,6 +127,10 @@ def source_hashes() -> dict[str, str]:
         ROOT / "outputs" / "mrcra_integrated_acceptance.json",
         ROOT / "outputs" / "mrcra_performance_acceptance.json",
         ROOT / "outputs" / "pc_rasl_empirical_acceptance.json",
+        ROOT / "outputs" / "mrcra_1p3m_parameter_report.json",
+        ROOT / "outputs" / "mrcra_8p4m_parameter_report.json",
+        ROOT / "outputs" / "mrcra_120m_parameter_report.json",
+        ROOT / "outputs" / "mrcra_1p3m_design_report.md",
     ))
     return {
         str(path.relative_to(ROOT)): sha256(path.read_bytes()).hexdigest()
