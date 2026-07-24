@@ -35,6 +35,38 @@ def _finite(value: Any) -> float | None:
     return result if torch.isfinite(torch.tensor(result)) else None
 
 
+def _observed_mean(
+    value: Tensor, *, digits: int, label: str,
+) -> float | None:
+    """Reduce observed diagnostic samples without inventing inactive values.
+
+    Empty coarse-scale tensors are a valid consequence of a prompt shorter
+    than that scale's support.  They are absent observations, not numerical
+    zeroes.  Non-empty non-finite tensors remain an error so instrumentation
+    cannot conceal a genuine model or diagnostic instability.
+    """
+
+    if value.numel() == 0:
+        return None
+    result = float(value.detach().float().mean())
+    if not torch.isfinite(torch.tensor(result)):
+        raise FloatingPointError(f"non-finite {label} diagnostic")
+    return round(result, digits)
+
+
+def _observed_rms(
+    value: Tensor, *, digits: int, label: str,
+) -> float | None:
+    """Return an RMS for observed samples, or absence for an empty scale."""
+
+    if value.numel() == 0:
+        return None
+    result = float(value.detach().float().square().sum(-1).mean().sqrt())
+    if not torch.isfinite(torch.tensor(result)):
+        raise FloatingPointError(f"non-finite {label} diagnostic")
+    return round(result, digits)
+
+
 def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
     """Read the metric records that contain an optimization step.
 
@@ -284,39 +316,48 @@ def model_spectral_evidence(
         for scale_index, (mixer, branch, mixer_diagnostic) in enumerate(
             zip(block.mixers, diagnostic.branch_weights, diagnostic.spectral_mixers, strict=True)
         ):
-            means = branch.detach().float().mean(dim=(0, 1))
+            sample_count = int(branch[..., 0].numel())
+            branch_values = [
+                _observed_mean(
+                    branch[..., index], digits=6,
+                    label=f"branch {name} at block {block_index} scale {scale_index}",
+                )
+                for index, name in enumerate(
+                    ("resonance", "local", "attention", "identity")
+                )
+            ]
             branch_mix.append(
                 {
                     "block": block_index,
                     "scale": scale_index,
-                    "resonance": round(float(means[0]), 6),
-                    "local": round(float(means[1]), 6),
-                    "attention": round(float(means[2]), 6),
-                    "identity": round(float(means[3]), 6),
+                    "active": sample_count > 0,
+                    "sample_count": sample_count,
+                    "resonance": branch_values[0],
+                    "local": branch_values[1],
+                    "attention": branch_values[2],
+                    "identity": branch_values[3],
                     "spectral_fraction": None,
                 }
             )
             if not isinstance(mixer, HybridSpectralMixer) or mixer_diagnostic is None:
                 continue
             spectral = mixer.spectral
-            branch_mix[-1]["spectral_fraction"] = round(
-                float(mixer_diagnostic.spectral_fraction.detach().float().mean()), 6
+            branch_mix[-1]["spectral_fraction"] = _observed_mean(
+                mixer_diagnostic.spectral_fraction,
+                digits=6,
+                label=(
+                    f"spectral fraction at block {block_index} "
+                    f"scale {scale_index}"
+                ),
             )
             actual_weight = spectral.maximum_triad_gain * torch.tanh(
                 spectral.raw_triad_weight.detach().float()
             )
             strength = actual_weight.abs().mean(dim=(0, 2))
             signed = actual_weight.mean(dim=(0, 2))
-            activity_by_mode = (
-                mixer_diagnostic.spectral.triad.detach().float().square().sum(-1)
-                .mean(dim=(0, 1, 2, 4)).sqrt()
-            )
-            gate_by_mode = mixer_diagnostic.spectral.amplitude_gate.detach().float().mean(
-                dim=(0, 1, 2, 4)
-            )
-            phase_by_mode = mixer_diagnostic.spectral.phase_rotation.detach().float().mean(
-                dim=(0, 1, 2, 4)
-            )
+            triad_values = mixer_diagnostic.spectral.triad.detach().float()
+            gate_values = mixer_diagnostic.spectral.amplitude_gate.detach().float()
+            phase_values = mixer_diagnostic.spectral.phase_rotation.detach().float()
             frequencies = spectral.frequencies.detach().float()
             for edge in range(spectral.triad_target.numel()):
                 target = int(spectral.triad_target[edge])
@@ -336,9 +377,32 @@ def model_spectral_evidence(
                         "right_frequency": round(float(frequencies[right]), 6),
                         "strength": round(float(strength[edge]), 8),
                         "signed_weight": round(float(signed[edge]), 8),
-                        "activity": round(float(activity_by_mode[target]), 8),
-                        "mean_gate": round(float(gate_by_mode[target]), 6),
-                        "mean_phase": round(float(phase_by_mode[target]), 6),
+                        "active": sample_count > 0,
+                        "sample_count": sample_count,
+                        "activity": _observed_rms(
+                            triad_values[..., target, :, :],
+                            digits=8,
+                            label=(
+                                f"triad activity at block {block_index} "
+                                f"scale {scale_index} mode {target}"
+                            ),
+                        ),
+                        "mean_gate": _observed_mean(
+                            gate_values[..., target, :],
+                            digits=6,
+                            label=(
+                                f"triad gate at block {block_index} "
+                                f"scale {scale_index} mode {target}"
+                            ),
+                        ),
+                        "mean_phase": _observed_mean(
+                            phase_values[..., target, :],
+                            digits=6,
+                            label=(
+                                f"triad phase at block {block_index} "
+                                f"scale {scale_index} mode {target}"
+                            ),
+                        ),
                     }
                 )
 
@@ -451,4 +515,7 @@ def build_visualization_dataset(
 def write_visualization_dataset(path: str | Path, evidence: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(evidence, separators=(",", ":")), encoding="utf-8")
+    destination.write_text(
+        json.dumps(evidence, separators=(",", ":"), allow_nan=False),
+        encoding="utf-8",
+    )

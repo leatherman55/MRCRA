@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -132,6 +132,104 @@ def production_configuration(
     return factory(output_dim=vocabulary_size)
 
 
+def _host_memory_capacity_bytes() -> int:
+    """Return stable physical host capacity without adding a runtime dependency."""
+
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE")) * int(
+            os.sysconf("SC_PHYS_PAGES")
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        try:
+            import psutil
+
+            return int(psutil.virtual_memory().total)
+        except (ImportError, AttributeError):
+            return 8 << 30
+
+
+def resolve_activation_checkpointing(
+    configuration: MRCRAConfig,
+    *,
+    tbptt_length: int,
+    device: str,
+    precision: str,
+    override: bool | None,
+) -> tuple[MRCRAConfig, dict[str, int | float | str | bool]]:
+    """Select carrier recomputation from a conservative live-memory estimate.
+
+    The estimate intentionally models saved backward intermediates rather than
+    parameter count. Shared-depth models still execute every physical scale and
+    refinement pass, so their activation demand scales with TBPTT length, scale
+    widths, and executed depth even when their parameter count is tiny.
+    """
+
+    use_cuda = (
+        device.startswith("cuda")
+        or (device == "auto" and torch.cuda.is_available())
+    )
+    if use_cuda:
+        index = (
+            int(device.split(":", 1)[1])
+            if device.startswith("cuda:") else torch.cuda.current_device()
+        )
+        capacity = int(torch.cuda.get_device_properties(index).total_memory)
+        budget = min(8 << 30, capacity // 4)
+        element_bytes = 4 if precision == "fp32" else 2
+        memory_kind = "cuda_device_capacity"
+    else:
+        capacity = _host_memory_capacity_bytes()
+        budget = min(2 << 30, capacity // 8)
+        element_bytes = 4
+        memory_kind = "host_physical_capacity"
+    carrier = configuration.carrier
+    executed_width = sum(scale.width for scale in carrier.scale_configs())
+    estimated = (
+        tbptt_length
+        * executed_width
+        * carrier.layers
+        * element_bytes
+        * 96
+    )
+    if override is None:
+        enabled = estimated > budget
+        policy = (
+            "automatic_recompute_over_budget"
+            if enabled else "automatic_retain_within_budget"
+        )
+    else:
+        enabled = override
+        policy = "explicit_recompute" if enabled else "explicit_retain"
+    resolved = replace(
+        configuration,
+        carrier=replace(carrier, activation_checkpointing=enabled),
+    )
+    return resolved, {
+        "carrier_activation_checkpointing": enabled,
+        "carrier_activation_checkpointing_policy": policy,
+        "estimated_uncheckpointed_carrier_activation_bytes": estimated,
+        "carrier_activation_memory_budget_bytes": budget,
+        "activation_memory_capacity_bytes": capacity,
+        "activation_memory_capacity_kind": memory_kind,
+        "activation_estimate_element_bytes": element_bytes,
+    }
+
+
+def production_cognitive_stride(
+    configuration: MRCRAConfig,
+    *,
+    ultralightmodel: bool,
+    override: int | None,
+) -> int:
+    """Resolve the measured cognition cadence while preserving explicit control."""
+
+    if override is not None:
+        return override
+    if ultralightmodel:
+        return 128
+    return configuration.cognitive.event_chunk_size
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionProfile:
     """Stable names and paths associated with one declared actor profile."""
@@ -240,8 +338,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--cognitive-stride", type=int,
         help=(
-            "Causal event-cognition cadence; defaults to the selected model's "
-            "architectural event chunk size."
+            "Causal event-cognition cadence. The measured ultralight default is "
+            "128 tokens; larger profiles use their architectural event chunk."
+        ),
+    )
+    result.add_argument(
+        "--activation-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Recompute carrier activations in backward. By default this is "
+            "selected from executed width, TBPTT span, precision, and memory "
+            "capacity; either boolean flag is an explicit override."
         ),
     )
     result.add_argument(
@@ -261,10 +369,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--progress-conditioned-rasl",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Enable delayed CE-learning-progress pressure through the cognitive "
-            "resonant adjoint surprise learner (default: enabled)."
+            "resonant adjoint surprise learner. This experimental subsystem is "
+            "disabled by default and must be explicitly requested."
         ),
     )
     result.add_argument("--progress-probe-interval", type=int, default=5)
@@ -286,6 +395,24 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--pc-rasl-candidates", type=int, default=48)
     result.add_argument("--pc-rasl-replay-batch-size", type=int, default=1)
     result.add_argument("--pc-rasl-max-interval-trajectories", type=int, default=5)
+    result.add_argument(
+        "--pc-rasl-captures-per-observation",
+        type=int,
+        default=1,
+        help=(
+            "Bounded behavior trajectories sampled across each progress-probe "
+            "interval (default: one trajectory immediately before consequence)."
+        ),
+    )
+    result.add_argument(
+        "--pc-rasl-updates-per-observation",
+        type=int,
+        default=1,
+        help=(
+            "Critic/adjoint replay updates authorized by each new measured "
+            "learning-progress consequence (default: one)."
+        ),
+    )
     result.add_argument(
         "--pc-rasl-critic-warmup-observations",
         type=int,
@@ -385,6 +512,8 @@ def main() -> None:
         args.pc_rasl_trajectory_length, args.pc_rasl_candidates,
         args.pc_rasl_replay_batch_size,
         args.pc_rasl_max_interval_trajectories,
+        args.pc_rasl_captures_per_observation,
+        args.pc_rasl_updates_per_observation,
         args.pc_rasl_critic_warmup_observations,
     ) <= 0:
         raise ValueError(
@@ -430,12 +559,19 @@ def main() -> None:
         if args.ultralightmodel:
             model_profile = selected_profile.name
             tokenizer = GPT2WidthByteSmokeTokenizer()
-            model = MRCRALanguageModel(
+            smoke_model_config, activation_policy = resolve_activation_checkpointing(
                 production_configuration(
                     tokenizer.vocabulary_size,
                     lightmodel=False,
                     ultralightmodel=True,
                 ),
+                tbptt_length=4,
+                device="cpu",
+                precision="fp32",
+                override=args.activation_checkpointing,
+            )
+            model = MRCRALanguageModel(
+                smoke_model_config,
                 model_authority=selected_profile.model_authority,
             )
             model.config.require_actor_parameter_count(model.parameter_count)
@@ -444,8 +580,15 @@ def main() -> None:
         else:
             model_profile = "mrcra_tiny_smoke"
             tokenizer = ByteTextTokenizer()
+            smoke_model_config, activation_policy = resolve_activation_checkpointing(
+                tiny_configuration(tokenizer.vocabulary_size),
+                tbptt_length=4,
+                device="cpu",
+                precision="fp32",
+                override=args.activation_checkpointing,
+            )
             model = MRCRALanguageModel(
-                tiny_configuration(tokenizer.vocabulary_size)
+                smoke_model_config
             )
             smoke_run_name = "mrcra-integrated-default-smoke"
             smoke_vocabulary_tile_size = 32
@@ -492,6 +635,8 @@ def main() -> None:
             pc_rasl_trajectory_length=8,
             pc_rasl_candidate_count=8,
             pc_rasl_max_interval_trajectories=1,
+            pc_rasl_captures_per_observation=1,
+            pc_rasl_updates_per_observation=1,
             learning_progress=LearningProgressConfig(
                 observation_interval=1,
                 warmup_observations=4,
@@ -530,7 +675,18 @@ def main() -> None:
             lightmodel=args.lightmodel,
             ultralightmodel=args.ultralightmodel,
         )
-        cognitive_stride = args.cognitive_stride or model_config.cognitive.event_chunk_size
+        model_config, activation_policy = resolve_activation_checkpointing(
+            model_config,
+            tbptt_length=tbptt_length,
+            device=args.device,
+            precision=args.precision,
+            override=args.activation_checkpointing,
+        )
+        cognitive_stride = production_cognitive_stride(
+            model_config,
+            ultralightmodel=args.ultralightmodel,
+            override=args.cognitive_stride,
+        )
         model = MRCRALanguageModel(
             model_config,
             model_authority=selected_profile.model_authority,
@@ -548,11 +704,14 @@ def main() -> None:
             evaluation_fraction_permyriad=args.eval_fraction_permyriad,
             shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
         )
-        progress_source = FineWebTextSource(
-            dataset_id=args.dataset_id, dataset_config=args.dataset_config,
-            split="train", revision=dataset_revision, partition="progress",
-            evaluation_fraction_permyriad=args.eval_fraction_permyriad,
-            shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+        progress_source = (
+            FineWebTextSource(
+                dataset_id=args.dataset_id, dataset_config=args.dataset_config,
+                split="train", revision=dataset_revision, partition="progress",
+                evaluation_fraction_permyriad=args.eval_fraction_permyriad,
+                shuffle_seed=args.seed, shuffle_buffer=args.shuffle_buffer,
+            )
+            if args.progress_conditioned_rasl else None
         )
         evaluation_batches = build_evaluation_batches(
             PackedTokenStream(evaluation_source, tokenizer),
@@ -607,6 +766,12 @@ def main() -> None:
             pc_rasl_max_interval_trajectories=(
                 args.pc_rasl_max_interval_trajectories
             ),
+            pc_rasl_captures_per_observation=(
+                args.pc_rasl_captures_per_observation
+            ),
+            pc_rasl_updates_per_observation=(
+                args.pc_rasl_updates_per_observation
+            ),
             pc_rasl_critic_warmup_observations=(
                 args.pc_rasl_critic_warmup_observations
             ),
@@ -637,6 +802,7 @@ def main() -> None:
         model, tokenizer, PackedTokenStream(source, tokenizer), configuration,
         evaluation_batches, progress_probe_batches=progress_probe_batches,
     )
+    trainer.runtime.update(activation_policy)
     manifest = {
         "model_parameters": model.parameter_count,
         "architecture": "integrated_mrcra",
@@ -687,6 +853,15 @@ def main() -> None:
     print(
         f"Device {trainer.runtime['device']} ({trainer.runtime.get('gpu_name', 'host')}), "
         f"precision {trainer.runtime['precision']}.", flush=True,
+    )
+    print(
+        "Carrier activation policy: "
+        f"{activation_policy['carrier_activation_checkpointing_policy']} "
+        f"(estimated "
+        f"{activation_policy['estimated_uncheckpointed_carrier_activation_bytes'] / (1 << 20):.0f} MiB, "
+        f"budget "
+        f"{activation_policy['carrier_activation_memory_budget_bytes'] / (1 << 20):.0f} MiB).",
+        flush=True,
     )
     if args.resume:
         checkpoint = latest_checkpoint(output_dir) if args.resume == "latest" else Path(args.resume)

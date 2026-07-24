@@ -15,7 +15,8 @@ from mrrn.cognitive_training import (
 )
 from mrrn.language import MRCRALanguageModel
 from scripts.train_mrcra_fineweb import (
-    parser, production_configuration, production_profile,
+    parser, production_cognitive_stride, production_configuration,
+    production_profile, resolve_activation_checkpointing,
 )
 
 
@@ -180,11 +181,14 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert arguments.phase_transition_telemetry is True
     assert arguments.phase_transition_ablation is True
     assert arguments.phase_ablation_batches == 1
-    assert arguments.progress_conditioned_rasl is True
+    assert arguments.progress_conditioned_rasl is False
     assert arguments.progress_probe_interval == 5
     assert arguments.progress_probe_batches == 2
     assert arguments.progress_probe_length == 4_096
     assert arguments.pc_rasl_candidates == 48
+    assert arguments.pc_rasl_captures_per_observation == 1
+    assert arguments.pc_rasl_updates_per_observation == 1
+    assert arguments.activation_checkpointing is None
     assert (configuration.cpu_threads, configuration.cpu_interop_threads) == (4, 1)
     assert configuration.compile_tensor_cores is None
     assert configuration.apple_mps_loss_offload is False
@@ -195,6 +199,63 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert configuration.phase_transition_ablation_batches == 1
     assert configuration.low_clip_coefficient_threshold == 0.05
     assert configuration.low_clip_coefficient_patience == 10
+    assert configuration.pc_rasl_captures_per_observation == 1
+    assert configuration.pc_rasl_updates_per_observation == 1
+
+
+def test_ultralight_uses_measured_stride_and_memory_aware_checkpoint_policy(
+    monkeypatch,
+):
+    ultralight = production_configuration(
+        50_257, lightmodel=False, ultralightmodel=True
+    )
+    monkeypatch.setattr(
+        "scripts.train_mrcra_fineweb._host_memory_capacity_bytes",
+        lambda: 16 << 30,
+    )
+    resolved, policy = resolve_activation_checkpointing(
+        ultralight,
+        tbptt_length=4_096,
+        device="cpu",
+        precision="fp32",
+        override=None,
+    )
+
+    assert production_cognitive_stride(
+        ultralight, ultralightmodel=True, override=None
+    ) == 128
+    assert production_cognitive_stride(
+        ultralight, ultralightmodel=True, override=256
+    ) == 256
+    assert resolved.carrier.activation_checkpointing is False
+    assert policy["carrier_activation_checkpointing_policy"] == (
+        "automatic_retain_within_budget"
+    )
+    assert (
+        policy["estimated_uncheckpointed_carrier_activation_bytes"]
+        < policy["carrier_activation_memory_budget_bytes"]
+    )
+
+
+def test_activation_checkpoint_policy_preserves_explicit_override(monkeypatch):
+    ultralight = production_configuration(
+        50_257, lightmodel=False, ultralightmodel=True
+    )
+    monkeypatch.setattr(
+        "scripts.train_mrcra_fineweb._host_memory_capacity_bytes",
+        lambda: 16 << 30,
+    )
+    resolved, policy = resolve_activation_checkpointing(
+        ultralight,
+        tbptt_length=4_096,
+        device="cpu",
+        precision="fp32",
+        override=True,
+    )
+    assert resolved.carrier.activation_checkpointing is True
+    assert policy["carrier_activation_checkpointing_policy"] == (
+        "explicit_recompute"
+    )
 
 
 def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
@@ -226,7 +287,7 @@ def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
     assert "not allowed with argument --lightmodel" in conflicting.stdout
 
 
-def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkpoint(tmp_path):
+def test_default_fineweb_smoke_runs_integrated_mrcra_without_pc_rasl_and_format12_checkpoint(tmp_path):
     output = tmp_path / "canonical-fineweb-smoke"
     completed = run_entrypoint(
         "--smoke-test", "--output-dir", str(output), "--no-dashboard",
@@ -248,16 +309,15 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkp
     assert training["run_name"] == "mrcra-integrated-default-smoke"
     assert training["evaluation_interval"] == training["evaluation_batches"] == 1
     assert training["integrated_cognitive_path"] is True
-    assert training["progress_conditioned_rasl"] is True
-    assert training["progress_probe_batches"] == 1
-    assert manifest["functional_surprise_enabled"] is True
-    assert manifest["functional_surprise_mode"] == "progress_conditioned_rasl"
+    assert training["progress_conditioned_rasl"] is False
+    assert training["progress_probe_batches"] == 0
+    assert manifest["functional_surprise_enabled"] is False
+    assert manifest["functional_surprise_mode"] == "disabled"
     assert manifest["evaluation_source"]["kind"] == "sequence"
     assert manifest["evaluation_identity"]["batch_count"] == 1
     assert len(manifest["evaluation_identity"]["sha256"]) == 64
-    assert manifest["progress_probe_source"]["kind"] == "sequence"
-    assert manifest["progress_probe_identity"]["batch_count"] == 1
-    assert len(manifest["progress_probe_identity"]["sha256"]) == 64
+    assert manifest["progress_probe_source"] is None
+    assert manifest["progress_probe_identity"] is None
     metric_rows = [
         json.loads(line)
         for line in (output / "evaluation_metrics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -266,22 +326,7 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkp
         "eval/cross_entropy_nats_per_token" in row.get("metrics", {})
         for row in metric_rows
     )
-    progress_rows = [
-        json.loads(line)
-        for line in (
-            output / "progress_metrics.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(progress_rows) == 2
-    assert all(
-        row["progress_probe_identity"] == manifest["progress_probe_identity"]
-        and row["guard_evaluation_identity"] == manifest["evaluation_identity"]
-        for row in progress_rows
-    )
-    assert all(
-        "pc_rasl/progress_pressure" in row["metrics"]
-        for row in progress_rows
-    )
+    assert not (output / "progress_metrics.jsonl").exists()
     assert manifest["completed"] is True
     assert manifest["final_training_state"]["last_evaluation_step"] == 2
     assert manifest["final_training_state"]["last_evaluation_metrics"]
@@ -292,14 +337,14 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_pc_rasl_and_format10_checkp
     checkpoint = torch.load(
         output / "checkpoints" / pointer["checkpoint"], weights_only=True,
     )
-    assert checkpoint["format_version"] == MRCRA_TRAINING_FORMAT_VERSION == 10
+    assert checkpoint["format_version"] == MRCRA_TRAINING_FORMAT_VERSION == 12
     assert checkpoint["identity"]["evaluation"] == manifest["evaluation_identity"]
     assert checkpoint["identity"]["progress_probe"] == (
         manifest["progress_probe_identity"]
     )
     assert checkpoint["identity"]["training"]["require_evaluation"] is True
-    assert checkpoint["learning_progress"] is not None
-    assert checkpoint["pc_rasl"] is not None
+    assert checkpoint["learning_progress"] is None
+    assert checkpoint["pc_rasl"] is None
     assert checkpoint["last_runtime"] is not None
     assert checkpoint["last_provenance"] is not None
 
@@ -338,18 +383,18 @@ def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
     training = manifest["training_config"]
     assert training["run_name"] == "mrcra-1p3m-ultralight-smoke"
     assert training["integrated_cognitive_path"] is True
-    assert training["progress_conditioned_rasl"] is True
-    assert manifest["functional_surprise_enabled"] is True
+    assert training["progress_conditioned_rasl"] is False
+    assert manifest["functional_surprise_enabled"] is False
     assert manifest["completed"] is True
 
 
-def test_smoke_can_explicitly_disable_progress_conditioned_rasl(tmp_path):
-    output = tmp_path / "pc-rasl-disabled-smoke"
+def test_smoke_can_explicitly_enable_progress_conditioned_rasl(tmp_path):
+    output = tmp_path / "pc-rasl-enabled-smoke"
     completed = run_entrypoint(
         "--smoke-test",
         "--output-dir",
         str(output),
-        "--no-progress-conditioned-rasl",
+        "--progress-conditioned-rasl",
         "--no-dashboard",
         "--no-trackio",
     )
@@ -357,16 +402,26 @@ def test_smoke_can_explicitly_disable_progress_conditioned_rasl(tmp_path):
     manifest = json.loads(
         (output / "run_manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["functional_surprise_enabled"] is False
-    assert manifest["functional_surprise_mode"] == "disabled"
-    assert manifest["progress_probe_source"] is None
-    assert manifest["progress_probe_identity"] is None
-    assert not (output / "progress_metrics.jsonl").exists()
+    assert manifest["functional_surprise_enabled"] is True
+    assert manifest["functional_surprise_mode"] == "progress_conditioned_rasl"
+    assert manifest["progress_probe_source"]["kind"] == "sequence"
+    assert manifest["progress_probe_identity"]["batch_count"] == 1
+    progress_rows = [
+        json.loads(line)
+        for line in (
+            output / "progress_metrics.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(progress_rows) == 2
+    assert all(
+        "pc_rasl/progress_pressure" in row["metrics"]
+        for row in progress_rows
+    )
     pointer = json.loads(
         (output / "checkpoints" / "latest.json").read_text(encoding="utf-8")
     )
     checkpoint = torch.load(
         output / "checkpoints" / pointer["checkpoint"], weights_only=True,
     )
-    assert checkpoint["learning_progress"] is None
-    assert checkpoint["pc_rasl"] is None
+    assert checkpoint["learning_progress"] is not None
+    assert checkpoint["pc_rasl"] is not None

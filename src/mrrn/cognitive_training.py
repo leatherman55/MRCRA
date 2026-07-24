@@ -65,10 +65,13 @@ from .surprise import ResonantAdjointSurpriseConfig
 
 
 # Version 10 binds replay to compact pre-consequence cognitive behavior
-# evidence. Versions 3--9 migrate conservatively and restart PC-RASL causal
-# state when that evidence did not exist.
-MRCRA_TRAINING_FORMAT_VERSION = 10
-LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS = {3, 4, 5, 6, 7, 8, 9}
+# evidence, version 11 adds consequence-driven replay scheduling, and version
+# 12 removes PC-RASL from the default production authority. Versions 3--9
+# migrate conservatively and restart PC-RASL causal state when exact behavior
+# evidence did not exist.
+MRCRA_TRAINING_FORMAT_VERSION = 12
+LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS = {3, 4, 5, 6, 7, 8, 9, 10, 11}
+PRE_BEHAVIOR_EVIDENCE_FORMAT_VERSIONS = {3, 4, 5, 6, 7, 8, 9}
 
 _V4_COGNITIVE_DEFAULT_FIELDS = (
     "reconstruction_capacity", "action_candidate_capacity", "action_argument_dim",
@@ -211,15 +214,15 @@ def exact_fused_cross_entropy(
 
 
 def _diagnostic_snapshot_due(
-    step: int, interval: int, last_snapshot_step: int = -1,
+    step: int, interval: int, last_attempt_step: int = -1,
 ) -> bool:
-    """Publish once per process immediately, then use the low-overhead cadence."""
+    """Attempt once per process immediately, then use the bounded cadence."""
 
-    if step <= 0 or interval <= 0 or last_snapshot_step < -1:
+    if step <= 0 or interval <= 0 or last_attempt_step < -1:
         raise ValueError("diagnostic snapshot step and interval must be positive")
-    if last_snapshot_step >= step:
+    if last_attempt_step >= step:
         return False
-    return last_snapshot_step < 0 or step == 1 or step % interval == 0
+    return last_attempt_step < 0 or step == 1 or step % interval == 0
 
 
 def event_phase_metrics(
@@ -353,6 +356,8 @@ class MRCRATrainingConfig:
     pc_rasl_candidate_count: int = 48
     pc_rasl_replay_batch_size: int = 1
     pc_rasl_max_interval_trajectories: int = 5
+    pc_rasl_captures_per_observation: int = 1
+    pc_rasl_updates_per_observation: int = 1
     pc_rasl_critic_warmup_observations: int = 4
     pc_rasl_consequence_weight: float = 0.025
     pc_rasl_critic_learning_rate: float = 6e-5
@@ -404,6 +409,8 @@ class MRCRATrainingConfig:
             self.pc_rasl_candidate_count,
             self.pc_rasl_replay_batch_size,
             self.pc_rasl_max_interval_trajectories,
+            self.pc_rasl_captures_per_observation,
+            self.pc_rasl_updates_per_observation,
             self.pc_rasl_critic_warmup_observations,
         )
         if min(positive) <= 0:
@@ -428,6 +435,17 @@ class MRCRATrainingConfig:
             raise ValueError("loss workspace limits cannot be negative")
         if self.checkpoint_tiles is not None and not isinstance(self.checkpoint_tiles, bool):
             raise ValueError("checkpoint_tiles must be boolean or None for automatic selection")
+        if (
+            self.pc_rasl_captures_per_observation
+            > min(
+                self.pc_rasl_max_interval_trajectories,
+                self.learning_progress.observation_interval,
+            )
+        ):
+            raise ValueError(
+                "PC-RASL captures per observation cannot exceed the progress "
+                "interval or trajectory bound"
+            )
         if self.total_tokens < self.micro_batch_size * self.context_length:
             raise ValueError("token budget must contain at least one full context")
         if self.evaluation_interval < 0 or self.evaluation_batches < 0:
@@ -574,6 +592,9 @@ class MRCRATrainingState:
     last_progress_observation_step: int = 0
     last_progress_pressure: float = 0.0
     progress_observations: int = 0
+    pc_rasl_updates_due: int = 0
+    pc_rasl_trajectories_captured: int = 0
+    pc_rasl_replay_updates: int = 0
 
 
 def progress_conditioned_rasl_configuration(
@@ -848,6 +869,7 @@ class MRCRANextTokenTrainer:
         self._last_ledger: ProvenanceLedger | None = None
         self._last_continuity_keys: tuple[str | None, ...] | None = None
         self._last_snapshot_step = -1
+        self._last_snapshot_attempt_step = -1
         self._pending_first_hard_event_trace: HardEventTrace | None = None
         self._phase_update_proposal_logits: list[Tensor] = []
         self._phase_update_end_logits: list[Tensor] = []
@@ -911,12 +933,29 @@ class MRCRANextTokenTrainer:
                 "checkpointed PC-RASL trajectory schema is invalid"
             ) from error
 
+    def _pc_rasl_capture_due(self, next_step: int) -> bool:
+        """Select bounded, deterministic behavior samples within each interval."""
+
+        if self.pc_rasl is None:
+            return False
+        interval = self.config.learning_progress.observation_interval
+        captures = min(
+            self.config.pc_rasl_captures_per_observation,
+            interval,
+        )
+        phase = ((next_step - 1) % interval) + 1
+        positions = {
+            ceil((index + 1) * interval / captures)
+            for index in range(captures)
+        }
+        return phase in positions
+
     @torch.no_grad()
-    def _capture_pc_rasl_trajectory(self, batch: PackedBatch) -> None:
+    def _capture_pc_rasl_trajectory(self, batch: PackedBatch) -> bool:
         """Retain compact pre-consequence behavior evidence for delayed credit."""
 
         if self.pc_rasl is None:
-            return
+            return False
         segments = batch.segment_ids[0]
         valid = batch.loss_mask[0]
         best: tuple[int, int] | None = None
@@ -938,7 +977,7 @@ class MRCRANextTokenTrainer:
                 best = (start, end)
             start = end
         if best is None:
-            return
+            return False
         start, end = best
         end = min(end, start + self.config.pc_rasl_trajectory_length)
         retained = PackedBatch(
@@ -1020,6 +1059,8 @@ class MRCRANextTokenTrainer:
             self._pc_rasl_pending_batches = [
                 self._pc_rasl_pending_batches[index] for index in indices
             ]
+        self.state.pc_rasl_trajectories_captured += 1
+        return True
 
     def _finalize_pc_rasl_interval(
         self, report: LearningProgressReport,
@@ -1036,19 +1077,32 @@ class MRCRANextTokenTrainer:
             )
             for batch in self._pc_rasl_pending_batches
         )
+        if self._pc_rasl_pending_batches:
+            self.state.pc_rasl_updates_due += (
+                self.config.pc_rasl_updates_per_observation
+            )
         self._pc_rasl_pending_batches.clear()
 
     def _prepare_pc_rasl_gradients(self) -> None:
         """Train the detached critic and retain actor auxiliary gradients."""
 
         self._pc_rasl_actor_gradients.clear()
-        self._pc_rasl_step_metrics = {}
+        updates_due_before = self.state.pc_rasl_updates_due
+        self._pc_rasl_step_metrics = {
+            "pc_rasl/replay_update_applied": 0.0,
+            "pc_rasl/updates_due_before": float(updates_due_before),
+            "pc_rasl/updates_due_after": float(updates_due_before),
+        }
         learner = self.pc_rasl
         critic_optimizer = self.pc_rasl_critic_optimizer
-        if learner is None or critic_optimizer is None:
+        if (
+            learner is None
+            or critic_optimizer is None
+            or self.state.pc_rasl_updates_due <= 0
+        ):
             return
-        ingest = self._pc_rasl_finalized_batches[:1]
-        self._pc_rasl_finalized_batches = self._pc_rasl_finalized_batches[1:]
+        ingest = self._pc_rasl_finalized_batches
+        self._pc_rasl_finalized_batches = []
         for trajectory in ingest:
             signal = trajectory.rewards.abs().clamp_min(1e-6)
             learner.replay.add(
@@ -1130,7 +1184,14 @@ class MRCRANextTokenTrainer:
             (priority_rows * valid).sum(-1) / valid.sum(-1).clamp_min(1)
         ).clamp(1e-6, learner.config.core.replay_priority_cap)
         learner.replay.update_priorities(sample.indices, priorities.detach().cpu())
+        self.state.pc_rasl_updates_due -= 1
+        self.state.pc_rasl_replay_updates += 1
         self._pc_rasl_step_metrics = {
+            "pc_rasl/replay_update_applied": 1.0,
+            "pc_rasl/updates_due_before": float(updates_due_before),
+            "pc_rasl/updates_due_after": float(
+                self.state.pc_rasl_updates_due
+            ),
             "pc_rasl/critic_loss": float(losses.critic.total.detach()),
             "pc_rasl/functional_cross_entropy": float(
                 losses.actor.functional_cross_entropy.detach()
@@ -1315,7 +1376,10 @@ class MRCRANextTokenTrainer:
             "training": training,
             "source": source,
             "evaluation": self.evaluation_identity,
-            "progress_probe": self.progress_probe_identity,
+            "progress_probe": (
+                self.progress_probe_identity
+                if self.config.progress_conditioned_rasl else None
+            ),
         }
 
     @property
@@ -1444,8 +1508,20 @@ class MRCRANextTokenTrainer:
             raise ValueError("unsupported MRCRA training checkpoint format")
         expected_identity = self._identity()
         saved_identity = deepcopy(payload.get("identity"))
+        retiring_pc_rasl = False
         if isinstance(saved_identity, dict):
             try:
+                retiring_pc_rasl = (
+                    saved_format in LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS
+                    and bool(
+                        saved_identity["training"].get(
+                            "progress_conditioned_rasl", False
+                        )
+                    )
+                    and not expected_identity["training"][
+                        "progress_conditioned_rasl"
+                    ]
+                )
                 # Format 7 predates the execution-only tensor-core compiler
                 # policy. It changes neither weights nor mathematical state,
                 # so an absent field inherits the explicit current policy.
@@ -1459,6 +1535,11 @@ class MRCRANextTokenTrainer:
             try:
                 saved_cognitive = saved_identity["model_config"]["cognitive"]
                 current_cognitive = expected_identity["model_config"]["cognitive"]
+                saved_identity["model_config"]["carrier"][
+                    "activation_checkpointing"
+                ] = expected_identity["model_config"]["carrier"][
+                    "activation_checkpointing"
+                ]
                 for name in _V4_COGNITIVE_DEFAULT_FIELDS:
                     saved_cognitive[name] = current_cognitive[name]
                 saved_training = saved_identity["training"]
@@ -1481,6 +1562,8 @@ class MRCRANextTokenTrainer:
                     "pc_rasl_candidate_count",
                     "pc_rasl_replay_batch_size",
                     "pc_rasl_max_interval_trajectories",
+                    "pc_rasl_captures_per_observation",
+                    "pc_rasl_updates_per_observation",
                     "pc_rasl_critic_warmup_observations",
                     "pc_rasl_consequence_weight",
                     "pc_rasl_critic_learning_rate",
@@ -1489,6 +1572,17 @@ class MRCRANextTokenTrainer:
                     "pc_rasl_controller_gradient_cap",
                 ):
                     saved_training[name] = current_training[name]
+                if (
+                    saved_format == 10
+                    and saved_identity["model_config"]["carrier"]["model_dim"] == 20
+                    and saved_training.get("cognitive_stride") == 64
+                    and current_training.get("cognitive_stride") == 128
+                ):
+                    # The format-11 ultralight production policy deliberately
+                    # advances the causal cognition cadence from one 64-token
+                    # event chunk to two. Preserve learned/optimizer state while
+                    # binding every subsequent update to the new contract.
+                    saved_training["cognitive_stride"] = 128
                 # Pre-v6 checkpoints did not bind retained evaluation data.
                 # Migration attaches the explicitly supplied current retained
                 # set; the digest is subsequently enforced on every resume.
@@ -1590,9 +1684,19 @@ class MRCRANextTokenTrainer:
             ("last_progress_observation_step", 0),
             ("last_progress_pressure", 0.0),
             ("progress_observations", 0),
+            ("pc_rasl_updates_due", 0),
+            ("pc_rasl_trajectories_captured", 0),
+            ("pc_rasl_replay_updates", 0),
         ):
             training_state.setdefault(name, default)
         self.state = MRCRATrainingState(**training_state)
+        if retiring_pc_rasl:
+            self.state.last_progress_observation_step = 0
+            self.state.last_progress_pressure = 0.0
+            self.state.progress_observations = 0
+            self.state.pc_rasl_updates_due = 0
+            self.state.pc_rasl_trajectories_captured = 0
+            self.state.pc_rasl_replay_updates = 0
         if self.state.tokens_seen >= self.config.total_tokens:
             raise ValueError("resumed checkpoint already exhausted the token budget")
         self.train_stream.load_state_dict(payload["train_stream"])
@@ -1627,10 +1731,10 @@ class MRCRANextTokenTrainer:
         )
         progress_state = payload.get("learning_progress")
         legacy_pc_reset = (
-            saved_format in LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS
+            saved_format in PRE_BEHAVIOR_EVIDENCE_FORMAT_VERSIONS
         )
         if self.learning_progress is None:
-            if progress_state is not None:
+            if progress_state is not None and not retiring_pc_rasl:
                 raise ValueError(
                     "checkpoint contains learning-progress state but PC-RASL is disabled"
                 )
@@ -1650,7 +1754,7 @@ class MRCRANextTokenTrainer:
             self.learning_progress.load_state_dict(progress_state)
         pc_state = payload.get("pc_rasl")
         if self.pc_rasl is None:
-            if pc_state is not None:
+            if pc_state is not None and not retiring_pc_rasl:
                 raise ValueError(
                     "checkpoint contains PC-RASL state but the learner is disabled"
                 )
@@ -1682,6 +1786,18 @@ class MRCRANextTokenTrainer:
                 self._trajectory_from_state(value)
                 for value in pc_state["finalized_batches"]
             ]
+            if (
+                saved_format == 10
+                and self._pc_rasl_finalized_batches
+                and self.state.pc_rasl_updates_due == 0
+            ):
+                # Format 10 already binds exact behavior evidence, but predates
+                # the consequence-driven update budget. Give its outstanding
+                # finalized consequence one bounded update instead of either
+                # discarding it or replaying it on every future optimizer step.
+                self.state.pc_rasl_updates_due = (
+                    self.config.pc_rasl_updates_per_observation
+                )
             for batch in (
                 *self._pc_rasl_pending_batches,
                 *self._pc_rasl_finalized_batches,
@@ -1714,13 +1830,17 @@ class MRCRANextTokenTrainer:
     def _publish_cognitive_snapshot(self, reporter: TrackioReporter) -> None:
         if (
             not self.config.spectral_dashboard
-            or self._last_snapshot_step == self.state.step
+            or self._last_snapshot_attempt_step == self.state.step
         ):
             return
         from .cognitive_diagnostics import cognitive_evidence
         from .visualization import model_spectral_evidence
 
         was_training = self.model.training
+        # Attempt cadence is independent of publication success. Diagnostics
+        # are non-authoritative and must not consume every optimizer step when
+        # one snapshot exposes a serialization or frontend defect.
+        self._last_snapshot_attempt_step = self.state.step
         try:
             evidence = model_spectral_evidence(
                 self.model, self.tokenizer,
@@ -2820,15 +2940,23 @@ class MRCRANextTokenTrainer:
                 self.model.train()
                 step_started = perf_counter()
                 self.optimizer.zero_grad(set_to_none=True)
-                pc_rasl_started = perf_counter()
-                self._prepare_pc_rasl_gradients()
-                pc_rasl_seconds = perf_counter() - pc_rasl_started
+                pc_rasl_seconds = 0.0
+                if self.pc_rasl is not None:
+                    pc_rasl_started = perf_counter()
+                    self._prepare_pc_rasl_gradients()
+                    pc_rasl_seconds = perf_counter() - pc_rasl_started
                 self._phase_update_proposal_logits.clear()
                 self._phase_update_end_logits.clear()
                 aggregated: dict[str, float] = {}
                 tokens_this_update = 0
                 data_seconds = 0.0
                 pc_rasl_capture_seconds = 0.0
+                pc_rasl_capture_due = (
+                    self.pc_rasl is not None
+                    and self._pc_rasl_capture_due(self.state.step + 1)
+                )
+                pc_rasl_captured = False
+                behavior_batch: PackedBatch | None = None
                 contexts_this_update = min(
                     self.config.gradient_accumulation_steps,
                     ceil((self.config.total_tokens - self.state.tokens_seen) / self.config.context_length),
@@ -2871,18 +2999,26 @@ class MRCRANextTokenTrainer:
                             flush=True,
                         )
                     local = self._run_context(batch, gradient_divisor=contexts_this_update)
-                    capture_started = perf_counter()
-                    self._capture_pc_rasl_trajectory(batch)
-                    pc_rasl_capture_seconds += perf_counter() - capture_started
+                    if self.pc_rasl is not None:
+                        behavior_batch = batch
                     tokens_this_update += batch.token_count
                     for name, value in local.items():
                         aggregated[name] = aggregated.get(name, 0.0) + value
+                if pc_rasl_capture_due and behavior_batch is not None:
+                    capture_started = perf_counter()
+                    pc_rasl_captured = self._capture_pc_rasl_trajectory(
+                        behavior_batch
+                    )
+                    pc_rasl_capture_seconds += perf_counter() - capture_started
                 gradient_started = perf_counter()
                 if self.loss_device != self.device:
                     _synchronize(self.loss_device)
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
-                pc_rasl_gradient_metrics = self._merge_pc_rasl_gradients()
+                pc_rasl_gradient_metrics = (
+                    self._merge_pc_rasl_gradients()
+                    if self.pc_rasl is not None else {}
+                )
                 gradient = clip_and_report_gradients(
                     self.model, maximum_norm=self.config.maximum_gradient_norm
                 )
@@ -2936,13 +3072,16 @@ class MRCRANextTokenTrainer:
                     "progress/tokens_seen": float(self.state.tokens_seen),
                     "progress/valid_targets_seen": float(self.state.valid_targets_seen),
                     "progress/fraction": min(1.0, self.state.tokens_seen / self.config.total_tokens),
+                    "training/cognitive_stride": float(
+                        self.config.cognitive_stride
+                    ),
+                    "training/carrier_activation_checkpointing": float(
+                        self.model.config.carrier.activation_checkpointing
+                    ),
+                    "training/cpu_threads": float(self.config.cpu_threads),
                     "performance/step_seconds": elapsed,
                     "performance/tokens_per_second": tokens_this_update / max(elapsed, 1e-9),
                     "performance/data_seconds": data_seconds,
-                    "performance/pc_rasl_seconds": pc_rasl_seconds,
-                    "performance/pc_rasl_capture_seconds": (
-                        pc_rasl_capture_seconds
-                    ),
                     "performance/gradient_reduction_seconds": gradient_seconds,
                     "performance/optimizer_seconds": optimizer_seconds,
                     "performance/phase_timing_synchronous": float(
@@ -2953,8 +3092,47 @@ class MRCRANextTokenTrainer:
                     "optimization/gradient_norm_after_clip": float(gradient.total_after_clip.cpu()),
                     "optimization/gradient_clip_coefficient": float(gradient.clip_coefficient.cpu()),
                 })
-                metrics.update(self._pc_rasl_step_metrics)
-                metrics.update(pc_rasl_gradient_metrics)
+                if self.pc_rasl is not None:
+                    metrics.update({
+                        "pc_rasl/configured_captures_per_observation": float(
+                            self.config.pc_rasl_captures_per_observation
+                        ),
+                        "pc_rasl/configured_updates_per_observation": float(
+                            self.config.pc_rasl_updates_per_observation
+                        ),
+                        "pc_rasl/trajectory_capture_due": float(
+                            pc_rasl_capture_due
+                        ),
+                        "pc_rasl/trajectory_captured": float(
+                            pc_rasl_captured
+                        ),
+                        "pc_rasl/trajectories_captured_total": float(
+                            self.state.pc_rasl_trajectories_captured
+                        ),
+                        "pc_rasl/replay_updates_total": float(
+                            self.state.pc_rasl_replay_updates
+                        ),
+                        "performance/pc_rasl_seconds": pc_rasl_seconds,
+                        "performance/pc_rasl_capture_seconds": (
+                            pc_rasl_capture_seconds
+                        ),
+                    })
+                    metrics.update(self._pc_rasl_step_metrics)
+                    metrics.update(pc_rasl_gradient_metrics)
+                for runtime_name, metric_name in (
+                    (
+                        "estimated_uncheckpointed_carrier_activation_bytes",
+                        "system/estimated_uncheckpointed_carrier_activation_bytes",
+                    ),
+                    (
+                        "carrier_activation_memory_budget_bytes",
+                        "system/carrier_activation_memory_budget_bytes",
+                    ),
+                ):
+                    if runtime_name in self.runtime:
+                        metrics[metric_name] = float(
+                            self.runtime[runtime_name]
+                        )
                 attributed = sum(metrics.get(name, 0.0) for name in (
                     "performance/data_seconds",
                     "performance/pc_rasl_seconds",
@@ -2991,6 +3169,9 @@ class MRCRANextTokenTrainer:
                         probe_metrics, progress_report
                     )
                     self._finalize_pc_rasl_interval(progress_report)
+                    metrics["pc_rasl/updates_due_after_consequence"] = float(
+                        self.state.pc_rasl_updates_due
+                    )
                     progress_observed = True
                 low_clip_warning = self._update_phase_transition_metrics(
                     metrics, gradient,
@@ -3047,7 +3228,7 @@ class MRCRANextTokenTrainer:
                     self.config.trackio_enabled
                     and _diagnostic_snapshot_due(
                         self.state.step, self.config.spectral_snapshot_interval,
-                        self._last_snapshot_step,
+                        self._last_snapshot_attempt_step,
                     )
                 ):
                     self._publish_cognitive_snapshot(reporter)

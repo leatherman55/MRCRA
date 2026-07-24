@@ -3,7 +3,8 @@
 ## Completion status
 
 The canonical FineWeb training path now enables Progress-Conditioned RASL
-(PC-RASL) by default. The implementation introduces phase-transition pressure
+(PC-RASL) as an explicit opt-in subsystem. The main FineWeb path leaves it
+disabled. When requested, the implementation introduces phase-transition pressure
 without reading, optimizing, or checkpointing any phase-transition metric. Its
 only meta-learning authority is causal held-out cross entropy in nats per
 valid target token, optimizer progress, and an independent held-out regression

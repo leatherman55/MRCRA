@@ -134,7 +134,8 @@ def test_pc_rasl_production_path_is_checkpoint_resume_exact(tmp_path):
         "last_evaluation_step", "last_event_proposal_logit_max",
         "event_proposal_logit_slope_ema", "event_proposal_observations",
         "last_progress_observation_step", "last_progress_pressure",
-        "progress_observations",
+        "progress_observations", "pc_rasl_updates_due",
+        "pc_rasl_trajectories_captured", "pc_rasl_replay_updates",
     ):
         assert getattr(restored.state, name) == getattr(reference.state, name)
     deterministic_evaluation = {
@@ -278,6 +279,34 @@ def test_pc_rasl_metrics_and_gradient_routing_are_observable(tmp_path):
     ) == "controller"
 
 
+def test_pc_rasl_work_is_issued_only_by_new_progress_consequences(tmp_path):
+    tokenizer = ByteTextTokenizer()
+    base = pc_config(tmp_path / "consequence-cadence")
+    configuration = replace(
+        base,
+        learning_progress=replace(
+            base.learning_progress,
+            observation_interval=3,
+        ),
+    )
+    run = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(TRAINING_DOCUMENTS), tokenizer),
+        configuration,
+        retained(tokenizer, GUARD_DOCUMENTS),
+        progress_probe_batches=retained(tokenizer, PROGRESS_DOCUMENTS),
+    )
+
+    run.train(maximum_steps=6)
+
+    assert run.state.progress_observations == 2
+    assert run.state.pc_rasl_trajectories_captured == 2
+    assert run.state.pc_rasl_replay_updates == 1
+    assert run.state.pc_rasl_updates_due == 1
+    assert len(run.pc_rasl.replay) == 1
+
+
 def test_format8_checkpoint_migrates_into_fresh_causal_pc_rasl_warmup(tmp_path):
     torch.manual_seed(20260723)
     tokenizer = ByteTextTokenizer()
@@ -367,3 +396,85 @@ def test_format9_pc_rasl_checkpoint_discards_pre_v10_replay_authority(tmp_path):
     assert not restored._pc_rasl_finalized_batches
     restored.train(maximum_steps=1)
     assert restored.state.progress_observations == 1
+
+
+def test_format10_checkpoint_migrates_outstanding_consequence_once(tmp_path):
+    torch.manual_seed(20260723)
+    path = tmp_path / "format10-migration"
+    source = trainer(path)
+    source.train(maximum_steps=1)
+    current = source.save_checkpoint()
+    payload = torch.load(current, weights_only=True)
+    assert payload["pc_rasl"]["finalized_batches"]
+    payload["format_version"] = 10
+    for name in (
+        "pc_rasl_captures_per_observation",
+        "pc_rasl_updates_per_observation",
+    ):
+        payload["identity"]["training"].pop(name)
+    for name in (
+        "pc_rasl_updates_due",
+        "pc_rasl_trajectories_captured",
+        "pc_rasl_replay_updates",
+    ):
+        payload["training_state"].pop(name)
+    legacy = path / "format10.pt"
+    torch.save(payload, legacy)
+
+    restored = trainer(path)
+    restored.load_checkpoint(legacy)
+
+    assert restored.state.pc_rasl_updates_due == 1
+    assert len(restored._pc_rasl_finalized_batches) == 1
+    restored.train(maximum_steps=1)
+    assert restored.state.pc_rasl_replay_updates == 1
+    assert restored.state.pc_rasl_updates_due == 1
+
+
+def test_format11_pc_rasl_checkpoint_can_resume_with_subsystem_retired(tmp_path):
+    torch.manual_seed(20260723)
+    path = tmp_path / "format11-retirement"
+    source = trainer(path)
+    source.train(maximum_steps=2)
+    current = source.save_checkpoint()
+    payload = torch.load(current, weights_only=True)
+    assert payload["learning_progress"] is not None
+    assert payload["pc_rasl"] is not None
+    payload["format_version"] = 11
+    legacy = path / "format11.pt"
+    torch.save(payload, legacy)
+
+    tokenizer = ByteTextTokenizer()
+    disabled_config = replace(
+        pc_config(path),
+        progress_conditioned_rasl=False,
+        progress_probe_batches=0,
+    )
+    restored = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(TRAINING_DOCUMENTS), tokenizer),
+        disabled_config,
+        retained(tokenizer, GUARD_DOCUMENTS),
+        progress_probe_batches=(),
+    )
+    restored.load_checkpoint(legacy)
+
+    assert restored.state.step == source.state.step
+    assert restored.state.tokens_seen == source.state.tokens_seen
+    assert restored.learning_progress is None
+    assert restored.pc_rasl is None
+    assert restored.state.last_progress_observation_step == 0
+    assert restored.state.progress_observations == 0
+    assert restored.state.pc_rasl_updates_due == 0
+    assert restored.state.pc_rasl_trajectories_captured == 0
+    assert restored.state.pc_rasl_replay_updates == 0
+
+    def forbidden_pc_rasl_path(*_args, **_kwargs):
+        raise AssertionError("disabled PC-RASL path was executed")
+
+    restored._prepare_pc_rasl_gradients = forbidden_pc_rasl_path
+    restored._capture_pc_rasl_trajectory = forbidden_pc_rasl_path
+    restored._merge_pc_rasl_gradients = forbidden_pc_rasl_path
+    restored.train(maximum_steps=1)
+    assert restored.state.step == source.state.step + 1

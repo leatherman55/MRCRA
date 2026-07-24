@@ -25,9 +25,54 @@ def test_trackio_diagnostic_snapshot_publishes_at_step_one_then_uses_interval():
     assert _diagnostic_snapshot_due(1, 25)
     assert _diagnostic_snapshot_due(9, 25, -1)
     assert not _diagnostic_snapshot_due(2, 25, 1)
+    assert not _diagnostic_snapshot_due(9, 25, 1)
     assert _diagnostic_snapshot_due(25, 25, 1)
     assert _diagnostic_snapshot_due(50, 25, 25)
     assert not _diagnostic_snapshot_due(25, 25, 25)
+
+
+def test_failed_diagnostic_snapshot_records_attempt_and_does_not_retry_same_step(
+    tmp_path, monkeypatch,
+):
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(("diagnostic cadence",)), tokenizer),
+        replace(
+            training_config(tmp_path / "snapshot-cadence"),
+            spectral_dashboard=True,
+            spectral_snapshot_interval=25,
+        ),
+    )
+    trainer.state.step = 1
+
+    def fail_snapshot(*args, **kwargs):
+        raise ValueError("diagnostic fixture failure")
+
+    monkeypatch.setattr(
+        "mrrn.visualization.model_spectral_evidence", fail_snapshot,
+    )
+
+    class Reporter:
+        def __init__(self):
+            self.alerts = []
+
+        def alert(self, title, text, *, level, step):
+            self.alerts.append((title, text, level, step))
+
+    reporter = Reporter()
+    trainer._publish_cognitive_snapshot(reporter)
+    trainer._publish_cognitive_snapshot(reporter)
+
+    assert trainer._last_snapshot_step == -1
+    assert trainer._last_snapshot_attempt_step == 1
+    assert len(reporter.alerts) == 1
+    assert reporter.alerts[0][0] == "MRCRA diagnostic snapshot failed"
+    assert not _diagnostic_snapshot_due(
+        2, trainer.config.spectral_snapshot_interval,
+        trainer._last_snapshot_attempt_step,
+    )
 
 
 def test_event_phase_metrics_match_known_probabilities_and_threshold_distance():

@@ -386,8 +386,9 @@ flowchart LR
     H --> O["Critic update + EMA target critic"]
 ```
 
-The canonical FineWeb trainer enables **Progress-Conditioned RASL (PC-RASL)**
-by default. This is deliberately not described as ordinary environment
+The canonical FineWeb trainer keeps **Progress-Conditioned RASL (PC-RASL)**
+outside the default training authority. It remains an explicit experimental
+opt-in. When enabled, it is deliberately not described as ordinary environment
 reinforcement learning. It is an optimization-level meta-consequence: the
 system receives positive pressure when held-out CE is falling faster than its
 own causal learning curve, negative pressure when learning plateaus or
@@ -728,8 +729,9 @@ python scripts/train_fineweb.py \
 ### Ultralight profile
 
 Use this for fast end-to-end architecture and training experiments under tight
-compute constraints. It runs the same integrated training authority as the
-larger profiles, including Progress-Conditioned RASL by default:
+compute constraints. It runs the same integrated carrier and cognitive
+training authority as the larger profiles. PC-RASL is not constructed or run
+unless explicitly enabled:
 
 ```bash
 python scripts/train_fineweb.py \
@@ -739,6 +741,12 @@ python scripts/train_fineweb.py \
 
 `--ultralightmodel` and `--lightmodel` are mutually exclusive. Checkpoints bind
 the full configuration and cannot be resumed under a different size profile.
+The ultralight production path uses a measured 128-token cognitive stride by
+default. This retains the 64-token event chunk as the carrier-to-cognition
+aggregation primitive while invoking the complete cognitive cycle once per two
+event chunks, avoiding the launch/control overhead that otherwise dominates a
+1.3M-parameter actor. `--cognitive-stride` remains an explicit experimental
+override.
 
 ### Serious profile
 
@@ -779,6 +787,16 @@ python scripts/train_fineweb.py \
 - Pure carrier tensor kernels are compiled automatically on CUDA.
 - On Apple silicon, the integrated light model defaults to CPU because its
   heterogeneous cognitive graph is launch-bound on MPS in matched local probes.
+- Carrier activation recomputation is selected automatically from executed
+  multiscale width, TBPTT span, precision, and physical memory capacity. The
+  ultralight 4,096-token CPU path normally retains activations; larger live
+  graphs retain checkpointing when the estimate exceeds their bounded budget.
+  `--activation-checkpointing` and `--no-activation-checkpointing` override the
+  policy explicitly, and the resolved estimate and reason are written to the
+  run manifest.
+- Four CPU intra-op workers and one inter-op worker remain the measured Apple
+  integrated defaults; increasing thread count is not assumed to increase
+  throughput for this heterogeneous graph.
 - Explicit `cpu`, `mps`, `cuda`, and indexed CUDA devices remain available.
 
 Examples:
@@ -812,14 +830,16 @@ The complete relational cognitive authority path remains the PyTorch reference.
 | Optimization context | 32,768 tokens |
 | Carrier execution chunk | 256 tokens |
 | Carrier TBPTT span | 4,096 tokens |
+| Ultralight cognitive stride | 128 tokens (two 64-token event chunks) |
 | Cognitive TBPTT horizon | 4 event cycles |
 | Full-softmax tile | 2,048 vocabulary entries |
 | Held-out split | Stable document-ID hash: 99% train, 0.5% progress probe, 0.5% independent guard |
 | Evaluation/checkpoint interval | 25 optimizer updates |
-| Progress observation interval | 5 optimizer updates |
-| Progress probe | 2 fixed batches × 4,096 tokens |
-| PC-RASL trajectory / candidates | 256 valid single-document positions / 48 bounded candidates |
-| 8.4M-profile PC-RASL critic | 139,537 parameters (1.66% of the 8,413,442-parameter actor); target critic only |
+| PC-RASL | Disabled; no progress probe, trajectory capture, critic, replay, or auxiliary gradient |
+| PC-RASL opt-in observation interval | 5 optimizer updates |
+| PC-RASL opt-in progress probe | 2 fixed batches × 4,096 tokens |
+| PC-RASL opt-in trajectory / candidates | 256 valid single-document positions / 48 bounded candidates |
+| PC-RASL opt-in consequence cadence | 1 selected trajectory and 1 replay update per new progress observation |
 
 Dataset and tokenizer revisions are pinned before training. Documents are packed
 for throughput, but document transitions are excluded from next-token loss and
@@ -827,23 +847,37 @@ reset recurrent and cognitive state. Full-vocabulary cross entropy is exact and
 tiled for memory control; it is not sampled or approximated.
 
 Raw FineWeb supplies language targets but no external downstream consequence,
-so the trainer never relabels instantaneous task loss as reward. It does enable
-PC-RASL by default: a separate held-out CE trajectory supplies delayed signed
-learning-progress consequences as described above. Disable this explicitly
-only for a matched ablation:
+so the trainer never relabels instantaneous task loss as reward. PC-RASL is
+disabled in the main system: the learner and critic are not constructed,
+progress-probe batches are not built or evaluated, trajectories are not
+captured, replay is not updated, and no PC-RASL auxiliary gradient enters the
+actor. It can still be enabled explicitly for a separate experiment:
 
 ```bash
 python scripts/train_fineweb.py \
   --lightmodel \
-  --no-progress-conditioned-rasl
+  --progress-conditioned-rasl
 ```
 
 The estimator, critic, replay, and gradient-governor controls are exposed under
 `--progress-*` and `--pc-rasl-*`; run `python scripts/train_fineweb.py --help`
-for the complete contract. Checkpoints through format 9 migrate by starting a
-fresh causal PC-RASL subsystem while preserving actor/training continuation:
+for the complete contract. Behavior capture is deterministic and bounded across
+each progress interval. The critic and adjoint actor auxiliary receive work only
+when a newly measured consequence authorizes it; replay is not recomputed every
+optimizer step against unchanged reward information. The outstanding update
+budget and capture/update counters are checkpointed for exact continuation.
+
+Checkpoints through format 9 migrate by starting a fresh causal PC-RASL
+subsystem while preserving actor/training continuation:
 historical pre-consequence behavior logits, cognitive features, and action
-receipts cannot be reconstructed honestly after the outcome.
+receipts cannot be reconstructed honestly after the outcome. Format 10 already
+contains exact behavior evidence, so it migrates that evidence into the bounded
+consequence-driven schedule. Its ultralight 64-token training cadence advances
+to the new measured 128-token production policy while preserving learned actor,
+optimizer, and causal replay state. Format 12 makes PC-RASL opt-in. Resuming an
+older PC-RASL-enabled checkpoint without the opt-in flag preserves actor and
+task-optimizer state while retiring progress authority, critic, replay, pending
+credit, and auxiliary-gradient state from subsequent training.
 
 ### Run outputs
 

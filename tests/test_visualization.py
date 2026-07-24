@@ -4,7 +4,10 @@ from dataclasses import asdict
 import pytest
 import torch
 
-from mrrn.language import MRRNLanguageModel, tiny_language_config
+from mrrn.config import MRCRAConfig
+from mrrn.language import (
+    MRCRALanguageModel, MRRNLanguageModel, tiny_language_config,
+)
 from mrrn.visualization import (
     build_visualization_dataset,
     checkpoint_spectral_evidence,
@@ -162,6 +165,75 @@ class _TokenizerStub:
 
     def decode(self, token_ids):
         return {1: "A", 2: "\n", 3: "\t", 4: ""}[token_ids[0]]
+
+
+class _TenTokenTokenizer:
+    """Exact short-prompt length that exposed inactive ultralight scales."""
+
+    def encode_prompt(self, text):
+        return list(range(1, 11))
+
+    def decode(self, token_ids):
+        return f"t{token_ids[0]}"
+
+
+def test_ultralight_short_prompt_encodes_inactive_scales_as_json_null():
+    torch.manual_seed(20260722)
+    config = MRCRAConfig.ultralight_1p3m(output_dim=50_257)
+    model = MRCRALanguageModel(
+        config, model_authority="ultralight-diagnostic-regression",
+    )
+    result = model_spectral_evidence(
+        model,
+        _TenTokenTokenizer(),
+        prompt="ten-token-regression",
+        maximum_tokens=32,
+        step=1,
+        tokens_seen=32_768,
+    )
+
+    # Strict JSON is the artifact contract used by Trackio.
+    json.dumps(result, allow_nan=False)
+    inactive_branches = [
+        item for item in result["branch_mix"] if not item["active"]
+    ]
+    assert inactive_branches
+    assert all(item["sample_count"] == 0 for item in inactive_branches)
+    assert all(
+        item[name] is None
+        for item in inactive_branches
+        for name in (
+            "resonance", "local", "attention", "identity",
+            "spectral_fraction",
+        )
+    )
+    active_branches = [item for item in result["branch_mix"] if item["active"]]
+    assert active_branches
+    assert all(item["sample_count"] > 0 for item in active_branches)
+    assert all(
+        item[name] is not None
+        for item in active_branches
+        for name in ("resonance", "local", "attention", "identity")
+    )
+
+    inactive_scales = {
+        (item["block"], item["scale"]) for item in inactive_branches
+    }
+    inactive_triads = [
+        item for item in result["triads"]
+        if (item["block"], item["scale"]) in inactive_scales
+    ]
+    assert inactive_triads
+    assert all(not item["active"] for item in inactive_triads)
+    assert all(item["sample_count"] == 0 for item in inactive_triads)
+    assert all(
+        item[name] is None
+        for item in inactive_triads
+        for name in ("activity", "mean_gate", "mean_phase")
+    )
+    # Learned structural weights remain observable even when prompt dynamics
+    # have no samples at that scale.
+    assert all(item["strength"] >= 0 for item in inactive_triads)
 
 
 def _checkpoint(tmp_path):
