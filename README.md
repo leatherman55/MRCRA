@@ -1013,6 +1013,8 @@ qualification, or evidence of general cognition.
 
 ## License
 
-No license file is currently included. Public visibility alone does not grant
-permission to reuse, modify, or redistribute the code. Add an explicit license
-before treating this repository as an open-source release.
+This repository is distributed under the
+[Attribution Assurance License](LICENSE). Redistribution and modification are
+permitted subject to its source, binary-distribution, and runtime attribution
+requirements. Read the complete license before redistributing this software or
+a program that depends on it.
