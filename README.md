@@ -18,6 +18,12 @@ instrumentation, and executable acceptance evidence.
 > contracts; it does not claim general intelligence, deployment maturity, or
 > capabilities that have not been established by training and held-out
 > evaluation.
+>
+> **Important unfinished work:** PC-RASL is an experimental, incomplete research
+> subsystem and is disabled by default. The CUDA path is also unfinished: device
+> selection and mixed-precision plumbing exist, but end-to-end NVIDIA training
+> has not yet been qualified as a supported release path. CUDA support is under
+> active development. The CPU implementation is currently the reference path.
 
 [MRRN carrier](#1-mrrn-the-spectral-continuity-carrier) ·
 [MRCRA cognition](#2-mrcra-the-cognitive-framework) ·
@@ -181,7 +187,9 @@ Small-$q$ series are used near zero to avoid unstable division. Because
 $|e^{q_t}|=e^{-\alpha_t\Delta_t}<1$, the isolated recurrence is contractive.
 The drive is decay-normalized so that learning a longer half-life does not
 automatically increase steady-state gain. Complex values are stored as paired
-real numbers; ordinary CUDA, MPS, and CPU tensor kernels are sufficient.
+real numbers, so the mathematics can be represented by ordinary CUDA, MPS, and
+CPU tensor kernels. This mathematical portability does not mean that every
+backend implementation is complete; the current CUDA training path is not.
 
 This is the carrier's mathematical authority. The broader cognition definition
 discussed below uses equations only as schematic state bookkeeping, not as
@@ -360,12 +368,20 @@ MRRN provides continuity, delay, scale, and efficient recurrent context. MRCRA
 provides explicit relation, epistemic status, memory policy, alternatives,
 correction, and action constraint. The intended unit is the coupled loop.
 
-### Critic and self-learning
+### Critic and self-learning (experimental and unfinished)
 
-MRCRA contains a separate training system called the **Cognitive Resonant
-Adjoint Surprise Learner (RASL)**. “Self-learning” here means that the actor can
-change from measured consequences of its own trajectories. It does not mean
-unrestricted autonomous weight modification.
+The repository contains an unfinished prototype training system called the
+**Cognitive Resonant Adjoint Surprise Learner (RASL)**. “Self-learning” here
+means that the actor is intended to change from measured consequences of its own
+trajectories. It does not mean unrestricted autonomous weight modification.
+
+> **PC-RASL maturity boundary:** PC-RASL is not a finished or recommended
+> training mode. Its component contracts, delayed-credit bookkeeping, guards,
+> and bounded gradient routes have executable tests, but the combined method has
+> not yet demonstrated reliable end-to-end learning benefit at meaningful model
+> and corpus scale. Its objective, scheduling, interfaces, and checkpoint policy
+> may change. It is excluded from normal FineWeb training unless explicitly
+> enabled for research.
 
 ```mermaid
 flowchart LR
@@ -440,13 +456,14 @@ r^{\text{progress}}_t=\lambda_p\,p_i,
 \qquad t\in(t_{i-1},t_i].
 $$
 
-The critic learns multihorizon returns, progress return, immediate consequence,
-termination, reverse credit, latent/cognitive transitions, memory utility,
-uncertainty, and the value of internal cognitive actions. Its functional-
-surprise distribution provides two actor-side routes: candidate-bounded
-language credit and an internal-policy loss for the live cognitive controller.
+The prototype critic is designed to learn multihorizon returns, progress return,
+immediate consequence, termination, reverse credit, latent/cognitive
+transitions, memory utility, uncertainty, and the value of internal cognitive
+actions. Its functional-surprise distribution exposes two experimental
+actor-side routes: candidate-bounded language credit and an internal-policy loss
+for the live cognitive controller.
 
-The complete learning path has the following safeguards:
+The current prototype path has the following implemented safeguards:
 
 1. **Three pairwise-disjoint data roles.** A stable document-ID hash assigns
    every FineWeb document to training, progress-probe, or independent guard
@@ -511,12 +528,13 @@ D_{\mathrm{KL}}(\pi_{\text{target}}\|\pi_{\text{actor}}).
 \end{aligned}
 $$
 
-PC-RASL implements this conservatively as a separately computed auxiliary
-gradient merged into the live task gradient under the governor above. Calling
-the mechanism “reinforcement learning” is optional terminology: the important
-fact is that its authority is a delayed change in held-out learning progress,
-not instantaneous task loss. External-consequence RASL remains available for
-applications with an environment, human, or verifier.
+The unfinished PC-RASL prototype attempts this conservatively as a separately
+computed auxiliary gradient merged into the live task gradient under the
+governor above. Calling the mechanism “reinforcement learning” is optional
+terminology: the intended authority is a delayed change in held-out learning
+progress, not instantaneous task loss. Neither PC-RASL nor the
+external-consequence RASL interface should currently be treated as a validated
+production learning system.
 
 | Learning timescale | What changes | Authority |
 | --- | --- | --- |
@@ -647,10 +665,19 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-For NVIDIA training, install the CUDA-enabled PyTorch wheel selected by the
+> **CUDA status:** CUDA support is unfinished and under active development.
+> The repository contains automatic CUDA selection, precision selection,
+> activation-memory policy, and optional kernel-compilation plumbing, but the
+> complete MRCRA training path has not yet passed target-NVIDIA qualification.
+> Expect incomplete behavior or performance regressions; do not treat CUDA as a
+> supported production backend yet.
+
+For development experiments on NVIDIA hardware, install the CUDA-enabled
+PyTorch wheel selected by the
 [official PyTorch installer](https://pytorch.org/get-started/locally/) before
-installing `requirements.txt`. A separate system CUDA toolkit is not required
-for official PyTorch wheels.
+installing `requirements.txt`. A separate system CUDA toolkit is not normally
+required for official PyTorch wheels. Installation success does not establish
+that the unfinished MRCRA CUDA path is correct or performant.
 
 ### Verify the installation
 
@@ -783,9 +810,12 @@ python scripts/train_fineweb.py \
 
 `--device auto` is the default:
 
-- CUDA is selected first when available.
-- CUDA uses BF16 when supported and dynamically scaled FP16 otherwise.
-- Pure carrier tensor kernels are compiled automatically on CUDA.
+- The current experimental dispatcher attempts to select CUDA first when it is
+  available. This is unfinished behavior, not a support guarantee.
+- The CUDA path attempts BF16 when supported and dynamically scaled FP16
+  otherwise.
+- Pure carrier tensor kernels may be compiled automatically on CUDA, but the
+  complete heterogeneous cognitive training graph is not yet CUDA-qualified.
 - On Apple silicon, the integrated light model defaults to CPU because its
   heterogeneous cognitive graph is launch-bound on MPS in matched local probes.
 - Carrier activation recomputation is selected automatically from executed
@@ -798,7 +828,8 @@ python scripts/train_fineweb.py \
 - Four CPU intra-op workers and one inter-op worker remain the measured Apple
   integrated defaults; increasing thread count is not assumed to increase
   throughput for this heterogeneous graph.
-- Explicit `cpu`, `mps`, `cuda`, and indexed CUDA devices remain available.
+- Explicit `cpu`, `mps`, `cuda`, and indexed CUDA selectors are exposed; the
+  CUDA selectors remain experimental and unfinished.
 
 Examples:
 
@@ -810,7 +841,9 @@ python scripts/train_fineweb.py --lightmodel --device mps
 ```
 
 The built-in trainer is single-process and single-device. It does not claim
-multi-GPU data or model parallelism.
+multi-GPU data or model parallelism. CUDA correctness, stability, memory
+behavior, and throughput still require target-hardware validation and are being
+actively worked on.
 
 An optional MLX backend is available on Apple silicon for supported carrier
 inference and recurrent decode:
@@ -894,17 +927,19 @@ diagnostics/
 ```
 
 Checkpoints include model, optimizer, scheduler, AMP scaler, stream position,
-packer buffers, retained runtime state, provenance ledger, random state, the
-complete progress authority, delayed trajectories, replay, critic/target
-critic, critic optimizer, calibrator, and both performance guards.
+packer buffers, retained runtime state, provenance ledger, and random state.
+Only an explicitly PC-RASL-enabled research run additionally stores progress
+authority, delayed trajectories, replay, critic/target critic, critic optimizer,
+calibrator, and performance-guard state.
 Local run directories and weight files are excluded from Git by default.
 
 ## Trackio dashboard
 
 Trackio logging and the local dashboard are enabled by default during training.
 MRCRA adds two architecture-specific top-level tabs. The **Spectral Network**
-tab contains a dedicated **Learning Progress** instrument alongside the carrier
-and phase observers:
+tab can display a dedicated **Learning Progress** instrument alongside the
+carrier and phase observers. PC-RASL panels receive data only during an explicit
+experimental PC-RASL run:
 
 - **Spectral Network:** training stability, token-scale resonance, learned
   spectral activation triads, pole/phase structure, causal learning-progress
@@ -976,8 +1011,8 @@ training runs are intentionally not stored in the public repository.
 | [1.3M parameter audit](outputs/mrcra_1p3m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
 | [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
-| [PC-RASL implementation report](outputs/progress_conditioned_rasl_implementation_report.md) | Causal authority, exact delayed replay, critic/controller path, gradient governance, resources, migration, observability, and claim boundaries |
-| [PC-RASL empirical acceptance](outputs/pc_rasl_empirical_acceptance.json) | Signed progress pressure, plateau/regression and anti-gaming behavior, guard recovery, critic learning, controller credit, gradient firewall, and subsystem-cap evidence |
+| [Experimental PC-RASL implementation report](outputs/progress_conditioned_rasl_implementation_report.md) | Unfinished prototype authority, delayed replay, critic/controller path, gradient governance, resources, migration, observability, and claim boundaries |
+| [PC-RASL component acceptance](outputs/pc_rasl_empirical_acceptance.json) | Isolated prototype evidence for signed pressure, guards, critic learning, controller credit, gradient firewall, and subsystem caps; not end-to-end usefulness |
 | [Acceptance manifest](outputs/mrcra_acceptance_manifest.json) | Environment, commands, source hashes, and retained verification results |
 | [Evidence ledger](spec/mrcra_evidence.json) | Machine-readable mapping from specification requirements to implementation and tests |
 
@@ -990,11 +1025,15 @@ python scripts/run_mrcra_acceptance.py
 python scripts/build_mrcra_evidence.py
 ```
 
-Run only the focused PC-RASL mechanism gates with:
+Run only the focused unfinished PC-RASL component gates with:
 
 ```bash
 python scripts/run_pc_rasl_acceptance.py
 ```
+
+Passing these gates means the currently encoded component contracts hold. It
+does not establish that PC-RASL improves a trained model or is ready for normal
+use.
 
 The retained initial-public-release evidence records:
 
@@ -1010,7 +1049,11 @@ The retained initial-public-release evidence records:
 These results establish implemented contracts, bounded causal effects, exact
 resume behavior, and local mechanism learnability. They do not substitute for a
 seriously trained checkpoint, broad downstream evaluation, target-hardware
-qualification, or evidence of general cognition.
+qualification, or evidence of general cognition. In particular, the retained
+PC-RASL tests establish isolated prototype contracts rather than end-to-end
+usefulness, and they do not make PC-RASL finished. The acceptance suite also
+does not qualify CUDA hardware support; that path remains unfinished and under
+active development.
 
 ## License
 
