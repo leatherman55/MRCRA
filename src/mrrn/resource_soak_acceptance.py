@@ -89,19 +89,41 @@ def _criterion(
 def build_resource_soak_report(
     sample: ResourceSoakSample,
 ) -> ResourceSoakReport:
-    x_mean = (sample.steps - 1) / 2
-    y_mean = sum(sample.rss_bytes) / sample.steps
-    denominator = sum(
-        (index - x_mean) ** 2 for index in range(sample.steps)
+    # The two halves are deliberately different OS processes. Their absolute
+    # RSS baselines are not comparable: allocator state, imported accelerator
+    # libraries, and lazy device mappings may differ after checkpoint load.
+    # Leak authority therefore remains strict *within* each process. Combining
+    # the halves into one regression would misclassify the resume discontinuity
+    # as persistent growth even when both processes are individually flat.
+    midpoint = sample.steps // 2
+    segments = (
+        sample.rss_bytes[:midpoint],
+        sample.rss_bytes[midpoint:],
     )
-    slope = (
-        sum(
-            (index - x_mean) * (value - y_mean)
-            for index, value in enumerate(sample.rss_bytes)
+
+    def positive_slope(values: tuple[int, ...]) -> float:
+        count = len(values)
+        x_mean = (count - 1) / 2
+        y_mean = sum(values) / count
+        denominator = sum(
+            (index - x_mean) ** 2 for index in range(count)
         )
-        / max(denominator, 1)
-    )
-    rss_range = max(sample.rss_bytes) - min(sample.rss_bytes)
+        slope = sum(
+            (index - x_mean) * (value - y_mean)
+            for index, value in enumerate(values)
+        ) / max(denominator, 1)
+        return max(0.0, slope)
+
+    def retained_growth(values: tuple[int, ...]) -> int:
+        minimum = values[0]
+        maximum_excursion = 0
+        for value in values:
+            maximum_excursion = max(maximum_excursion, value - minimum)
+            minimum = min(minimum, value)
+        return maximum_excursion
+
+    slope = max(positive_slope(segment) for segment in segments)
+    rss_range = max(retained_growth(segment) for segment in segments)
     elapsed_error = abs(
         sample.accounted_elapsed_seconds
         - sample.measured_elapsed_seconds
@@ -124,7 +146,7 @@ def build_resource_soak_report(
         _criterion(
             "rss_range",
             float(rss_range),
-            float(256 << 20),
+            float(128 << 20),
             "maximum",
             "bytes",
         ),
@@ -186,13 +208,16 @@ def build_resource_soak_report(
         ),
     )
     return ResourceSoakReport(
-        1,
+        2,
         sample,
         criteria,
         all(item.passed for item in criteria),
         (
             "This validates bounded resources, periodic checkpoint/evaluation "
             "behavior, and a mid-run exact resume for the named local profile. "
+            "RSS growth is evaluated independently within each process-isolated "
+            "phase; the absolute resume-boundary baseline is not treated as a "
+            "memory leak. "
             "Only production_8p4m_32k evidence supports a full-size claim."
         ),
     )

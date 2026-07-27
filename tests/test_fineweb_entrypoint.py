@@ -15,6 +15,7 @@ from mrrn.cognitive_training import (
     progress_conditioned_rasl_configuration,
 )
 from mrrn.language import MRCRALanguageModel
+from mrrn.lm_training import DEFAULT_TOKENIZER_NAME
 from mrrn.vocabulary_router import VocabularyRouterConfig
 from scripts.train_mrcra_fineweb import (
     parser, production_cognitive_stride, production_configuration,
@@ -77,10 +78,10 @@ def test_ultralightmodel_selects_exact_complete_2p7m_profile_and_names():
     assert selected.name == "mrcra_2p7m_ultralight"
     assert selected.model_authority == "mrcra-ultralight-2p7m-fineweb-stage1"
     assert selected.output_directory.endswith(
-        "mrcra-2p7m-fineweb-20000000-tokens"
+        "mrcra-2p7m-unigram24k-fineweb-20000000-tokens"
     )
     assert selected.run_name == (
-        "mrcra-2p7m-ultralight-integrated-fineweb-"
+        "mrcra-2p7m-ultralight-unigram24k-integrated-fineweb-"
         "20000000-tokens-32k"
     )
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -90,6 +91,29 @@ def test_ultralightmodel_selects_exact_complete_2p7m_profile_and_names():
     with pytest.raises(ValueError, match="mutually exclusive"):
         production_profile(
             lightmodel=True, ultralightmodel=True, total_tokens=20_000_000
+        )
+
+
+def test_unigram_24k_is_the_default_and_selects_reinvested_profiles():
+    arguments = parser().parse_args([])
+    assert arguments.tokenizer == DEFAULT_TOKENIZER_NAME
+
+    ultralight = production_configuration(
+        24_576, lightmodel=False, ultralightmodel=True,
+    )
+    light = production_configuration(
+        24_576, lightmodel=True, ultralightmodel=False,
+    )
+    serious = production_configuration(
+        24_576, lightmodel=False, ultralightmodel=False,
+    )
+    assert ultralight.carrier.model_dim == 48
+    assert light.carrier.model_dim == 112
+    assert light.carrier.scales == 6
+    assert serious.carrier.modes == 24
+    with pytest.raises(ValueError, match="redesign the profile"):
+        production_configuration(
+            16_384, lightmodel=True, ultralightmodel=False,
         )
 
 
@@ -138,7 +162,8 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     assert completed.returncode == 0, completed.stdout
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["model_profile"] == "mrcra_2p7m_ultralight"
-    assert report["parameter_count"] == report["trainable_parameter_count"] == 2_699_463
+    assert report["parameter_count"] == report["trainable_parameter_count"] == 2_699_453
+    assert report["vocabulary_size"] == 24_576
     assert report["declared_range"]["passed"] is True
     assert report["tied_token_and_output_weights"] is True
     assert report["configuration"]["carrier"]["scales"] == 6
@@ -146,7 +171,7 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     assert report["parameter_count_by_subsystem"]["cognitive.workspace_graph"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.controller"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.world_model"] > 0
-    assert report["parameter_count_by_subsystem"]["cstm_predictor"] == 2_414
+    assert report["parameter_count_by_subsystem"]["cstm_predictor"] == 2_606
 
 
 def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
@@ -223,7 +248,10 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert arguments.allow_unsafe_activation_policy is False
     assert arguments.dashboard is False
     assert arguments.trackio_remote_log_interval == 4
-    assert arguments.maximum_compiled_cce_mib == 512
+    assert arguments.maximum_compiled_cce_mib == 256
+    assert arguments.activation_calibration_cache is True
+    assert arguments.mlx_memory_limit_mib == 1_536
+    assert arguments.mlx_cache_limit_mib == 128
     assert arguments.document_static_batching is True
     assert arguments.document_planner == "auto"
     assert arguments.document_cost_calibration is True
@@ -252,7 +280,9 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert configuration.cstm_predictor_update_interval == 1
     assert configuration.cstm_maximum_coverage_gap == 4_096
     assert configuration.apple_mps_loss_offload is False
-    assert configuration.maximum_fused_loss_bytes == 512 << 20
+    assert configuration.maximum_fused_loss_bytes == 256 << 20
+    assert configuration.mlx_memory_limit_bytes == 1_536 << 20
+    assert configuration.mlx_cache_limit_bytes == 128 << 20
     assert configuration.vocabulary_tile_size == 4_096
     assert configuration.phase_transition_telemetry is True
     assert configuration.phase_transition_ablation is True

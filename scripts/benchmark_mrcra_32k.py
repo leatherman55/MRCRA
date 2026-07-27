@@ -19,7 +19,8 @@ from mrrn.cognitive_training import MRCRANextTokenTrainer, MRCRATrainingConfig  
 from mrrn.config import MRCRAConfig  # noqa: E402
 from mrrn.language import MRCRALanguageModel  # noqa: E402
 from mrrn.lm_training import (  # noqa: E402
-    HuggingFaceTextTokenizer, PackedTokenStream, SequenceTextSource,
+    DEFAULT_TOKENIZER_NAME, PackedTokenStream, SequenceTextSource,
+    load_text_tokenizer,
 )
 
 
@@ -35,8 +36,9 @@ def arguments() -> argparse.Namespace:
         "--compile-tensor-cores", action=argparse.BooleanOptionalAction,
         default=None,
     )
-    parser.add_argument("--tokenizer", default="gpt2")
+    parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER_NAME)
     parser.add_argument("--tokenizer-revision", default="main")
+    parser.add_argument("--tokenizer-manifest")
     parser.add_argument("--output", default="outputs/mrcra-120m-32k-benchmark.json")
     parser.add_argument("--work-dir", default="work/mrcra-32k-benchmark")
     parser.add_argument("--allow-non-cuda-smoke", action="store_true")
@@ -49,8 +51,10 @@ def main() -> None:
         raise RuntimeError(
             "Gate M requires a real CUDA run. Use --allow-non-cuda-smoke only to test the harness."
         )
-    tokenizer = HuggingFaceTextTokenizer(
-        args.tokenizer, revision=args.tokenizer_revision
+    tokenizer = load_text_tokenizer(
+        args.tokenizer,
+        revision=args.tokenizer_revision,
+        manifest_path=args.tokenizer_manifest,
     )
     config = MRCRAConfig.serious_120m(output_dim=tokenizer.vocabulary_size)
     model = MRCRALanguageModel(config, model_authority="mrcra-32k-benchmark")

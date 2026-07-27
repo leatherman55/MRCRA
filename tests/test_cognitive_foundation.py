@@ -89,6 +89,47 @@ def test_light_8p4m_profile_preserves_integrated_cognition_and_exact_budget():
         light.require_actor_parameter_count(8_500_000)
 
 
+def test_unigram_24k_profiles_reinvest_lexical_capacity_without_deleting_cognition():
+    ultralight = MRCRAConfig.ultralight_2p7m()
+    light = MRCRAConfig.light_8p4m()
+    serious = MRCRAConfig.serious_120m()
+    models = tuple(
+        MRCRALanguageModel(configuration, model_authority="unigram-profile-test")
+        for configuration in (ultralight, light, serious)
+    )
+
+    assert models[0].parameter_count == 2_699_453
+    assert ultralight.carrier.model_dim == 48
+    assert ultralight.carrier.scales == 6
+    assert ultralight.carrier.modes == 13
+    assert ultralight.carrier.spectral_modes == 8
+    assert ultralight.carrier.structured_mixer_rank == 12
+    assert ultralight.cognitive.relation_modes == 12
+    assert ultralight.cognitive.relation_adapter_rank == 12
+
+    assert models[1].parameter_count == 8_416_265
+    assert light.carrier.model_dim == 112
+    assert light.carrier.scales == 6
+    assert light.carrier.modes == 18
+    assert light.carrier.spectral_modes == 10
+    assert light.carrier.structured_mixer_rank == 20
+
+    assert models[2].parameter_count == 120_086_581
+    assert serious.carrier.model_dim == 256
+    assert serious.carrier.scales == 6
+    assert serious.carrier.modes == 24
+    assert serious.carrier.spectral_modes == 12
+    assert serious.carrier.mixer_expansion == 2.25
+
+    for configuration, model in zip(
+        (ultralight, light, serious), models, strict=True,
+    ):
+        configuration.require_actor_parameter_count(model.parameter_count)
+        assert model.vocabulary_size == 24_576
+        assert configuration.cognitive.enable_conditional_reconstruction
+        assert configuration.cognitive.enable_persistent_session_training
+
+
 def test_ultralight_2p7m_profile_preserves_complete_six_scale_cognition():
     ultralight = MRCRAConfig.ultralight_2p7m(output_dim=50_257)
     carrier = ultralight.carrier

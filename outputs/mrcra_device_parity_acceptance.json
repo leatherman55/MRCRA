@@ -168,7 +168,7 @@
         },
         {
           "direction": "maximum",
-          "measurement": 9.313225746154785e-10,
+          "measurement": 1.1641532182693481e-10,
           "name": "checkpoint_resume_parameter_error",
           "passed": true,
           "threshold": 0.002

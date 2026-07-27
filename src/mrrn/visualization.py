@@ -557,19 +557,18 @@ def checkpoint_spectral_evidence(
     tokenizer_identity = identity.get("tokenizer")
     if not isinstance(configuration, dict) or not isinstance(tokenizer_identity, dict):
         raise ValueError("checkpoint lacks model/tokenizer identity")
-    if tokenizer_identity.get("kind") != "huggingface":
-        raise ValueError("the standalone exporter currently requires a Hugging Face tokenizer")
 
     # Lazy import prevents the training module from forming an import cycle when
     # it publishes live spectral snapshots to Trackio.
-    from .lm_training import HuggingFaceTextTokenizer
+    from .lm_training import tokenizer_from_identity
 
+    tokenizer = tokenizer_from_identity(
+        tokenizer_identity,
+        search_roots=(checkpoint.parent, checkpoint.parent.parent),
+    )
     config = MRRNConfig(**configuration)
     model = MRRNLanguageModel(config).to(device)
     model.load_state_dict(payload["model"], strict=True)
-    tokenizer = HuggingFaceTextTokenizer(
-        tokenizer_identity["name"], revision=tokenizer_identity["revision"]
-    )
     training_state = payload.get("training_state", {})
     return model_spectral_evidence(
         model,

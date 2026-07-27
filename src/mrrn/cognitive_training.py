@@ -24,6 +24,7 @@ from math import ceil, isfinite, lcm, log
 import multiprocessing
 import os
 from pathlib import Path
+import sys
 import tempfile
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
@@ -34,11 +35,14 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .activation_execution import (
+    ActivationCandidateMeasurement,
     ActivationExecutionPolicy,
+    ActivationPartitionCensus,
     calibrate_activation_candidates,
     census_activation_partitions,
+    fastest_safe_activation_policy,
     measure_saved_tensor_bytes,
-    maximum_safe_retain_physical_tokens,
+    maximum_safe_activation_physical_tokens,
     observe_memory,
     resolve_activation_execution_policy,
     select_activation_dominant_partitions,
@@ -79,6 +83,7 @@ from .learning_progress import (
 )
 from .lm_training import (
     PackedBatch, PackedTokenStream, TextTokenizer, TrackioReporter,
+    materialize_tokenizer_artifacts,
     _configure_cuda, _device_for, _memory_metrics, _precision_for,
     _runtime_details, _synchronize,
 )
@@ -367,6 +372,44 @@ def exact_cut_cross_entropy(
     )
 
 
+def _recoverable_external_cce_failure(error: Exception) -> bool:
+    """Identify delayed compiler failures from the optional CCE execution path.
+
+    Cut Cross-Entropy's portable backend compiles lazily on its first real
+    shape.  Installation and workspace checks can therefore succeed even when
+    Inductor, clang, a precompiled header, or a generated extension later
+    fails.  Input-contract and numerical failures are deliberately excluded:
+    only an external backend/compiler failure may trigger an exact tiled retry.
+    """
+
+    current: BaseException | None = error
+    while current is not None:
+        kind = type(current)
+        module = kind.__module__
+        name = kind.__name__
+        message = str(current).lower()
+        if (
+            module.startswith(("torch._inductor", "torch._dynamo"))
+            or name in {
+                "BackendCompilerFailed",
+                "CppCompileError",
+                "InductorError",
+                "InvalidCxxCompiler",
+            }
+            or any(marker in message for marker in (
+                "c++ compile error",
+                "cppcompileerror",
+                "inductorerror",
+                "torchinductor",
+                "precompiled header",
+                "backend compiler failed",
+            ))
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _diagnostic_snapshot_due(
     step: int, interval: int, last_attempt_step: int = -1,
 ) -> bool:
@@ -521,8 +564,10 @@ class MRCRATrainingConfig:
     progress_interval_tokens: int = 2_048
     checkpoint_tiles: bool | None = None
     maximum_retained_loss_bytes: int = 1 << 30
-    maximum_fused_loss_bytes: int = 512 << 20
+    maximum_fused_loss_bytes: int = 256 << 20
     exact_loss_backend: str = "auto"
+    mlx_memory_limit_bytes: int = 1_536 << 20
+    mlx_cache_limit_bytes: int = 128 << 20
     log_interval: int = 1
     checkpoint_interval: int = 25
     keep_checkpoints: int = 3
@@ -556,6 +601,8 @@ class MRCRATrainingConfig:
     activation_policy: str = "auto"
     activation_memory_reserve_bytes: int = 4 << 30
     activation_calibration: bool = True
+    activation_calibration_cache_directory: str | None = None
+    activation_calibration_reexec: bool = False
     allow_unsafe_activation_policy: bool = False
     apple_mps_loss_offload: bool = False
     trackio_enabled: bool = True
@@ -608,6 +655,7 @@ class MRCRATrainingConfig:
             self.cstm_target_participation_budget,
             self.cstm_predictor_update_interval,
             self.trackio_remote_log_interval,
+            self.mlx_memory_limit_bytes,
         )
         if min(positive) <= 0:
             raise ValueError("MRCRA training sizes and intervals must be positive")
@@ -659,11 +707,17 @@ class MRCRATrainingConfig:
             raise ValueError("CSTM execution upgrade authority must be boolean")
         if self.maximum_fused_loss_bytes < 0 or self.maximum_retained_loss_bytes < 0:
             raise ValueError("loss workspace limits cannot be negative")
+        if (
+            self.mlx_cache_limit_bytes < 0
+            or self.mlx_cache_limit_bytes > self.mlx_memory_limit_bytes
+        ):
+            raise ValueError("MLX cache limit must lie within its memory limit")
         if self.exact_loss_backend not in {
             "auto",
             "cce_kahan_full_c",
             "cce_exact",
             "torch_compile",
+            "mlx",
             "fused",
             "tiled",
         }:
@@ -798,6 +852,27 @@ class MRCRATrainingConfig:
             raise ValueError("unknown activation execution policy")
         if not isinstance(self.activation_calibration, bool):
             raise ValueError("activation_calibration must be boolean")
+        if (
+            self.activation_calibration_cache_directory is not None
+            and (
+                not isinstance(
+                    self.activation_calibration_cache_directory, str
+                )
+                or not self.activation_calibration_cache_directory
+            )
+        ):
+            raise ValueError(
+                "activation calibration cache directory must be a path or None"
+            )
+        if not isinstance(self.activation_calibration_reexec, bool):
+            raise ValueError("activation calibration re-exec must be boolean")
+        if (
+            self.activation_calibration_reexec
+            and self.activation_calibration_cache_directory is None
+        ):
+            raise ValueError(
+                "activation calibration re-exec requires an enabled cache"
+            )
         if self.integrated_cognitive_path and (
             profile.name != "substrate_language_pretraining"
             or mode != TrainerMode.INDEPENDENT_PACKED_DOCUMENTS
@@ -935,6 +1010,7 @@ def _cpu_thread_calibration_worker(
     model_config,
     model_authority: str,
     state_path: str,
+    output_path: str,
     maximum_length: int,
     threads: int,
     result_queue,
@@ -958,33 +1034,57 @@ def _cpu_thread_calibration_worker(
         carrier.configure_activation_execution("retain")
         length = min(
             maximum_length,
-            max(64, 2 ** (carrier.config.scales - 1)),
+            max(64, min(256, maximum_length)),
         )
+        batch = max(1, min(4, 1_024 // length))
         values = torch.linspace(
             -0.2,
             0.2,
-            steps=length * carrier.config.input_dim,
+            steps=batch * length * carrier.config.input_dim,
             dtype=model.token_embedding.weight.dtype,
-        ).reshape(1, length, carrier.config.input_dim)
-        mask = torch.ones(1, length, dtype=torch.bool)
+        ).reshape(batch, length, carrier.config.input_dim)
+        mask = torch.ones(batch, length, dtype=torch.bool)
         samples: list[float] = []
         output = None
+        input_gradient = None
         for repetition in range(3):
+            model.zero_grad(set_to_none=True)
+            local_values = values.detach().clone().requires_grad_(True)
             started = perf_counter()
-            with torch.inference_mode():
-                output = carrier.prefill(
-                    values, mask, project_output=False,
-                ).latent
+            output = carrier.prefill(
+                local_values, mask, project_output=False,
+            ).latent
+            output.float().square().mean().backward()
             elapsed = perf_counter() - started
+            input_gradient = local_values.grad
+            if input_gradient is None:
+                raise RuntimeError(
+                    "CPU calibration omitted the carrier input adjoint"
+                )
             if repetition:
                 samples.append(elapsed)
-        if output is None or not torch.isfinite(output).all():
+        if (
+            output is None
+            or input_gradient is None
+            or not torch.isfinite(output).all()
+            or not torch.isfinite(input_gradient).all()
+        ):
             raise RuntimeError(
-                "CPU calibration produced no finite carrier output"
+                "CPU calibration produced no finite carrier output/adjoint"
             )
+        retained = torch.cat((
+            output.detach().reshape(-1),
+            input_gradient.detach().reshape(-1),
+        ))
         checksum = sha256(
-            output.detach().contiguous().view(torch.uint8).numpy().tobytes()
+            retained.contiguous().view(torch.uint8).numpy().tobytes()
         ).hexdigest()
+        # Retain the complete calibration output outside the queue. The
+        # serious profile's 64x256 tensor can exceed a multiprocessing pipe's
+        # bounded buffer if the parent waits for process completion before
+        # reading, whereas this temporary tensor is small, deterministic, and
+        # removed with the surrounding calibration directory.
+        torch.save(retained.cpu(), output_path)
         result_queue.put(
             {
                 "ok": True,
@@ -1003,6 +1103,26 @@ def _cpu_thread_calibration_worker(
         )
 
 
+def _cpu_calibration_outputs_equivalent(
+    reference: Tensor,
+    candidate: Tensor,
+) -> bool:
+    """Accept only tight float32-equivalent results across thread schedules."""
+
+    return bool(
+        reference.shape == candidate.shape
+        and reference.dtype == candidate.dtype
+        and torch.isfinite(reference).all()
+        and torch.isfinite(candidate).all()
+        and torch.allclose(
+            candidate,
+            reference,
+            rtol=3e-5,
+            atol=3e-6,
+        )
+    )
+
+
 def _calibrate_cpu_thread_count(
     model: MRCRALanguageModel,
     *,
@@ -1019,6 +1139,7 @@ def _calibrate_cpu_thread_count(
     completed = False
     timings: dict[int, float] = {}
     checksums: list[str] = []
+    reference_output: Tensor | None = None
     try:
         with tempfile.TemporaryDirectory(
             prefix="mrcra-cpu-calibration-"
@@ -1027,6 +1148,9 @@ def _calibrate_cpu_thread_count(
             torch.save(model.state_dict(), state_path)
             context = multiprocessing.get_context("spawn")
             for threads in candidates:
+                output_path = str(
+                    Path(directory) / f"candidate-{threads}-output.pt"
+                )
                 result_queue = context.Queue(maxsize=1)
                 process = context.Process(
                     target=_cpu_thread_calibration_worker,
@@ -1034,6 +1158,7 @@ def _calibrate_cpu_thread_count(
                         model.config,
                         model.model_authority,
                         state_path,
+                        output_path,
                         maximum_length,
                         threads,
                         result_queue,
@@ -1062,8 +1187,33 @@ def _calibrate_cpu_thread_count(
                     )
                 timings[threads] = float(result["seconds"])
                 checksums.append(str(result["checksum"]))
-        if len(set(checksums)) != 1:
-            raise RuntimeError("CPU thread candidates changed carrier output")
+                candidate_output = torch.load(
+                    output_path, map_location="cpu", weights_only=True,
+                )
+                if (
+                    not isinstance(candidate_output, Tensor)
+                    or not torch.isfinite(candidate_output).all()
+                ):
+                    raise RuntimeError(
+                        "CPU calibration candidate retained invalid output"
+                    )
+                if reference_output is None:
+                    reference_output = candidate_output
+                elif (
+                    result["checksum"] != checksums[0]
+                    and not _cpu_calibration_outputs_equivalent(
+                        reference_output, candidate_output,
+                    )
+                ):
+                    maximum_absolute = float(
+                        (candidate_output - reference_output).abs().max()
+                    )
+                    raise RuntimeError(
+                        "CPU thread candidates materially changed carrier "
+                        f"output (maximum absolute error {maximum_absolute:.8g})"
+                    )
+        if reference_output is None:
+            raise RuntimeError("CPU thread calibration produced no output")
         selected = min(timings, key=lambda value: (timings[value], value))
         torch.set_num_threads(selected)
         completed = True
@@ -1141,6 +1291,12 @@ class _NonAuthoritativeReporter:
         def guarded(*args, **kwargs):
             try:
                 return target(*args, **kwargs)
+            except ValueError:
+                # Shape, dtype, device, and target-domain violations are
+                # caller contract failures. Silently changing backends would
+                # conceal invalid training data rather than recover a failed
+                # accelerator.
+                raise
             except Exception as error:
                 self._record(name, error)
                 return None
@@ -1218,6 +1374,7 @@ class MRCRANextTokenTrainer:
                 "progress-probe batches must match configured batch/probe shape"
             )
         self.model, self.tokenizer, self.train_stream = model, tokenizer, train_stream
+        materialize_tokenizer_artifacts(tokenizer, config.output_dir)
         self.evaluation_batches = tuple(evaluation_batches)
         self.progress_probe_batches = tuple(progress_probe_batches)
         self.config = config
@@ -1256,7 +1413,7 @@ class MRCRANextTokenTrainer:
                 token_budget=config.document_batch_token_budget,
                 alignment=carrier_alignment,
                 cognitive_stride=config.cognitive_stride,
-                padding_token_id=0,
+                padding_token_id=tokenizer.pad_token_id,
                 grouping_policy=config.document_grouping_policy,
                 plan_cache_capacity=config.document_plan_cache_capacity,
                 actor_configuration_digest=sha256(
@@ -1371,7 +1528,118 @@ class MRCRANextTokenTrainer:
         # device allocator cache. Candidate peaks are incremental relative to
         # that state, so this is the matching reserve authority.
         activation_memory_before_calibration = observe_memory(self.device)
-        if config.activation_calibration:
+        activation_cache_path: Path | None = None
+        activation_cache_key: str | None = None
+        activation_cache_hit = False
+        cached_document_cost_model: DocumentExecutionCostModel | None = None
+        cached_document_cost_observations: list[dict[str, object]] = []
+        if (
+            config.activation_calibration
+            and config.activation_calibration_cache_directory is not None
+            and self.device.type == "cpu"
+        ):
+            source_authority = sha256()
+            for source_path in sorted(
+                Path(__file__).parent.glob("*.py")
+            ):
+                source_authority.update(source_path.name.encode("utf-8"))
+                source_authority.update(source_path.read_bytes())
+            cache_identity = {
+                "schema_version": 1,
+                "source_authority": source_authority.hexdigest(),
+                "actor_configuration": sha256(
+                    repr(model.config).encode("utf-8")
+                ).hexdigest(),
+                "torch_version": str(torch.__version__),
+                "platform": tuple(os.uname()),
+                "device": str(self.device),
+                "precision": str(self.amp_dtype),
+                "cpu_threads": int(resolved_cpu_threads),
+                "activation_request": config.activation_policy,
+                "tbptt_length": config.tbptt_length,
+                "maximum_physical_tokens": maximum_planned_physical_tokens,
+                "document_buckets": resolved_document_buckets,
+                "document_cost_calibration": config.document_cost_calibration,
+            }
+            activation_cache_key = sha256(
+                json.dumps(
+                    cache_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            activation_cache_path = (
+                Path(config.activation_calibration_cache_directory)
+                / f"{activation_cache_key}.json"
+            )
+            if activation_cache_path.is_file():
+                try:
+                    cached = json.loads(
+                        activation_cache_path.read_text(encoding="utf-8")
+                    )
+                    if (
+                        not isinstance(cached, dict)
+                        or cached.get("schema_version") != 1
+                        or cached.get("cache_key") != activation_cache_key
+                    ):
+                        raise ValueError(
+                            "activation calibration cache identity differs"
+                        )
+                    calibration_measurements = tuple(
+                        ActivationCandidateMeasurement(**dict(item))
+                        for item in cached["calibration_measurements"]
+                    )
+                    activation_partition_census = tuple(
+                        ActivationPartitionCensus(**dict(item))
+                        for item in cached["activation_partition_census"]
+                    )
+                    selective_candidate_scales = tuple(
+                        int(value)
+                        for value in cached[
+                            "selective_candidate_scales"
+                        ]
+                    )
+                    self.runtime[
+                        "activation_equivalence_max_abs_error"
+                    ] = float(cached["equivalence_max_abs_error"])
+                    self.runtime[
+                        "activation_equivalence_min_cosine"
+                    ] = float(cached["equivalence_min_cosine"])
+                    if cached.get("document_cost_model") is not None:
+                        cached_document_cost_model = (
+                            DocumentExecutionCostModel.from_dict(
+                                cached["document_cost_model"]
+                            )
+                        )
+                    if (
+                        self.document_batch_planner is not None
+                        and config.document_cost_calibration
+                        and cached_document_cost_model is None
+                    ):
+                        raise ValueError(
+                            "activation cache omitted its document cost model"
+                        )
+                    cached_document_cost_observations = [
+                        dict(item)
+                        for item in cached.get(
+                            "document_cost_calibration_observations", ()
+                        )
+                    ]
+                    activation_cache_hit = True
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    OSError,
+                ) as error:
+                    self.runtime[
+                        "activation_calibration_cache_error"
+                    ] = (
+                        f"{type(error).__module__}.{type(error).__name__}: "
+                        f"{' '.join(str(error).split())[:2048]}"
+                    )
+        if config.activation_calibration and not activation_cache_hit:
             carrier = model.cognitive.carrier
             calibration_length = min(
                 config.tbptt_length,
@@ -1614,9 +1882,39 @@ class MRCRANextTokenTrainer:
             allow_unsafe_explicit=config.allow_unsafe_activation_policy,
             memory_observation=activation_memory_before_calibration,
         )
+        self.activation_policy_token_limits = {
+            policy_name: maximum_safe_activation_physical_tokens(
+                self.activation_execution_policy,
+                candidate_policy=policy_name,
+                alignment=carrier_alignment,
+                maximum_physical_tokens=maximum_planned_physical_tokens,
+            )
+            for policy_name in ("retain", "selective", "whole_span")
+        }
+        # The resolved maximum-shape policy is always authoritative for the
+        # complete configured cohort, including legacy receipts that predate
+        # per-candidate projected peaks.
+        self.activation_policy_token_limits[
+            self.activation_execution_policy.resolved
+        ] = maximum_planned_physical_tokens
+        activation_policy_timings = {
+            item.policy: item.elapsed_seconds
+            for item in calibration_measurements
+            if item.finite
+        }
+        activation_policy_timings.setdefault(
+            self.activation_execution_policy.resolved,
+            0.0 if not calibration_measurements else float("inf"),
+        )
         if self.document_batch_planner is not None:
             self.document_batch_planner.activation_policy = (
                 self.activation_execution_policy.resolved
+            )
+            self.document_batch_planner.activation_policy_token_limits = dict(
+                self.activation_policy_token_limits
+            )
+            self.document_batch_planner.activation_policy_timings = dict(
+                activation_policy_timings
             )
             self.document_batch_planner.maximum_candidate_activation_bytes = (
                 max(
@@ -1654,7 +1952,14 @@ class MRCRANextTokenTrainer:
                     ),
                 )
                 self.document_batch_planner._group_cache.clear()
-            if (
+            if cached_document_cost_model is not None:
+                self.document_batch_planner.cost_model = (
+                    cached_document_cost_model
+                )
+                self.runtime[
+                    "document_cost_calibration_observations"
+                ] = cached_document_cost_observations
+            elif (
                 selected_measurement is not None
                 and config.document_cost_calibration
             ):
@@ -1687,9 +1992,28 @@ class MRCRANextTokenTrainer:
                 length_band_observations: list[
                     tuple[int, float, int, int]
                 ] = []
-                for padded_length in resolved_document_buckets:
-                    if padded_length > calibration_input.shape[1]:
-                        break
+                eligible_buckets = tuple(
+                    padded_length
+                    for padded_length in resolved_document_buckets
+                    if padded_length <= calibration_input.shape[1]
+                )
+                maximum_band_observations = 8
+                if len(eligible_buckets) <= maximum_band_observations:
+                    measured_buckets = eligible_buckets
+                else:
+                    measured_indices = tuple(sorted({
+                        round(
+                            index
+                            * (len(eligible_buckets) - 1)
+                            / (maximum_band_observations - 1)
+                        )
+                        for index in range(maximum_band_observations)
+                    }))
+                    measured_buckets = tuple(
+                        eligible_buckets[index]
+                        for index in measured_indices
+                    )
+                for padded_length in measured_buckets:
                     band_input = calibration_input[
                         :1, :padded_length
                     ]
@@ -1758,17 +2082,92 @@ class MRCRANextTokenTrainer:
                 self.runtime[
                     "document_cost_calibration_observations"
                 ] = []
+        self.runtime["activation_calibration_cache_hit"] = (
+            activation_cache_hit
+        )
+        self.runtime["activation_calibration_cache_key"] = (
+            activation_cache_key
+        )
+        self.runtime["activation_calibration_cache_path"] = (
+            None
+            if activation_cache_path is None
+            else str(activation_cache_path)
+        )
+        if (
+            activation_cache_path is not None
+            and not activation_cache_hit
+            and calibration_measurements
+        ):
+            activation_cache_path.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            cache_payload = {
+                "schema_version": 1,
+                "cache_key": activation_cache_key,
+                "calibration_measurements": [
+                    asdict(item) for item in calibration_measurements
+                ],
+                "activation_partition_census": [
+                    asdict(item) for item in activation_partition_census
+                ],
+                "selective_candidate_scales": list(
+                    selective_candidate_scales
+                ),
+                "equivalence_max_abs_error": self.runtime.get(
+                    "activation_equivalence_max_abs_error", 0.0
+                ),
+                "equivalence_min_cosine": self.runtime.get(
+                    "activation_equivalence_min_cosine", 1.0
+                ),
+                "document_cost_model": (
+                    None
+                    if self.document_batch_planner is None
+                    else self.document_batch_planner.cost_model.to_dict()
+                ),
+                "document_cost_calibration_observations": self.runtime.get(
+                    "document_cost_calibration_observations", []
+                ),
+            }
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{activation_cache_path.name}.",
+                suffix=".tmp",
+                dir=activation_cache_path.parent,
+            )
+            try:
+                with os.fdopen(
+                    descriptor, "w", encoding="utf-8"
+                ) as handle:
+                    json.dump(
+                        cache_payload,
+                        handle,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_name, activation_cache_path)
+            finally:
+                Path(temporary_name).unlink(missing_ok=True)
+            if config.activation_calibration_reexec:
+                print(
+                    "Activation/document calibration cached; restarting once "
+                    "to release calibration allocator arenas before the long "
+                    "training run.",
+                    flush=True,
+                )
+                os.execv(
+                    sys.executable,
+                    [sys.executable, *sys.argv],
+                )
         selective_scales: tuple[int, ...] = (
             selective_candidate_scales
             if self.activation_execution_policy.resolved == "selective"
             else ()
         )
         self.activation_retain_physical_token_limit = (
-            maximum_safe_retain_physical_tokens(
-                self.activation_execution_policy,
-                alignment=carrier_alignment,
-                maximum_physical_tokens=maximum_planned_physical_tokens,
-            )
+            self.activation_policy_token_limits["retain"]
         )
         model.cognitive.carrier.configure_activation_execution(
             self.activation_execution_policy.resolved,
@@ -1799,9 +2198,19 @@ class MRCRANextTokenTrainer:
         self.runtime["carrier_retain_physical_token_limit"] = (
             self.activation_retain_physical_token_limit
         )
+        self.runtime["carrier_activation_physical_token_limits"] = dict(
+            self.activation_policy_token_limits
+        )
+        self.runtime["carrier_activation_candidate_seconds"] = dict(
+            activation_policy_timings
+        )
         self.runtime["carrier_shape_conditional_activation"] = (
-            self.activation_execution_policy.resolved != "retain"
-            and self.activation_retain_physical_token_limit > 0
+            any(
+                policy_name != self.activation_execution_policy.resolved
+                and limit > 0
+                for policy_name, limit
+                in self.activation_policy_token_limits.items()
+            )
         )
         self.runtime["carrier_activation_partition_census"] = [
             asdict(item) for item in activation_partition_census
@@ -1868,6 +2277,14 @@ class MRCRANextTokenTrainer:
             else estimated_loss_bytes > config.maximum_retained_loss_bytes
         )
         cce_available = find_spec("cut_cross_entropy") is not None
+        mlx_cce_available = False
+        if self.device.type == "cpu" and find_spec("mlx") is not None:
+            try:
+                from .mlx_backend import mlx_available
+
+                mlx_cce_available = mlx_available()
+            except (ImportError, RuntimeError):
+                mlx_cce_available = False
         cce_capable_cuda = (
             self.loss_device.type == "cuda"
             and torch.cuda.get_device_capability(self.loss_device)[0] >= 8
@@ -1877,6 +2294,11 @@ class MRCRANextTokenTrainer:
             and estimated_loss_bytes <= config.maximum_fused_loss_bytes
         )
         requested_loss_backend = config.exact_loss_backend
+        portable_fallback_backend = (
+            "torch_compile"
+            if cce_available and compiled_cce_fits_workspace
+            else "tiled"
+        )
         if requested_loss_backend == "auto":
             self._exact_loss_backend = (
                 "cce_kahan_full_c"
@@ -1903,6 +2325,38 @@ class MRCRANextTokenTrainer:
             )
         else:
             self._exact_loss_backend = requested_loss_backend
+        if self._exact_loss_backend == "mlx" and not mlx_cce_available:
+            raise RuntimeError(
+                "the configured MLX exact-loss backend requires Apple Metal "
+                "and canonical CPU model tensors"
+            )
+        self.runtime["mlx_memory_policy_error"] = "not required"
+        self.runtime["mlx_memory_policy"] = None
+        self.runtime["mlx_active_memory_bytes"] = 0
+        self.runtime["mlx_cache_memory_bytes"] = 0
+        self.runtime["mlx_peak_memory_bytes"] = 0
+        if self._exact_loss_backend == "mlx":
+            try:
+                from .mlx_backend import configure_mlx_memory
+
+                mlx_memory_policy = configure_mlx_memory(
+                    memory_limit_bytes=config.mlx_memory_limit_bytes,
+                    cache_limit_bytes=config.mlx_cache_limit_bytes,
+                )
+                self.runtime["mlx_memory_policy"] = asdict(
+                    mlx_memory_policy
+                )
+            except Exception as error:
+                if requested_loss_backend == "mlx":
+                    raise RuntimeError(
+                        "the explicit MLX exact-loss memory policy could not "
+                        "be configured"
+                    ) from error
+                self._exact_loss_backend = portable_fallback_backend
+                self.runtime["mlx_memory_policy_error"] = (
+                    f"{type(error).__module__}.{type(error).__name__}: "
+                    f"{' '.join(str(error).split())[:2048]}"
+                )
         if (
             self._exact_loss_backend == "torch_compile"
             and not cce_available
@@ -1915,11 +2369,19 @@ class MRCRANextTokenTrainer:
             f"{self._exact_loss_backend}_exact_full_softmax"
         )
         self.runtime["cut_cross_entropy_available"] = cce_available
+        self.runtime["mlx_exact_loss_available"] = mlx_cce_available
+        self.runtime["mlx_exact_loss_fallback_backend"] = (
+            portable_fallback_backend
+        )
+        self.runtime["mlx_exact_loss_runtime_fallback"] = "not required"
         self.runtime["compiled_cce_fits_workspace"] = (
             compiled_cce_fits_workspace
         )
         self.runtime["requested_exact_loss_backend"] = requested_loss_backend
         self.runtime["exact_loss_backend"] = self._exact_loss_backend
+        self.runtime["compiled_cce_runtime_quarantined"] = False
+        self.runtime["compiled_cce_runtime_fallbacks"] = 0
+        self.runtime["compiled_cce_runtime_fallback_reason"] = "not required"
         self.runtime["estimated_fused_loss_bytes"] = estimated_loss_bytes
         self.runtime["loss_tile_checkpointing"] = self._checkpoint_loss_tiles
         self.runtime["maximum_retained_loss_bytes"] = config.maximum_retained_loss_bytes
@@ -3080,12 +3542,31 @@ class MRCRANextTokenTrainer:
         )
         if self.document_batch_planner is not None:
             self.document_batch_planner.activation_policy = next_policy
+            self.document_batch_planner.activation_policy_token_limits = {
+                name: (
+                    self.config.document_batch_token_budget
+                    if name == next_policy
+                    else 0
+                )
+                for name in ("retain", "selective", "whole_span")
+            }
             self.document_batch_planner._group_cache.clear()
         # The failed allocation may have occurred in a shape-local retained
         # invocation beneath a selective maximum-shape policy. Disable every
         # retained subpolicy for the single safe retry.
         self.activation_retain_physical_token_limit = 0
+        self.activation_policy_token_limits = {
+            name: (
+                self.config.document_batch_token_budget
+                if name == next_policy
+                else 0
+            )
+            for name in ("retain", "selective", "whole_span")
+        }
         self.runtime["carrier_retain_physical_token_limit"] = 0
+        self.runtime["carrier_activation_physical_token_limits"] = dict(
+            self.activation_policy_token_limits
+        )
         self.runtime["carrier_shape_conditional_activation"] = False
         self.runtime["activation_execution_policy"] = (
             self.activation_execution_policy.to_dict()
@@ -3180,16 +3661,130 @@ class MRCRANextTokenTrainer:
             local_mask.numel() * weight.shape[0] * latent.element_size()
         )
         backend = self._exact_loss_backend
+        if backend == "mlx":
+            try:
+                from .mlx_backend import mlx_torch_exact_cross_entropy
+
+                loss = mlx_torch_exact_cross_entropy(
+                    latent,
+                    weight,
+                    local_labels,
+                    bias,
+                    mask=local_mask,
+                    vocabulary_tile_size=self.config.vocabulary_tile_size,
+                )
+                from .mlx_backend import mlx_memory_statistics
+
+                memory = mlx_memory_statistics()
+                self.runtime["mlx_active_memory_bytes"] = memory[
+                    "active_bytes"
+                ]
+                self.runtime["mlx_cache_memory_bytes"] = memory[
+                    "cache_bytes"
+                ]
+                self.runtime["mlx_peak_memory_bytes"] = max(
+                    int(self.runtime["mlx_peak_memory_bytes"]),
+                    memory["peak_bytes"],
+                )
+                token_count = int(local_mask.sum())
+                byte_count = int(local_lengths[local_mask].sum())
+                return TiledCrossEntropy(
+                    loss,
+                    loss * token_count,
+                    token_count,
+                    byte_count,
+                )
+            except Exception as error:
+                if self.config.exact_loss_backend == "mlx":
+                    raise
+                fallback = str(
+                    self.runtime["mlx_exact_loss_fallback_backend"]
+                )
+                self._exact_loss_backend = fallback
+                self.runtime["exact_loss_backend"] = fallback
+                self.runtime["loss_projection"] = (
+                    f"{fallback}_exact_full_softmax"
+                )
+                self.runtime["mlx_exact_loss_runtime_fallback"] = (
+                    f"{type(error).__module__}.{type(error).__name__}: "
+                    f"{' '.join(str(error).split())[:2048]}"
+                )
+                print(
+                    "[MRCRA WARN] MLX exact loss failed; retrying the same "
+                    f"batch with {fallback} and quarantining MLX loss for "
+                    "the remainder of the run.",
+                    flush=True,
+                )
+                return self._language_statistics(
+                    output_latent,
+                    labels,
+                    target_byte_lengths,
+                    mask,
+                    head,
+                    checkpoint_tiles=checkpoint_tiles,
+                )
         if backend in {"cce_kahan_full_c", "cce_exact", "torch_compile"}:
-            return exact_cut_cross_entropy(
-                latent,
-                local_labels,
-                local_lengths,
-                local_mask,
-                weight,
-                bias,
-                implementation=backend,
-            )
+            try:
+                return exact_cut_cross_entropy(
+                    latent,
+                    local_labels,
+                    local_lengths,
+                    local_mask,
+                    weight,
+                    bias,
+                    implementation=backend,
+                )
+            except Exception as error:
+                if (
+                    self.config.exact_loss_backend == "torch_compile"
+                    or not _recoverable_external_cce_failure(error)
+                ):
+                    raise
+                old_policy_digest = self._identity_digest(
+                    self._identity()["execution"]
+                )
+                self._exact_loss_backend = "tiled"
+                self.runtime["exact_loss_backend"] = "tiled"
+                self.runtime["loss_projection"] = "tiled_exact_full_softmax"
+                self.runtime["compiled_cce_runtime_quarantined"] = True
+                self.runtime["compiled_cce_runtime_fallbacks"] = (
+                    int(self.runtime.get("compiled_cce_runtime_fallbacks", 0))
+                    + 1
+                )
+                compact_error = " ".join(str(error).split())
+                self.runtime["compiled_cce_runtime_fallback_reason"] = (
+                    f"{type(error).__module__}.{type(error).__name__}: "
+                    f"{compact_error[:2048]}"
+                )
+                self.execution_policy_history.append(
+                    self._execution_policy_record(
+                        effective_step=self.state.step,
+                        reason=(
+                            "recoverable external exact-loss compiler failure: "
+                            f"{backend} -> tiled"
+                        ),
+                        old_policy_digest=old_policy_digest,
+                    )
+                )
+                print(
+                    "[MRCRA WARN] Compiled exact CCE failed during lazy runtime "
+                    "construction; retrying this batch with exact tiled CE and "
+                    "quarantining compiled CCE for the remainder of the run.",
+                    flush=True,
+                )
+                return exact_tiled_cross_entropy(
+                    latent,
+                    local_labels,
+                    local_lengths,
+                    local_mask,
+                    weight,
+                    bias,
+                    vocabulary_tile_size=self.config.vocabulary_tile_size,
+                    checkpoint_tiles=(
+                        self._checkpoint_loss_tiles
+                        if checkpoint_tiles is None else checkpoint_tiles
+                    ),
+                )
         if backend == "fused":
             if (
                 self.config.maximum_fused_loss_bytes <= 0
@@ -4656,6 +5251,12 @@ class MRCRANextTokenTrainer:
             "softmax/training/compiled_cce_fits_workspace": float(
                 self.runtime["compiled_cce_fits_workspace"]
             ),
+            "softmax/training/compiled_cce_runtime_quarantined": float(
+                self.runtime["compiled_cce_runtime_quarantined"]
+            ),
+            "softmax/training/compiled_cce_runtime_fallbacks": float(
+                self.runtime["compiled_cce_runtime_fallbacks"]
+            ),
             "softmax/training/estimated_full_logits_mib": (
                 self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
             ),
@@ -4665,7 +5266,14 @@ class MRCRANextTokenTrainer:
                 "torch_compile": 2,
                 "cce_kahan_full_c": 3,
                 "cce_exact": 4,
+                "mlx": 5,
             }[self._exact_loss_backend]),
+            "softmax/training/mlx_peak_memory_mib": (
+                self.runtime["mlx_peak_memory_bytes"] / (1 << 20)
+            ),
+            "softmax/training/mlx_cache_memory_mib": (
+                self.runtime["mlx_cache_memory_bytes"] / (1 << 20)
+            ),
         }
         for scale, rows in enumerate(cstm_scale_rows):
             metrics[f"cstm/scale/{scale}/valid_rows"] = float(rows)
@@ -4816,14 +5424,12 @@ class MRCRANextTokenTrainer:
             for physical in cohort.spans:
                 invocation_index += 1
                 physical_tokens = int(physical.input_ids.numel())
-                invocation_activation_policy = (
-                    "retain"
-                    if (
-                        self.activation_retain_physical_token_limit > 0
-                        and physical_tokens
-                        <= self.activation_retain_physical_token_limit
-                    )
-                    else self.activation_execution_policy.resolved
+                invocation_activation_policy = fastest_safe_activation_policy(
+                    self.activation_execution_policy,
+                    physical_tokens=physical_tokens,
+                    physical_token_limits=(
+                        self.activation_policy_token_limits
+                    ),
                 )
                 activation_invocations[invocation_activation_policy] += 1
                 invocation_selective_scales = (
@@ -5345,6 +5951,12 @@ class MRCRANextTokenTrainer:
                 if processed_tokens >= next_progress or final:
                     _synchronize(self.device)
                     elapsed = perf_counter() - started
+                    mlx_memory = (
+                        f" mlx_peak="
+                        f"{self.runtime['mlx_peak_memory_bytes'] / (1 << 20):.0f}MiB"
+                        if self._exact_loss_backend == "mlx"
+                        else ""
+                    )
                     print(
                         f"update={self.state.step + 1} "
                         f"document_tokens={processed_tokens}/"
@@ -5353,7 +5965,8 @@ class MRCRANextTokenTrainer:
                         f"{plan.physical_tokens} "
                         f"elapsed={elapsed:.1f}s "
                         f"tok/s={processed_tokens / max(elapsed, 1e-9):.1f} "
-                        f"cognitive_cycles={cognitive_cycles}",
+                        f"cognitive_cycles={cognitive_cycles}"
+                        f"{mlx_memory}",
                         flush=True,
                     )
                     while next_progress <= processed_tokens:
@@ -5731,6 +6344,12 @@ class MRCRANextTokenTrainer:
             "softmax/training/compiled_cce_fits_workspace": float(
                 self.runtime["compiled_cce_fits_workspace"]
             ),
+            "softmax/training/compiled_cce_runtime_quarantined": float(
+                self.runtime["compiled_cce_runtime_quarantined"]
+            ),
+            "softmax/training/compiled_cce_runtime_fallbacks": float(
+                self.runtime["compiled_cce_runtime_fallbacks"]
+            ),
             "softmax/training/estimated_full_logits_mib": (
                 self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
             ),
@@ -5741,7 +6360,14 @@ class MRCRANextTokenTrainer:
                     "torch_compile": 2,
                     "cce_kahan_full_c": 3,
                     "cce_exact": 4,
+                    "mlx": 5,
                 }[self._exact_loss_backend]
+            ),
+            "softmax/training/mlx_peak_memory_mib": (
+                self.runtime["mlx_peak_memory_bytes"] / (1 << 20)
+            ),
+            "softmax/training/mlx_cache_memory_mib": (
+                self.runtime["mlx_cache_memory_bytes"] / (1 << 20)
             ),
         }
         for scale, rows in enumerate(cstm_scale_rows):
@@ -5908,6 +6534,12 @@ class MRCRANextTokenTrainer:
             "softmax/training/compiled_cce_fits_workspace": float(
                 self.runtime["compiled_cce_fits_workspace"]
             ),
+            "softmax/training/compiled_cce_runtime_quarantined": float(
+                self.runtime["compiled_cce_runtime_quarantined"]
+            ),
+            "softmax/training/compiled_cce_runtime_fallbacks": float(
+                self.runtime["compiled_cce_runtime_fallbacks"]
+            ),
             "softmax/training/estimated_full_logits_mib": (
                 self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
             ),
@@ -5917,7 +6549,14 @@ class MRCRANextTokenTrainer:
                 "torch_compile": 2,
                 "cce_kahan_full_c": 3,
                 "cce_exact": 4,
+                "mlx": 5,
             }[self._exact_loss_backend]),
+            "softmax/training/mlx_peak_memory_mib": (
+                self.runtime["mlx_peak_memory_bytes"] / (1 << 20)
+            ),
+            "softmax/training/mlx_cache_memory_mib": (
+                self.runtime["mlx_cache_memory_bytes"] / (1 << 20)
+            ),
         }
         metrics.update(cognitive_metrics(output.cognitive, ledger))
         metrics.update(auxiliary_metrics)
@@ -6855,6 +7494,7 @@ class MRCRANextTokenTrainer:
                     "progress/step": float(self.state.step),
                     "progress/tokens_seen": float(self.state.tokens_seen),
                     "progress/valid_targets_seen": float(self.state.valid_targets_seen),
+                    "progress/utf8_bytes_seen": float(self.state.bytes_seen),
                     "progress/fraction": min(1.0, self.state.tokens_seen / self.config.total_tokens),
                     "training/cognitive_stride": float(
                         self.config.cognitive_stride
@@ -6867,6 +7507,9 @@ class MRCRANextTokenTrainer:
                     ),
                     "performance/step_seconds": elapsed,
                     "performance/tokens_per_second": tokens_this_update / max(elapsed, 1e-9),
+                    "performance/utf8_bytes_per_second": (
+                        byte_count / max(elapsed, 1e-9)
+                    ),
                     "performance/data_seconds": data_seconds,
                     "performance/data_wait_seconds": data_seconds,
                     "performance/gradient_reduction_seconds": gradient_seconds,

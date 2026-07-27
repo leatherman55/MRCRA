@@ -4,22 +4,22 @@ Overall result: **PASS**.
 
 | Variant | Median step (s) | MAD (s) | tok/s | Peak RSS (MiB) |
 |---|---:|---:|---:|---:|
-| `legacy_serial_checkpoint_dense_cstm` | 5.655144 | 0.045389 | 181.07 | 503.4 |
-| `static_coarse_checkpoint_ce` | 1.910570 | 0.005312 | 535.97 | 503.7 |
-| `static_coarse_checkpoint_dense_cstm` | 3.165909 | 0.009749 | 323.45 | 528.7 |
-| `static_auto_ce` | 1.112763 | 0.014127 | 920.23 | 1156.8 |
-| `static_auto_repaired_cstm` | 1.127921 | 0.063923 | 907.87 | 1165.1 |
-| `static_cost_model_auto_repaired_cstm` | 0.996469 | 0.069098 | 1027.63 | 1166.9 |
-| `compiled_cost_model_auto_repaired_cstm` | 1.351678 | 0.283397 | 757.58 | 1250.4 |
+| `legacy_serial_checkpoint_dense_cstm` | 7.174707 | 0.019203 | 142.72 | 709.7 |
+| `static_coarse_checkpoint_ce` | 2.877144 | 0.038834 | 355.91 | 895.7 |
+| `static_coarse_checkpoint_dense_cstm` | 4.744200 | 0.017836 | 215.84 | 899.7 |
+| `static_auto_ce` | 1.758198 | 0.009376 | 582.41 | 2770.2 |
+| `static_auto_repaired_cstm` | 1.782547 | 0.026281 | 574.46 | 2795.6 |
+| `static_cost_model_auto_repaired_cstm` | 1.667186 | 0.069659 | 614.21 | 2775.0 |
+| `compiled_cost_model_auto_repaired_cstm` | 2.241714 | 0.478272 | 456.79 | 2867.1 |
 
-Compiler candidate: `executed` after 14.669s (budget 120.000s, backend `aot_eager`, resolved `compiled_cost_model_auto_repaired_cstm`).
+Compiler candidate: `executed` after 19.241s (budget 120.000s, backend `aot_eager`, resolved `compiled_cost_model_auto_repaired_cstm`).
 
 | Criterion | Measurement | Gate | Result |
 |---|---:|---:|---:|
-| `ce_repaired_vs_coarse_speedup` | 1.71696 ratio | >= 0.9 | PASS |
-| `repaired_cstm_vs_repaired_ce_throughput` | 1.11671 ratio | >= 0.6 | PASS |
-| `repaired_default_vs_legacy_speedup` | 5.67519 ratio | >= 1.05 | PASS |
-| `padding_or_measured_cost_advantage` | 1.14129 normalized gate | >= 1 | PASS |
+| `ce_repaired_vs_coarse_speedup` | 1.63642 ratio | >= 0.9 | PASS |
+| `repaired_cstm_vs_repaired_ce_throughput` | 1.05459 ratio | >= 0.6 | PASS |
+| `repaired_default_vs_legacy_speedup` | 4.30348 ratio | >= 1.05 | PASS |
+| `padding_or_measured_cost_advantage` | 1.0692 normalized gate | >= 1 | PASS |
 | `target_bijection` | 1 boolean | >= 1 | PASS |
 | `sampled_cstm_substrate_vjp_count` | 1 VJPs/context | <= 1 | PASS |
 | `sampled_cstm_mean_substrate_vjps` | 0.333333 VJPs/context | <= 0.583333 | PASS |

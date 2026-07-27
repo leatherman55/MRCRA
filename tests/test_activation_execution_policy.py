@@ -12,6 +12,8 @@ from mrrn.activation_execution import (
     MemoryObservation,
     calibrate_activation_candidates,
     census_activation_partitions,
+    fastest_safe_activation_policy,
+    maximum_safe_activation_physical_tokens,
     maximum_safe_retain_physical_tokens,
     resolve_activation_execution_policy,
     select_activation_dominant_partitions,
@@ -442,6 +444,80 @@ def test_retain_limit_is_full_for_retain_and_zero_without_measurement(
     assert maximum_safe_retain_physical_tokens(
         fallback, alignment=128, maximum_physical_tokens=8_192
     ) == 0
+
+
+def test_shape_conditional_policy_uses_fastest_measured_safe_candidate(
+    fixed_memory,
+):
+    candidates = (
+        replace(
+            measurement("retain", seconds=1.0, peak=12 << 30),
+            target_physical_tokens=8_192,
+            projected_incremental_peak_bytes=12 << 30,
+        ),
+        replace(
+            measurement("selective", seconds=1.4, peak=8 << 30),
+            target_physical_tokens=8_192,
+            projected_incremental_peak_bytes=8 << 30,
+        ),
+        replace(
+            measurement("whole_span", seconds=2.0, peak=2 << 30),
+            target_physical_tokens=8_192,
+            projected_incremental_peak_bytes=2 << 30,
+        ),
+    )
+    policy = resolve_activation_execution_policy(
+        requested="auto",
+        device=torch.device("cpu"),
+        required_reserve_bytes=4 << 30,
+        estimated_retain_bytes=12 << 30,
+        candidates=candidates,
+    )
+    assert policy.resolved == "whole_span"
+    limits = {
+        name: maximum_safe_activation_physical_tokens(
+            policy,
+            candidate_policy=name,
+            alignment=128,
+            maximum_physical_tokens=8_192,
+        )
+        for name in ("retain", "selective", "whole_span")
+    }
+    assert limits == {
+        "retain": 4_096,
+        "selective": 6_144,
+        "whole_span": 8_192,
+    }
+    assert fastest_safe_activation_policy(
+        policy, physical_tokens=4_000,
+        physical_token_limits=limits,
+    ) == "retain"
+    assert fastest_safe_activation_policy(
+        policy, physical_tokens=6_000,
+        physical_token_limits=limits,
+    ) == "selective"
+    assert fastest_safe_activation_policy(
+        policy, physical_tokens=8_000,
+        physical_token_limits=limits,
+    ) == "whole_span"
+
+
+def test_explicit_activation_policy_is_not_shape_overridden(fixed_memory):
+    policy = resolve_activation_execution_policy(
+        requested="whole_span",
+        device=torch.device("cpu"),
+        required_reserve_bytes=0,
+        estimated_retain_bytes=0,
+    )
+    assert fastest_safe_activation_policy(
+        policy,
+        physical_tokens=1,
+        physical_token_limits={
+            "retain": 8_192,
+            "selective": 8_192,
+            "whole_span": 8_192,
+        },
+    ) == "whole_span"
 
 
 @pytest.mark.parametrize(

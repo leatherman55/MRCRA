@@ -721,24 +721,66 @@ silently flattened into the temporal carrier.
 
 ## Model profiles
 
-The model sizes below use the GPT-2 vocabulary of 50,257 tokens.
+The production profiles use the repository's exact 24,576-entry, deterministic
+SentencePiece Unigram tokenizer. It uses identity normalization, preserves
+whitespace and case, and falls back to UTF-8 bytes, so encoding followed by
+decoding reproduces the original byte stream. The model file, vocabulary,
+training-corpus recipe/digest, special-ID map, and validation receipt are
+retained under `src/mrrn/tokenizers/` and copied into every run. Checkpoints bind
+their digests rather than a machine-local path.
+
+SentencePiece tokenization remains in its native C++ CPU implementation. MLX
+does not provide the string traversal and Unigram dynamic-program operations
+needed to accelerate it. The packer instead encodes up to sixteen documents in
+one native call with two bounded tokenizer workers, overlaps the next packed
+context with model execution, verifies UTF-8 coverage in one traversal, and
+performs the immutable model's exhaustive lossless probe once at load time.
 
 | Profile | Parameters | Carrier | Intended use | Selection |
 | --- | ---: | --- | --- | --- |
-| Integrated ultralight | 2,699,463 | 6 scales, shared learned depth, 36-wide base | Fast mechanism experiments and constrained training while preserving the complete architectural graph, CSTM head, and certified-router eligibility; not a serious capability scale | `--ultralightmodel` |
-| Integrated light | 8,416,803 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate and CSTM head | `--lightmodel` |
-| Serious | 115,931,878 | 6 scales, unshared learned depth, 256-wide base | Full architecture and CSTM training with serious evaluation | Default |
+| Integrated ultralight | 2,699,453 | 6 scales, shared learned depth, 48-wide base | Fast mechanism experiments and constrained training while preserving the complete architectural graph, CSTM head, and certified-router eligibility; not a serious capability scale | `--ultralightmodel` |
+| Integrated light | 8,416,265 | 6 scales, shared learned depth, 112-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate and CSTM head | `--lightmodel` |
+| Serious | 120,086,581 | 6 scales, unshared learned depth, 256-wide base | Full architecture and CSTM training with serious evaluation | Default |
 | Legacy sequence MRRN | 4,695,023 | Sequence-only spectral carrier | Compatibility and carrier-only ablation | `--legacy-mrrn` |
 
 The parameter counts are construction-time invariants, not rounded marketing
-targets. The ultralight actor ties its 50,257 × 36 input/output embedding,
+targets. The ultralight actor ties its 24,576 × 48 input/output embedding,
 shares learned carrier depth across six independently stateful resolution
 scales, and keeps bounded runtime capacities small. Its four heads, rank-two
-MIMO coupling, 9-to-12 resonance modes, six-mode/order spectral activation, and
-rank-eight relational adapter distribute the enlarged budget across both
-carrier and cognition. It does **not**
+MIMO coupling, 13-to-17 resonance modes, eight-mode spectral activation,
+rank-twelve structured mixer, and rank-twelve relational adapter distribute
+the recovered lexical budget across both carrier and cognition. The light
+profile restores the sixth physical scale instead of spending every recovered
+parameter on flat width. The serious profile retains a kernel-friendly
+256-wide geometry and increases resonant modes, spectral modes, and mixer
+capacity. None of the profiles
 delete the relational branch, event loop, workspace, memories, reconstruction,
 world model, controller, metacognition, viability, or PC-RASL interfaces.
+
+The frozen GPT-2 50,257-token geometries remain available as controls:
+
+```bash
+python scripts/train_fineweb.py --lightmodel --tokenizer gpt2
+python scripts/report_mrcra_parameters.py --lightmodel --vocabulary-size 50257
+```
+
+Raw token perplexity is not compared across tokenizer families. MRCRA records
+CE in nats per token, exact effective CE in nats per source byte, bits per byte,
+cumulative UTF-8 bytes, and UTF-8 bytes/second. Context, TBPTT, event, cognitive,
+and CSTM clocks remain explicit token-domain contracts; they are not silently
+rescaled from an assumed compression ratio. Matched tokenizer studies must
+first measure bytes/token on the same disjoint documents, then declare any
+source-span-equivalent clock changes in the checkpointed training configuration.
+
+The retained 200-document held-out FineWeb probe covered 662,932 identical
+UTF-8 bytes. Unigram-24K used 157,259 content tokens versus GPT-2's 150,021:
+only 4.82% more tokens, while cutting the lexical table by 51.1%. The default
+32,768-token context therefore remains unchanged: preserving the power-of-two
+execution contract is preferable to silently changing memory and update cost
+for a measured 4.6% reduction in source-byte span. The benchmark still reports
+source-equivalent alternatives for experiments, and learning quality must be
+settled by matched source-byte training rather than this compression probe.
+
 Reproduce the audits with:
 
 ```bash
@@ -769,8 +811,14 @@ python -m pip install -r requirements.txt
 ```
 
 On macOS, `requirements.txt` installs MLX on Apple silicon and installs Apple's
-Cut Cross-Entropy package on every architecture. The trainer therefore has an
-optimized exact CCE implementation by default; it does not require CUDA.
+Cut Cross-Entropy package. Production `auto` uses the official compiled exact
+CPU CCE because the CPU carrier and a Metal loss executor otherwise compete
+for the same unified memory. Explicit `--exact-loss-backend mlx` remains
+available: Metal evaluates the full 24K vocabulary loss and returns complete
+latent, classifier, and bias gradients to the canonical PyTorch optimizer.
+MRCRA bounds explicit MLX unified memory to 1,536 MiB, limits its free-buffer
+cache to 128 MiB, and releases cached buffers after every exact-loss autograd
+boundary. Neither path requires CUDA.
 
 ### Windows PowerShell
 
@@ -825,8 +873,8 @@ the output contract:
 import torch
 from mrrn import MRCRAConfig, MRCRALanguageModel
 
-vocabulary_size = 50_257
-config = MRCRAConfig.light_8p4m(output_dim=vocabulary_size)
+vocabulary_size = 24_576
+config = MRCRAConfig.light_8p4m()
 model = MRCRALanguageModel(config)
 
 tokens = torch.randint(0, vocabulary_size, (1, 128))
@@ -879,14 +927,14 @@ authority from execution:
   If the external CCE package is unavailable, the native tiled implementation
   remains an exact, memory-bounded fallback on every PyTorch platform.
 - Generation exposes the final carrier/cognitive latent without projecting
-  every prompt position into 50,257 logits.
+  every prompt position into the complete vocabulary.
 - A lazy `CertifiedBalancedVocabularyRouter` builds deterministic,
   equal-capacity geometric clusters over the tied classifier.
   Centroid/radius/bias bounds prove when the exact top-k threshold has been
   found, including every threshold tie. If the proof is incomplete, the
   implementation computes the dense head instead of returning an approximation.
 - Certified candidates remain compact through temperature and nucleus sampling;
-  they are not expanded back into a 50,257-entry tensor. A persistent boolean
+  they are not expanded back into a full-vocabulary tensor. A persistent boolean
   vocabulary mask makes repetition lookup proportional to the evaluated
   candidates instead of prompt length times candidate count.
 - On PyTorch MPS, the branch-heavy certificate controller and an immutable FP32
@@ -918,8 +966,9 @@ Routing observability is available through `generated.routing_receipts` and
 rates, clusters refined, token dot products evaluated, avoided output vectors,
 bound rounds, routing time, stale-index events, and certificate margin.
 
-The 36-wide ultralight profile is now eligible for certified routing; the
-retired 20-wide profile was not. The router still disables further bound
+The 48-wide Unigram ultralight profile and frozen 36-wide GPT-2 control are
+eligible for certified routing; the retired 20-wide profile was not. The router
+still disables further bound
 searches after a bounded fallback window demonstrates that the current
 checkpoint geometry is not certifying efficiently. Exact dense projection
 remains available throughout, so eligibility never converts an optimization
@@ -939,15 +988,29 @@ python scripts/train_fineweb.py --lightmodel --exact-loss-backend auto
 python scripts/train_fineweb.py --lightmodel --exact-loss-backend torch_compile
 python scripts/train_fineweb.py --lightmodel --exact-loss-backend cce_kahan_full_c
 python scripts/train_fineweb.py --lightmodel --exact-loss-backend cce_exact
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend mlx
 python scripts/train_fineweb.py --lightmodel --exact-loss-backend tiled
 ```
 
 The two `cce_*` policy names select their specialized kernels on supported
-CUDA hardware. On macOS they resolve to exact `torch_compile` CCE, or to native
-exact tiled CCE if the external package is absent or the workspace ceiling is
-exceeded; neither option disappears because CUDA is unavailable.
+CUDA hardware. On Apple silicon, production-scale `auto` selects official
+compiled exact CCE while the integrated carrier and cognition remain on the
+faster CPU path. Explicit `mlx` copies back every classifier row gradient,
+performs no candidate filtering, and fails closed when Apple Metal or
+canonical CPU tensors are unavailable. Native exact tiled CCE remains the
+portable fallback; none of these paths requires CUDA.
+`--mlx-memory-limit-mib` and `--mlx-cache-limit-mib` expose the bounded
+allocator policy when a machine requires a different explicitly measured
+working set. The progress display and Trackio softmax metrics report MLX peak
+and retained-cache memory.
 
-`--maximum-compiled-cce-mib` controls the `auto` workspace ceiling (512 MiB by
+`auto` also treats lazy compiler construction as recoverable. If Inductor,
+clang, or a generated precompiled header fails on the first real training
+shape, MRCRA retries that same batch through exact tiled CE, records an
+execution-policy transition, and quarantines compiled CCE for the remainder of
+the run. Explicit `--exact-loss-backend torch_compile` remains fail-closed.
+
+`--maximum-compiled-cce-mib` controls the `auto` workspace ceiling (256 MiB by
 default). `--maximum-retained-loss-mib` independently controls whether tiled
 activations are retained or recomputed during backward.
 
@@ -963,6 +1026,20 @@ pretraining because rare classifier rows are also the tied input embeddings.
 [`scripts/train_fineweb.py`](scripts/train_fineweb.py) is the canonical training
 entrypoint. A normal invocation trains the integrated serious MRCRA model; it
 never silently falls back to the legacy sequence-only carrier.
+
+The canonical tokenizer artifact is already packaged. To rebuild it from the
+same pinned FineWeb training partition and emit a new corpus/model digest:
+
+```bash
+python scripts/train_unigram_tokenizer.py
+```
+
+This is a model-breaking operation: old checkpoints correctly refuse to resume
+with a different tokenizer digest. Use `--tokenizer /path/to/custom.model`
+together with `--tokenizer-manifest /path/to/custom.json` for an audited local
+24,576-entry alternative; other vocabulary sizes require a separately
+parameter-balanced profile rather than silently changing the declared actor
+size.
 
 ### Recommended first substantial run
 
@@ -1077,13 +1154,25 @@ advances one rung toward safer recomputation, and retries exactly once. It
 never retries after PC-RASL critic mutation or after reaching whole-span
 recomputation.
 
-The resolved policy is shape-conditional within that safety authority. Cohorts
-small enough to fit the measured reserve retain their graphs; larger cohorts
-use the selected checkpoint partition or whole-span boundary. Retained,
-selective, and whole-span invocation counts and the exact physical-token cutoff
-are logged and checkpoint-bound. Selective partitioning is chosen against the
-reducible saved-tensor bytes—not total irreducible storage—so it cannot
-accidentally select every scale.
+Canonical long runs cache the activation census and measured document-cost
+model under `~/.cache/mrrn/activation-calibration`. The receipt is bound to the
+trainer sources, actor configuration, PyTorch version, platform, thread count,
+precision, physical-token budget, and bucket schedule. On a cache miss the
+trainer writes the receipt atomically and re-executes itself once before
+starting optimization. The fresh process reuses the exact receipt without
+retaining calibration allocator arenas, which is essential on unified-memory
+Macs. `--no-activation-calibration-cache` disables this behavior for explicit
+experiments.
+
+The resolved policy is shape-conditional within that safety authority. For
+each physical cohort, the trainer chooses the fastest measured candidate whose
+conservatively projected peak fits the reserve: retain for the smallest shapes,
+selective checkpointing for intermediate shapes, and whole-span recomputation
+only where necessary. The document cost planner prices that same per-shape
+policy before grouping rows. Retained, selective, and whole-span invocation
+counts plus all three physical-token limits are logged and checkpoint-bound.
+Selective partitioning is chosen against reducible saved-tensor bytes—not
+total irreducible storage—so it cannot accidentally select every scale.
 
 The nominal TBPTT length is also a ceiling, not permission to violate a hard
 token or activation-memory limit. Before document extraction, the planner
@@ -1221,15 +1310,20 @@ Metal. It exists both as a direct primitive and as
 `MLXMRRN.linear_cross_entropy`. The cached compiled
 `MLXMRRN.linear_cross_entropy_and_grad` path returns the loss plus hidden,
 classifier-weight, and classifier-bias gradients; tests compare every value
-with dense PyTorch. The complete relational cognitive authority path remains
-the PyTorch reference.
+with dense PyTorch. Production Apple CPU training can invoke the same exact
+primitive through a custom PyTorch autograd boundary; MLX executes the regular
+loss contraction while the complete relational cognitive authority, optimizer,
+and checkpoint state remain PyTorch. Training applies a bounded MLX allocator
+policy before the first contraction and clears free MLX buffers after each
+shape, preventing heterogeneous document batches from accumulating an
+unbounded unified-memory high-water mark.
 
 ### Default data and context contract
 
 | Setting | Default |
 | --- | --- |
 | Dataset | Original English `HuggingFaceFW/fineweb`, configuration `sample-10BT` |
-| Tokenizer | GPT-2 BPE |
+| Tokenizer | Lossless SentencePiece Unigram, exactly 24,576 entries, UTF-8 byte fallback |
 | Optimization context | 32,768 tokens |
 | Carrier execution chunk | 256 tokens |
 | Carrier TBPTT span | 4,096 tokens |
@@ -1246,9 +1340,13 @@ the PyTorch reference.
 | PC-RASL opt-in trajectory / candidates | 256 valid single-document positions / 48 bounded candidates |
 | PC-RASL opt-in consequence cadence | 1 selected trajectory and 1 replay update per new progress observation |
 
-Dataset and tokenizer revisions are pinned before training. Documents are packed
-for throughput, but document transitions are excluded from next-token loss and
-reset recurrent and cognitive state. Full-vocabulary cross entropy is exact;
+Dataset revisions and tokenizer artifacts are pinned before training. Documents
+are encoded without lowercasing, Unicode canonicalization, whitespace
+collapsing, or irreversible quote/accent substitutions. Token byte spans use
+monotone source coverage, so multi-token Unicode fallback cannot double-count
+bytes. Documents are packed for throughput, but document transitions are
+excluded from next-token loss and reset recurrent and cognitive state.
+Full-vocabulary cross entropy is exact;
 CCE, fused, and tiled modes change execution and memory behavior, not the
 training distribution.
 
@@ -1422,7 +1520,8 @@ training runs are intentionally not stored in the public repository.
 | [2.7M ultralight design](outputs/mrcra_2p7m_design_report.md) | Parameter rationale, preserved mechanisms, carrier/cognitive allocations, training integration, verification, and claim boundary |
 | [2.7M parameter audit](outputs/mrcra_2p7m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
-| [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
+| [Tokenizer comparison](outputs/tokenizer_comparison.json) | Held-out FineWeb bytes/token comparison, immutable tokenizer identities, and non-authoritative source-equivalent clock report |
+| [120.1M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
 | [CSTM implementation report](outputs/cstm_implementation_report.md) | Target mathematics, causal alignment, prediction head, loss, gradient governance, checkpointing, accounting, tests, and empirical claim boundary |
 | [CSTM empirical acceptance](outputs/cstm_empirical_acceptance.json) | Deterministic evidence for DFT equivalence, order sensitivity, boundary isolation, integrated causality, trainability, gradient caps, token accounting, geometric work, and parameter bounds |
 | [Carrier execution optimization report](outputs/carrier_execution_optimization_report.md) | Document-major batching, mask authority, custom adjoints, whole-span checkpointing, backend policy, migration, telemetry, and verification |

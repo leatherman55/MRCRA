@@ -1,0 +1,58 @@
+{
+  "artifact": "MRCRA deterministic lossless SentencePiece Unigram tokenizer",
+  "model_sha256": "4cf347e61b2e1756070a7582ce101b5e5c45b8f046f0516e470201d7bc75cfec",
+  "schema_version": 1,
+  "special_token_ids": {
+    "document_end": 1,
+    "unknown": 0
+  },
+  "trainer": {
+    "add_dummy_prefix": false,
+    "bos_id": -1,
+    "byte_fallback": true,
+    "character_coverage": 0.9995,
+    "dataset_config": "sample-10BT",
+    "dataset_id": "HuggingFaceFW/fineweb",
+    "dataset_revision": "9bb295ddab0e05d785b879661af7260fed5140fc",
+    "dataset_split": "train",
+    "eos_id": 1,
+    "evaluation_fraction_permyriad": 100,
+    "maximum_documents": 100000,
+    "maximum_sentence_bytes": 16384,
+    "maximum_utf8_bytes": 134217728,
+    "model_type": "unigram",
+    "normalization_rule_name": "identity",
+    "number_of_threads": 8,
+    "pad_id": -1,
+    "partition": "train",
+    "remove_extra_whitespaces": false,
+    "seed_sentencepiece_size": 1000000,
+    "shrinking_factor": 0.75,
+    "shuffle_buffer": 10000,
+    "shuffle_seed": 20260721,
+    "split_digits": true,
+    "unk_id": 0,
+    "vocabulary_size": 24576
+  },
+  "training_corpus": {
+    "dataset_config": "sample-10BT",
+    "dataset_id": "HuggingFaceFW/fineweb",
+    "dataset_revision": "9bb295ddab0e05d785b879661af7260fed5140fc",
+    "dataset_split": "train",
+    "documents": 43277,
+    "evaluation_fraction_permyriad": 100,
+    "partition": "train",
+    "sentences": 44471,
+    "sha256": "399e77643b00d66bc156d121f23cefa3d8bf61db5dfddfbe115e42e32af6d10e",
+    "shuffle_buffer": 10000,
+    "shuffle_seed": 20260721,
+    "utf8_bytes": 134210118
+  },
+  "validation": {
+    "byte_exact_round_trip_cases": 137,
+    "unknown_tokens_emitted": 0
+  },
+  "vocabulary_artifact": "mrcra-unigram-24k.vocabulary.json",
+  "vocabulary_sha256": "0a5d64ea5ffd732e89da3102b63aac8a0e7016b503f5e0a26c83a74ee7d722f5",
+  "vocabulary_size": 24576
+}

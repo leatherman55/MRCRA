@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from math import ceil, log, log2, pi, sqrt
 
 
+MRCRA_UNIGRAM_24K_VOCABULARY_SIZE = 24_576
+GPT2_CONTROL_VOCABULARY_SIZE = 50_257
+
+
 def _positive(name: str, value: int | float) -> None:
     if value <= 0:
         raise ValueError(f"{name} must be positive, got {value}")
@@ -200,17 +204,17 @@ class MRRNConfig:
             layers=6,
             scales=6,
             heads=8,
-            modes=20,
+            modes=24,
             mimo_rank=2,
             attention_window=32,
             retrieved_items=8,
             memory_capacity=8192,
             lifting_kernel=3,
-            mixer_expansion=2.0,
+            mixer_expansion=2.25,
             width_growth_cap=1.125,
             mode_growth_cap=1.25,
             width_multiple=32,
-            spectral_modes=8,
+            spectral_modes=12,
             spectral_basis_order=6,
             spectral_triads_per_mode=1,
             enable_global_head=False,
@@ -223,24 +227,23 @@ class MRRNConfig:
 
     @classmethod
     def mrcra_light_8p4m_carrier(
-        cls, input_dim: int = 96, output_dim: int | None = None, **overrides,
+        cls, input_dim: int = 112, output_dim: int | None = None, **overrides,
     ) -> "MRRNConfig":
-        """Parameter-efficient five-scale carrier for the integrated light actor.
+        """Parameter-efficient six-scale carrier for the integrated light actor.
 
         Six recurrent refinement passes share one learned block.  This preserves
         iterative depth and independent recurrent state at each pass while
-        spending parameters on a 96-wide representation, five physical scales,
-        and the complete relational branch.  Coarser scales receive a modest
-        width increase to 112 rather than duplicating full-width depth weights.
+        spending the recovered lexical budget on a wider representation, the
+        full six-scale hierarchy, and stronger resonant/spectral mixing.
         """
 
         defaults = dict(
-            model_dim=96,
+            model_dim=112,
             output_dim=output_dim,
             layers=6,
-            scales=5,
+            scales=6,
             heads=4,
-            modes=12,
+            modes=18,
             mimo_rank=2,
             attention_window=32,
             attention_query_tile_size=256,
@@ -252,44 +255,39 @@ class MRRNConfig:
             mode_growth_cap=1.25,
             width_multiple=8,
             share_depth_parameters=True,
-            structured_mixer_rank=8,
-            spectral_modes=5,
+            structured_mixer_rank=20,
+            spectral_modes=10,
             spectral_basis_order=5,
             spectral_triads_per_mode=1,
             enable_global_head=False,
             activation_checkpointing=True,
             relational_branch=True,
-            relational_context_dim=96,
+            relational_context_dim=112,
         )
         defaults.update(overrides)
         return cls(input_dim=input_dim, **defaults)
 
     @classmethod
     def mrcra_ultralight_2p7m_carrier(
-        cls, input_dim: int = 36, output_dim: int | None = None, **overrides,
+        cls, input_dim: int = 48, output_dim: int | None = None, **overrides,
     ) -> "MRRNConfig":
         """Six-scale spectral carrier for the complete 2.7M MRCRA actor.
 
-        With a 50,257-token vocabulary, tied token/output weights consume most
-        of a tiny actor's budget.  Width 36 is the strongest balanced allocation
-        inside a 2.7M envelope: it crosses the certified vocabulary router's
-        width threshold, leaves 890K parameters outside the tied embedding,
-        and remains divisible across four relational heads.  Learned depth is
-        shared, but all six physical resolution scales retain independent
-        recurrent state.  The profile spends the enlarged non-vocabulary
-        budget on doubled MIMO coupling, a larger resonance bank, stronger
-        spectral activation, and wider cognition rather than on duplicated
-        depth weights or runtime capacities that would defeat its ultralight
-        execution purpose.
+        The lossless 24,576-entry vocabulary makes a 48-wide representation
+        possible inside the same envelope.  Learned depth is shared, but all
+        six physical scales retain independent recurrent state.  Recovered
+        lexical capacity funds width, resonant modes, spectral activation,
+        structured mixing, and relational cognition rather than runtime-only
+        capacities or duplicated depth.
         """
 
         defaults = dict(
-            model_dim=36,
+            model_dim=48,
             output_dim=output_dim,
             layers=6,
             scales=6,
             heads=4,
-            modes=9,
+            modes=13,
             mimo_rank=2,
             attention_window=32,
             attention_query_tile_size=256,
@@ -301,13 +299,74 @@ class MRRNConfig:
             mode_growth_cap=1.33,
             width_multiple=4,
             share_depth_parameters=True,
-            structured_mixer_rank=8,
-            spectral_modes=6,
+            structured_mixer_rank=12,
+            spectral_modes=8,
             spectral_basis_order=6,
             spectral_triads_per_mode=1,
             enable_global_head=False,
             activation_checkpointing=True,
             relational_branch=True,
+            relational_context_dim=48,
+        )
+        defaults.update(overrides)
+        return cls(input_dim=input_dim, **defaults)
+
+    @classmethod
+    def mrcra_120m_gpt2_control_carrier(
+        cls, input_dim: int = 256, output_dim: int | None = None, **overrides,
+    ) -> "MRRNConfig":
+        """Frozen pre-Unigram serious carrier used only for GPT-2 controls."""
+
+        defaults = dict(
+            model_dim=256, output_dim=output_dim, layers=6, scales=6, heads=8,
+            modes=20, mimo_rank=2, attention_window=32, retrieved_items=8,
+            memory_capacity=8192, lifting_kernel=3, mixer_expansion=2.0,
+            width_growth_cap=1.125, mode_growth_cap=1.25, width_multiple=32,
+            spectral_modes=8, spectral_basis_order=6,
+            spectral_triads_per_mode=1, enable_global_head=False,
+            activation_checkpointing=True, relational_branch=True,
+            relational_context_dim=256,
+        )
+        defaults.update(overrides)
+        return cls(input_dim=input_dim, **defaults)
+
+    @classmethod
+    def mrcra_light_8p4m_gpt2_control_carrier(
+        cls, input_dim: int = 96, output_dim: int | None = None, **overrides,
+    ) -> "MRRNConfig":
+        """Frozen pre-Unigram light carrier used only for GPT-2 controls."""
+
+        defaults = dict(
+            model_dim=96, output_dim=output_dim, layers=6, scales=5, heads=4,
+            modes=12, mimo_rank=2, attention_window=32,
+            attention_query_tile_size=256, retrieved_items=8,
+            memory_capacity=4096, lifting_kernel=3, mixer_expansion=2.0,
+            width_growth_cap=1.125, mode_growth_cap=1.25, width_multiple=8,
+            share_depth_parameters=True, structured_mixer_rank=8,
+            spectral_modes=5, spectral_basis_order=5,
+            spectral_triads_per_mode=1, enable_global_head=False,
+            activation_checkpointing=True, relational_branch=True,
+            relational_context_dim=96,
+        )
+        defaults.update(overrides)
+        return cls(input_dim=input_dim, **defaults)
+
+    @classmethod
+    def mrcra_ultralight_2p7m_gpt2_control_carrier(
+        cls, input_dim: int = 36, output_dim: int | None = None, **overrides,
+    ) -> "MRRNConfig":
+        """Frozen pre-Unigram ultralight carrier used only for GPT-2 controls."""
+
+        defaults = dict(
+            model_dim=36, output_dim=output_dim, layers=6, scales=6, heads=4,
+            modes=9, mimo_rank=2, attention_window=32,
+            attention_query_tile_size=256, retrieved_items=4,
+            memory_capacity=1024, lifting_kernel=3, mixer_expansion=2.5,
+            width_growth_cap=1.25, mode_growth_cap=1.33, width_multiple=4,
+            share_depth_parameters=True, structured_mixer_rank=8,
+            spectral_modes=6, spectral_basis_order=6,
+            spectral_triads_per_mode=1, enable_global_head=False,
+            activation_checkpointing=True, relational_branch=True,
             relational_context_dim=36,
         )
         defaults.update(overrides)
@@ -473,10 +532,20 @@ class MRCRAConfig:
 
     @classmethod
     def serious_120m(
-        cls, *, input_dim: int = 256, output_dim: int | None = None,
+        cls, *, input_dim: int | None = None, output_dim: int | None = None,
         carrier_overrides: dict | None = None, cognitive_overrides: dict | None = None,
     ) -> "MRCRAConfig":
-        carrier = MRRNConfig.mrcra_120m_carrier(
+        output_dim = (
+            MRCRA_UNIGRAM_24K_VOCABULARY_SIZE
+            if output_dim is None else output_dim
+        )
+        gpt2_control = output_dim == GPT2_CONTROL_VOCABULARY_SIZE
+        input_dim = 256 if input_dim is None else input_dim
+        carrier_factory = (
+            MRRNConfig.mrcra_120m_gpt2_control_carrier
+            if gpt2_control else MRRNConfig.mrcra_120m_carrier
+        )
+        carrier = carrier_factory(
             input_dim, output_dim, **(carrier_overrides or {})
         )
         # The serious profile is the integrated MRCRA, not the compatibility
@@ -500,22 +569,34 @@ class MRCRAConfig:
 
     @classmethod
     def light_8p4m(
-        cls, *, input_dim: int = 96, output_dim: int | None = None,
+        cls, *, input_dim: int | None = None, output_dim: int | None = None,
         carrier_overrides: dict | None = None, cognitive_overrides: dict | None = None,
     ) -> "MRCRAConfig":
-        """Complete 8.4M-class MRCRA profile for the GPT-2 vocabulary.
+        """Complete 8.4M-class MRCRA profile.
 
-        The profile reduces bounded runtime capacities and uses shared-depth
-        carrier refinement, but retains every integrated cognitive mechanism.
-        Its declared parameter band deliberately rejects accidental changes to
-        the tokenizer width or architecture that would make the name untrue.
+        Unigram-24K is the default.  The exact GPT-2 vocabulary selects a frozen
+        compatibility geometry, keeping tokenizer ablations honest at the same
+        total parameter scale.
         """
 
-        carrier = MRRNConfig.mrcra_light_8p4m_carrier(
+        output_dim = (
+            MRCRA_UNIGRAM_24K_VOCABULARY_SIZE
+            if output_dim is None else output_dim
+        )
+        gpt2_control = output_dim == GPT2_CONTROL_VOCABULARY_SIZE
+        input_dim = (
+            96 if gpt2_control and input_dim is None
+            else 112 if input_dim is None else input_dim
+        )
+        carrier_factory = (
+            MRRNConfig.mrcra_light_8p4m_gpt2_control_carrier
+            if gpt2_control else MRRNConfig.mrcra_light_8p4m_carrier
+        )
+        carrier = carrier_factory(
             input_dim, output_dim, **(carrier_overrides or {})
         )
         mature = {
-            "workspace_dim": 96,
+            "workspace_dim": input_dim,
             "relation_heads": 4,
             "relation_modes": 8,
             "relation_adapter_rank": 8,
@@ -552,30 +633,39 @@ class MRCRAConfig:
 
     @classmethod
     def ultralight_2p7m(
-        cls, *, input_dim: int = 36, output_dim: int | None = None,
+        cls, *, input_dim: int | None = None, output_dim: int | None = None,
         carrier_overrides: dict | None = None, cognitive_overrides: dict | None = None,
     ) -> "MRCRAConfig":
-        """Complete 2.7M-class MRCRA profile for the GPT-2 vocabulary.
+        """Complete 2.7M-class MRCRA profile.
 
-        This profile compresses dimensions, ranks, and bounded runtime
-        capacities without deleting mechanisms.  It retains the six-scale
-        MRRN carrier and every integrated cognitive pathway used by the light
-        and serious actors.  Width and spectral capacity increase together,
-        while bounded runtime capacities remain deliberately small.  Its
-        narrow declared band fails closed if tokenizer width or architecture
-        drift makes the ``2.7M`` name inaccurate.
+        Unigram-24K is the default and spends recovered lexical capacity on
+        carrier/cognitive width plus resonant, spectral, mixer, and relational
+        ranks.  The exact GPT-2 vocabulary selects the frozen control geometry.
         """
 
-        carrier = MRRNConfig.mrcra_ultralight_2p7m_carrier(
+        output_dim = (
+            MRCRA_UNIGRAM_24K_VOCABULARY_SIZE
+            if output_dim is None else output_dim
+        )
+        gpt2_control = output_dim == GPT2_CONTROL_VOCABULARY_SIZE
+        input_dim = (
+            36 if gpt2_control and input_dim is None
+            else 48 if input_dim is None else input_dim
+        )
+        carrier_factory = (
+            MRRNConfig.mrcra_ultralight_2p7m_gpt2_control_carrier
+            if gpt2_control else MRRNConfig.mrcra_ultralight_2p7m_carrier
+        )
+        carrier = carrier_factory(
             input_dim, output_dim, **(carrier_overrides or {})
         )
         mature = {
-            "workspace_dim": 36,
+            "workspace_dim": input_dim,
             "provenance_features": 8,
             "uncertainty_channels": 8,
             "relation_heads": 4,
-            "relation_modes": 8,
-            "relation_adapter_rank": 8,
+            "relation_modes": 8 if gpt2_control else 12,
+            "relation_adapter_rank": 8 if gpt2_control else 12,
             "goal_slots": 4,
             "goal_constraint_dim": 4,
             "system_action_channels": 4,

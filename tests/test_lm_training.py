@@ -194,6 +194,34 @@ def test_huggingface_tokenizer_tracks_original_utf8_bytes_and_identity(monkeypat
     fake.__call__ = lambda *args, **kwargs: {"input_ids": [1], "offset_mapping": []}
 
 
+def test_huggingface_overlapping_byte_tokens_do_not_double_count_unicode(
+    monkeypatch,
+):
+    class OverlapTokenizer(_FakeTokenizer):
+        def __call__(self, text, **kwargs):
+            assert text == "🙂e\u0301"
+            return {
+                "input_ids": [1, 2, 3, 4],
+                "offset_mapping": [(0, 1), (0, 1), (1, 2), (2, 3)],
+            }
+
+    fake = OverlapTokenizer()
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoTokenizer=SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: fake
+            )
+        ),
+    )
+    tokenizer = HuggingFaceTextTokenizer("fake", revision="sha")
+    encoded = tokenizer.encode_document("🙂e\u0301")
+
+    assert encoded.byte_lengths == (4, 0, 1, 2, 0)
+    assert sum(encoded.byte_lengths) == len("🙂e\u0301".encode("utf-8"))
+
+
 def test_token_source_packer_and_batch_contract_failures():
     with pytest.raises(ValueError):
         TokenizedDocument((), ())

@@ -1,5 +1,7 @@
 from dataclasses import replace
 import json
+import os
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -22,6 +24,7 @@ from mrrn.lm_training import (
     build_evaluation_batches,
 )
 from mrrn.runtime_validation import defer_runtime_validation, validate_dataclass_tree
+from mrrn.mlx_backend import mlx_available
 
 
 def test_trackio_diagnostic_snapshot_publishes_at_step_one_then_uses_interval():
@@ -252,6 +255,38 @@ def test_cpu_thread_calibration_uses_actual_carrier_and_preserves_state_and_rng(
     assert torch.equal(torch.random.get_rng_state(), before_rng)
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, before[name], atol=0, rtol=0)
+
+
+def test_cpu_thread_calibration_equivalence_accepts_roundoff_not_real_changes():
+    reference = torch.linspace(-1, 1, 32, dtype=torch.float32).reshape(4, 8)
+    roundoff = torch.nextafter(
+        reference,
+        torch.full_like(reference, float("inf")),
+    )
+    assert cognitive_training._cpu_calibration_outputs_equivalent(
+        reference, roundoff,
+    )
+    assert not cognitive_training._cpu_calibration_outputs_equivalent(
+        reference, reference + 1e-2,
+    )
+    assert not cognitive_training._cpu_calibration_outputs_equivalent(
+        reference, reference[:, :-1],
+    )
+    nonfinite = reference.clone()
+    nonfinite[0, 0] = float("nan")
+    assert not cognitive_training._cpu_calibration_outputs_equivalent(
+        reference, nonfinite,
+    )
+
+
+def test_ultralight_cpu_thread_calibration_accepts_parallel_reduction_roundoff():
+    torch.manual_seed(20260727)
+    model = MRCRALanguageModel(MRCRAConfig.ultralight_2p7m())
+    selected, timings = cognitive_training._calibrate_cpu_thread_count(
+        model, maximum_length=4_096,
+    )
+    assert selected in timings
+    assert timings[selected] == min(timings.values())
 
 
 def test_activation_calibration_preserves_model_optimizer_rng_and_stream(
@@ -492,6 +527,129 @@ def test_cpu_and_macos_exact_cce_authority_never_depends_on_cuda(
     assert trainer.runtime["loss_projection"] == f"{resolved}_exact_full_softmax"
 
 
+@pytest.mark.skipif(not mlx_available(), reason="Apple MLX is unavailable")
+def test_explicit_apple_cpu_mlx_loss_has_bounded_memory_policy(tmp_path):
+    class WideByteTokenizer(ByteTextTokenizer):
+        vocabulary_size = 8_192
+
+    tokenizer = WideByteTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config(tokenizer.vocabulary_size)),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("portable Apple exact authority",)),
+            tokenizer,
+        ),
+        replace(
+            training_config(tmp_path / "mlx-explicit"),
+            total_tokens=1_024,
+            context_length=1_024,
+            device="cpu",
+            exact_loss_backend="mlx",
+        ),
+    )
+    assert trainer._exact_loss_backend == "mlx"
+    assert trainer.runtime["mlx_exact_loss_available"] is True
+    assert trainer.runtime["loss_projection"] == (
+        "mlx_exact_full_softmax"
+    )
+    assert trainer.runtime["mlx_memory_policy"]["memory_limit_bytes"] == (
+        trainer.config.mlx_memory_limit_bytes
+    )
+    assert trainer.runtime["mlx_memory_policy"]["cache_limit_bytes"] == (
+        trainer.config.mlx_cache_limit_bytes
+    )
+
+
+def test_activation_and_document_calibration_cache_is_exactly_reused(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    cache = tmp_path / "calibration-cache"
+    config = replace(
+        training_config(tmp_path / "calibrated"),
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=False,
+        activation_calibration=True,
+        activation_memory_reserve_bytes=1,
+        activation_calibration_cache_directory=str(cache),
+        performance_calibration=False,
+    )
+    torch.manual_seed(991)
+    first = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("calibration cache authority",)),
+            tokenizer,
+        ),
+        config,
+    )
+    assert first.runtime["activation_calibration_cache_hit"] is False
+    path = Path(first.runtime["activation_calibration_cache_path"])
+    assert path.is_file()
+
+    torch.manual_seed(991)
+    second = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("calibration cache authority",)),
+            tokenizer,
+        ),
+        config,
+    )
+    assert second.runtime["activation_calibration_cache_hit"] is True
+    assert (
+        second.runtime["activation_calibration_cache_key"]
+        == first.runtime["activation_calibration_cache_key"]
+    )
+    assert (
+        second.document_batch_planner.cost_model.digest
+        == first.document_batch_planner.cost_model.digest
+    )
+    assert (
+        second.runtime["carrier_activation_physical_token_limits"]
+        == first.runtime["carrier_activation_physical_token_limits"]
+    )
+
+
+def test_long_run_reexecs_once_after_writing_new_calibration_cache(
+    tmp_path, monkeypatch,
+):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "reexec"),
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=False,
+        activation_calibration=True,
+        activation_memory_reserve_bytes=1,
+        activation_calibration_cache_directory=str(tmp_path / "cache"),
+        activation_calibration_reexec=True,
+        performance_calibration=False,
+    )
+
+    def reexec(executable, arguments):
+        assert executable
+        assert arguments[0] == executable
+        raise RuntimeError("captured calibration re-exec")
+
+    monkeypatch.setattr(os, "execv", reexec)
+    with pytest.raises(RuntimeError, match="captured calibration re-exec"):
+        MRCRANextTokenTrainer(
+            MRCRALanguageModel(tiny_config()),
+            tokenizer,
+            PackedTokenStream(
+                SequenceTextSource(("reexec cache authority",)),
+                tokenizer,
+            ),
+            config,
+        )
+    assert tuple((tmp_path / "cache").glob("*.json"))
+
+
 def test_explicit_torch_compile_requires_the_external_cce_package(
     tmp_path, monkeypatch
 ):
@@ -535,6 +693,137 @@ def test_portable_compiled_cce_fails_closed_to_tiled_when_workspace_is_too_small
     )
     assert trainer._exact_loss_backend == "tiled"
     assert trainer.runtime["compiled_cce_fits_workspace"] is False
+
+
+def test_auto_compiled_cce_runtime_failure_retries_exact_tiled_and_quarantines(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.setattr(
+        cognitive_training,
+        "find_spec",
+        lambda name: object() if name == "cut_cross_entropy" else None,
+    )
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("lazy compiler fallback",)), tokenizer,
+        ),
+        replace(
+            training_config(tmp_path / "lazy-compiler-fallback"),
+            device="cpu",
+            exact_loss_backend="auto",
+        ),
+    )
+    assert trainer._exact_loss_backend == "torch_compile"
+    latent = torch.randn(1, 3, 8)
+    labels = torch.tensor([[2, 3, 4]], dtype=torch.int64)
+    lengths = torch.tensor([[1, 2, 1]], dtype=torch.int64)
+    mask = torch.ones(1, 3, dtype=torch.bool)
+    head = trainer.model.cognitive.carrier.output_head
+    expected = exact_tiled_cross_entropy(
+        latent,
+        labels,
+        lengths,
+        mask,
+        head.weight,
+        head.bias,
+        vocabulary_tile_size=trainer.config.vocabulary_tile_size,
+        checkpoint_tiles=trainer._checkpoint_loss_tiles,
+    )
+    indutor_error = type(
+        "InductorError",
+        (RuntimeError,),
+        {"__module__": "torch._inductor.exc"},
+    )
+    calls = 0
+
+    def delayed_compile_failure(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise indutor_error(
+            "precompiled header has been modified since it was built"
+        )
+
+    monkeypatch.setattr(
+        cognitive_training,
+        "exact_cut_cross_entropy",
+        delayed_compile_failure,
+    )
+    actual = trainer._language_statistics(
+        latent, labels, lengths, mask, head,
+    )
+    torch.testing.assert_close(actual.loss, expected.loss)
+    assert actual.token_count == expected.token_count
+    assert actual.byte_count == expected.byte_count
+    assert trainer._exact_loss_backend == "tiled"
+    assert trainer.runtime["exact_loss_backend"] == "tiled"
+    assert trainer.runtime["loss_projection"] == "tiled_exact_full_softmax"
+    assert trainer.runtime["compiled_cce_runtime_quarantined"] is True
+    assert trainer.runtime["compiled_cce_runtime_fallbacks"] == 1
+    assert "precompiled header" in trainer.runtime[
+        "compiled_cce_runtime_fallback_reason"
+    ]
+    assert len(trainer.execution_policy_history) == 2
+    assert "torch_compile -> tiled" in (
+        trainer.execution_policy_history[-1]["reason"]
+    )
+    assert (
+        trainer.execution_policy_history[-1]["execution"]
+        == trainer._identity()["execution"]
+    )
+    assert "quarantining compiled CCE" in capsys.readouterr().out
+
+    # The failed backend is not retried on later spans in the same run.
+    trainer._language_statistics(latent, labels, lengths, mask, head)
+    assert calls == 1
+    assert trainer.runtime["compiled_cce_runtime_fallbacks"] == 1
+
+
+def test_explicit_torch_compile_runtime_failure_remains_fail_closed(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        cognitive_training,
+        "find_spec",
+        lambda name: object() if name == "cut_cross_entropy" else None,
+    )
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("explicit compiler authority",)), tokenizer,
+        ),
+        replace(
+            training_config(tmp_path / "explicit-compiler"),
+            device="cpu",
+            exact_loss_backend="torch_compile",
+        ),
+    )
+    compiler_error = type(
+        "InductorError",
+        (RuntimeError,),
+        {"__module__": "torch._inductor.exc"},
+    )
+
+    def fail(*args, **kwargs):
+        raise compiler_error("synthetic C++ compile error")
+
+    monkeypatch.setattr(cognitive_training, "exact_cut_cross_entropy", fail)
+    with pytest.raises(compiler_error, match="compile error"):
+        trainer._language_statistics(
+            torch.randn(1, 2, 8),
+            torch.tensor([[1, 2]], dtype=torch.int64),
+            torch.ones(1, 2, dtype=torch.int64),
+            torch.ones(1, 2, dtype=torch.bool),
+            trainer.model.cognitive.carrier.output_head,
+        )
+    assert trainer._exact_loss_backend == "torch_compile"
+    assert trainer.runtime["compiled_cce_runtime_quarantined"] is False
+    assert trainer.runtime["compiled_cce_runtime_fallbacks"] == 0
+    assert len(trainer.execution_policy_history) == 1
 
 
 def test_deferred_runtime_validation_checks_completed_state_at_boundary():

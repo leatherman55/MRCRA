@@ -19,12 +19,12 @@
       "lifting_kernel": 3,
       "memory_capacity": 8192,
       "mimo_rank": 2,
-      "mixer_expansion": 2.0,
+      "mixer_expansion": 2.25,
       "mode_growth_cap": 1.25,
       "model_dim": 256,
-      "modes": 20,
+      "modes": 24,
       "omega_max": 3.141592653589793,
-      "output_dim": 50257,
+      "output_dim": 24576,
       "relational_branch": true,
       "relational_context_dim": 256,
       "residual_scale": 0.01,
@@ -36,7 +36,7 @@
       "spectral_maximum_gain": 2.0,
       "spectral_maximum_phase": 0.39269908169872414,
       "spectral_maximum_triad_gain": 0.25,
-      "spectral_modes": 8,
+      "spectral_modes": 12,
       "spectral_triads_per_mode": 1,
       "structured_mixer_rank": null,
       "width_growth_cap": 1.125,
@@ -117,10 +117,10 @@
     "passed": true
   },
   "model_profile": "mrcra_120m_serious",
-  "parameter_count": 115931878,
+  "parameter_count": 120086581,
   "parameter_count_by_subsystem": {
     "cognitive.abstraction_applicability": 788999,
-    "cognitive.carrier": 93733942,
+    "cognitive.carrier": 104462981,
     "cognitive.cognitive_state_projection": 264448,
     "cognitive.compare_projection": 262400,
     "cognitive.controller": 827702,
@@ -152,7 +152,7 @@
     "cognitive.workspace_graph": 814016,
     "cognitive.world_model": 937273,
     "cstm_predictor": 5934,
-    "token_embedding": 12865792
+    "token_embedding": 6291456
   },
   "parameter_tensors_by_subsystem": {
     "cognitive.abstraction_applicability": 10,
@@ -191,14 +191,14 @@
     "token_embedding": 1
   },
   "static_storage_gib": {
-    "bf16_or_fp16_parameters_if_materialized": 0.2159399501979351,
-    "fp32_parameters": 0.4318799003958702,
-    "fp32_parameters_gradients_and_adam_moments": 1.7275196015834808
+    "bf16_or_fp16_parameters_if_materialized": 0.2236786875873804,
+    "fp32_parameters": 0.4473573751747608,
+    "fp32_parameters_gradients_and_adam_moments": 1.7894295006990433
   },
   "storage_scope": "Static tensor storage only; excludes activations, CUDA allocator reserve, checkpoint recomputation workspaces, and cognitive runtime state.",
   "tied_token_and_output_weights": true,
   "torch_version": "2.13.0",
-  "trainable_parameter_count": 115931878,
+  "trainable_parameter_count": 120086581,
   "unique_parameter_tensors": 3002,
-  "vocabulary_size": 50257
+  "vocabulary_size": 24576
 }

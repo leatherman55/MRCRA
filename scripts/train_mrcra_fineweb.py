@@ -17,12 +17,18 @@ import torch
 
 from mrrn.cognitive_training import MRCRANextTokenTrainer, MRCRATrainingConfig
 from mrrn.learning_progress import LearningProgressConfig
-from mrrn.config import CognitiveConfig, MRCRAConfig, MRRNConfig
+from mrrn.config import (
+    CognitiveConfig,
+    GPT2_CONTROL_VOCABULARY_SIZE,
+    MRCRAConfig,
+    MRCRA_UNIGRAM_24K_VOCABULARY_SIZE,
+    MRRNConfig,
+)
 from mrrn.language import MRCRALanguageModel
 from mrrn.lm_training import (
     build_evaluation_batches,
-    ByteTextTokenizer, FineWebTextSource, HuggingFaceTextTokenizer,
-    PackedTokenStream, SequenceTextSource,
+    ByteTextTokenizer, DEFAULT_TOKENIZER_NAME, FineWebTextSource,
+    PackedTokenStream, SequenceTextSource, load_text_tokenizer,
 )
 
 
@@ -122,6 +128,15 @@ def production_configuration(
 
     if lightmodel and ultralightmodel:
         raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
+    if vocabulary_size not in {
+        MRCRA_UNIGRAM_24K_VOCABULARY_SIZE,
+        GPT2_CONTROL_VOCABULARY_SIZE,
+    }:
+        raise ValueError(
+            "declared MRCRA production profiles require either the exact "
+            "24,576-entry Unigram vocabulary or the frozen 50,257-entry GPT-2 "
+            "control; redesign the profile before using another vocabulary"
+        )
     factory = (
         MRCRAConfig.ultralight_2p7m
         if ultralightmodel
@@ -242,6 +257,7 @@ class ProductionProfile:
 
 def production_profile(
     *, lightmodel: bool, ultralightmodel: bool, total_tokens: int,
+    tokenizer_slug: str = "unigram24k",
 ) -> ProductionProfile:
     if lightmodel and ultralightmodel:
         raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
@@ -250,10 +266,11 @@ def production_profile(
             name="mrcra_2p7m_ultralight",
             model_authority="mrcra-ultralight-2p7m-fineweb-stage1",
             output_directory=(
-                f"outputs/mrcra-2p7m-fineweb-{total_tokens}-tokens"
+                f"outputs/mrcra-2p7m-{tokenizer_slug}-fineweb-"
+                f"{total_tokens}-tokens"
             ),
             run_name=(
-                f"mrcra-2p7m-ultralight-integrated-fineweb-"
+                f"mrcra-2p7m-ultralight-{tokenizer_slug}-integrated-fineweb-"
                 f"{total_tokens}-tokens-32k"
             ),
         )
@@ -262,19 +279,36 @@ def production_profile(
             name="mrcra_8p4m_light",
             model_authority="mrcra-light-8p4m-fineweb-stage1",
             output_directory=(
-                f"outputs/mrcra-8p4m-fineweb-{total_tokens}-tokens"
+                f"outputs/mrcra-8p4m-{tokenizer_slug}-fineweb-"
+                f"{total_tokens}-tokens"
             ),
             run_name=(
-                f"mrcra-8p4m-light-integrated-fineweb-"
+                f"mrcra-8p4m-light-{tokenizer_slug}-integrated-fineweb-"
                 f"{total_tokens}-tokens-32k"
             ),
         )
     return ProductionProfile(
         name="mrcra_120m_serious",
         model_authority="mrcra-fineweb-stage1",
-        output_directory="outputs/mrcra-120m-fineweb-20m",
-        run_name=f"mrcra-120m-fineweb-{total_tokens}-tokens-32k",
+        output_directory=(
+            f"outputs/mrcra-120m-{tokenizer_slug}-fineweb-{total_tokens}-tokens"
+        ),
+        run_name=(
+            f"mrcra-120m-{tokenizer_slug}-fineweb-{total_tokens}-tokens-32k"
+        ),
     )
+
+
+def tokenizer_profile_slug(tokenizer: str) -> str:
+    """Return a low-cardinality path/run label without claiming identity."""
+
+    if tokenizer == DEFAULT_TOKENIZER_NAME:
+        return "unigram24k"
+    if tokenizer in {"gpt2", "openai-community/gpt2"}:
+        return "gpt2-control"
+    stem = Path(tokenizer).stem.lower()
+    cleaned = "".join(character if character.isalnum() else "-" for character in stem)
+    return cleaned.strip("-")[:32] or "custom-tokenizer"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -284,8 +318,20 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dataset-id", default="HuggingFaceFW/fineweb")
     result.add_argument("--dataset-config", default="sample-10BT")
     result.add_argument("--dataset-revision", default="main")
-    result.add_argument("--tokenizer", default="gpt2")
+    result.add_argument(
+        "--tokenizer",
+        default=DEFAULT_TOKENIZER_NAME,
+        help=(
+            "Tokenizer alias, local .model, or Hugging Face ID. The default is "
+            "the packaged lossless SentencePiece Unigram-24K artifact; use "
+            "'gpt2' for the frozen control."
+        ),
+    )
     result.add_argument("--tokenizer-revision", default="main")
+    result.add_argument(
+        "--tokenizer-manifest", type=Path,
+        help="Provenance manifest for a custom local SentencePiece .model.",
+    )
     result.add_argument(
         "--output-dir",
         help=(
@@ -391,7 +437,7 @@ def parser() -> argparse.ArgumentParser:
         help="Auto-policy ceiling for retained exact-softmax activations.",
     )
     result.add_argument(
-        "--maximum-compiled-cce-mib", type=int, default=512,
+        "--maximum-compiled-cce-mib", type=int, default=256,
         help=(
             "Maximum estimated full-logit workspace for auto-selecting fused "
             "or torch.compile CCE; larger workloads use exact tiled CCE."
@@ -404,15 +450,36 @@ def parser() -> argparse.ArgumentParser:
             "cce_kahan_full_c",
             "cce_exact",
             "torch_compile",
+            "mlx",
             "fused",
             "tiled",
         ),
         default="auto",
         help=(
             "Exact full-vocabulary loss executor. Auto selects Kahan Full-C "
-            "CCE on compatible CUDA, official compiled exact CCE on macOS/CPU "
-            "when installed and within the declared workspace, and the native "
-            "exact fused/tiled path otherwise."
+            "CCE on compatible CUDA, official compiled exact CCE when "
+            "installed and within the declared workspace, and the native "
+            "exact fused/tiled path otherwise. MLX remains an explicit "
+            "bounded-memory Apple experiment because hybrid unified-memory "
+            "mappings are unsafe as an automatic default on smaller Macs."
+        ),
+    )
+    result.add_argument(
+        "--mlx-memory-limit-mib",
+        type=int,
+        default=1_536,
+        help=(
+            "Guideline ceiling for MLX unified memory during exact loss. "
+            "The default is sized for safe coexistence with the CPU carrier."
+        ),
+    )
+    result.add_argument(
+        "--mlx-cache-limit-mib",
+        type=int,
+        default=128,
+        help=(
+            "Maximum free MLX buffer cache. Exact-loss calls also clear this "
+            "cache at each PyTorch autograd boundary."
         ),
     )
     result.add_argument(
@@ -457,6 +524,16 @@ def parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Measure activation candidates before training (default: enabled).",
+    )
+    result.add_argument(
+        "--activation-calibration-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Reuse a source-, model-, and hardware-bound calibration receipt. "
+            "Long runs automatically re-exec once after a cache miss so "
+            "calibration allocator arenas cannot leak into training."
+        ),
     )
     result.add_argument(
         "--allow-unsafe-activation-policy",
@@ -851,6 +928,7 @@ def main() -> None:
         lightmodel=args.lightmodel,
         ultralightmodel=args.ultralightmodel,
         total_tokens=args.total_tokens,
+        tokenizer_slug=tokenizer_profile_slug(args.tokenizer),
     )
     model_profile = selected_profile.name
     tbptt_length = args.tbptt_length or 4_096
@@ -968,12 +1046,16 @@ def main() -> None:
             maximum_retained_loss_bytes=args.maximum_retained_loss_mib << 20,
             maximum_fused_loss_bytes=args.maximum_compiled_cce_mib << 20,
             exact_loss_backend=args.exact_loss_backend,
+            mlx_memory_limit_bytes=args.mlx_memory_limit_mib << 20,
+            mlx_cache_limit_bytes=args.mlx_cache_limit_mib << 20,
             warmup_tokens=8, checkpoint_interval=2, device="cpu", precision="fp32",
             activation_policy=activation_request,
             activation_memory_reserve_bytes=(
                 args.activation_memory_reserve_mib << 20
             ),
             activation_calibration=args.activation_calibration,
+            activation_calibration_cache_directory=None,
+            activation_calibration_reexec=False,
             allow_unsafe_activation_policy=(
                 args.allow_unsafe_activation_policy
             ),
@@ -1021,11 +1103,21 @@ def main() -> None:
             resolve_revision(args.dataset_id, args.dataset_revision, repo_type="dataset")
             if args.pin_revisions else args.dataset_revision
         )
-        tokenizer_revision = (
-            resolve_revision(args.tokenizer, args.tokenizer_revision, repo_type="model")
-            if args.pin_revisions else args.tokenizer_revision
+        local_sentencepiece = (
+            args.tokenizer == DEFAULT_TOKENIZER_NAME
+            or Path(args.tokenizer).suffix == ".model"
+            or Path(args.tokenizer).is_file()
         )
-        tokenizer = HuggingFaceTextTokenizer(args.tokenizer, revision=tokenizer_revision)
+        tokenizer_revision = args.tokenizer_revision
+        if args.pin_revisions and not local_sentencepiece:
+            tokenizer_revision = resolve_revision(
+                args.tokenizer, args.tokenizer_revision, repo_type="model",
+            )
+        tokenizer = load_text_tokenizer(
+            args.tokenizer,
+            revision=tokenizer_revision,
+            manifest_path=args.tokenizer_manifest,
+        )
         model_config = production_configuration(
             tokenizer.vocabulary_size,
             lightmodel=args.lightmodel,
@@ -1173,6 +1265,21 @@ def main() -> None:
                 args.activation_memory_reserve_mib << 20
             ),
             activation_calibration=args.activation_calibration,
+            activation_calibration_cache_directory=(
+                str(
+                    Path.home()
+                    / ".cache"
+                    / "mrrn"
+                    / "activation-calibration"
+                )
+                if args.activation_calibration_cache
+                else None
+            ),
+            activation_calibration_reexec=(
+                args.activation_calibration_cache
+                and args.activation_calibration
+                and args.total_tokens > args.context_length
+            ),
             allow_unsafe_activation_policy=(
                 args.allow_unsafe_activation_policy
             ),
@@ -1181,6 +1288,8 @@ def main() -> None:
             compile_tensor_cores=args.compile_tensor_cores,
             performance_calibration=args.performance_calibration,
             apple_mps_loss_offload=args.apple_mps_loss_offload,
+            mlx_memory_limit_bytes=args.mlx_memory_limit_mib << 20,
+            mlx_cache_limit_bytes=args.mlx_cache_limit_mib << 20,
             trackio_project=args.trackio_project,
             run_name=args.run_name or selected_profile.run_name,
             trackio_space_id=args.trackio_space_id,

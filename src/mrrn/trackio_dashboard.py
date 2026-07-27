@@ -109,26 +109,28 @@ def _checkpoint_dashboard_evidence(
     from .cognitive_diagnostics import cognitive_evidence
     from .config import CognitiveConfig, MRCRAConfig, MRRNConfig
     from .language import MRCRALanguageModel
-    from .lm_training import HuggingFaceTextTokenizer
+    from .lm_training import tokenizer_from_identity
     from .provenance import ProvenanceLedger
     from .visualization import model_spectral_evidence
 
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     identity = payload.get("identity", {})
-    raw = identity.get("model_config")
-    tokenizer_identity = identity.get("tokenizer")
+    semantic = identity.get("semantic", identity)
+    raw = semantic.get("model_config")
+    tokenizer_identity = semantic.get("tokenizer")
     if not isinstance(raw, dict) or not isinstance(tokenizer_identity, dict):
         raise ValueError("retained checkpoint lacks model/tokenizer identity")
     config = MRCRAConfig(
         MRRNConfig(**raw["carrier"]), CognitiveConfig(**raw["cognitive"]),
         int(raw["actor_parameter_minimum"]), int(raw["actor_parameter_maximum"]),
     )
+    tokenizer = tokenizer_from_identity(
+        tokenizer_identity,
+        search_roots=(checkpoint.parent, checkpoint.parent.parent),
+    )
     model = MRCRALanguageModel(config)
     model.load_state_dict(payload["model"], strict=True)
     model.eval()
-    tokenizer = HuggingFaceTextTokenizer(
-        tokenizer_identity["name"], revision=tokenizer_identity["revision"],
-    )
     training_state = payload.get("training_state", {})
     evidence = model_spectral_evidence(
         model, tokenizer, prompt=prompt, maximum_tokens=maximum_tokens,

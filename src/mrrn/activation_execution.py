@@ -731,13 +731,14 @@ def select_activation_dominant_partitions(
     return tuple(sorted(selected))
 
 
-def maximum_safe_retain_physical_tokens(
+def maximum_safe_activation_physical_tokens(
     policy: ActivationExecutionPolicy,
     *,
+    candidate_policy: str,
     alignment: int,
     maximum_physical_tokens: int,
 ) -> int:
-    """Return the largest aligned cohort authorized for full retention.
+    """Return the largest aligned cohort authorized for one candidate policy.
 
     Candidate reserve peaks are projected to a declared target shape. Scaling
     that target by the available activation capacity gives a conservative
@@ -745,25 +746,99 @@ def maximum_safe_retain_physical_tokens(
     never exceeds the planner's maximum physical cohort.
     """
 
-    if alignment <= 0 or maximum_physical_tokens <= 0:
-        raise ValueError("activation retain-shape request is malformed")
-    if policy.resolved == "retain":
+    if (
+        candidate_policy not in ACTIVATION_POLICIES
+        or alignment <= 0
+        or maximum_physical_tokens <= 0
+    ):
+        raise ValueError("activation candidate-shape request is malformed")
+    if candidate_policy == policy.resolved:
         return maximum_physical_tokens
-    retain = next(
-        (item for item in policy.candidates if item.policy == "retain"),
+    candidate = next(
+        (
+            item
+            for item in policy.candidates
+            if item.policy == candidate_policy
+        ),
         None,
     )
     capacity = (
         policy.memory.available_bytes - policy.required_reserve_bytes
     )
-    if retain is None or capacity <= 0 or retain.reserve_peak_bytes <= 0:
+    if (
+        candidate is None
+        or capacity <= 0
+        or candidate.reserve_peak_bytes <= 0
+    ):
         return 0
     raw = (
         capacity
-        * retain.target_physical_tokens
-        // retain.reserve_peak_bytes
+        * candidate.target_physical_tokens
+        // candidate.reserve_peak_bytes
     )
     return min(
         maximum_physical_tokens,
         max(0, raw // alignment * alignment),
+    )
+
+
+def maximum_safe_retain_physical_tokens(
+    policy: ActivationExecutionPolicy,
+    *,
+    alignment: int,
+    maximum_physical_tokens: int,
+) -> int:
+    """Compatibility wrapper for the full-retention shape boundary."""
+
+    return maximum_safe_activation_physical_tokens(
+        policy,
+        candidate_policy="retain",
+        alignment=alignment,
+        maximum_physical_tokens=maximum_physical_tokens,
+    )
+
+
+def fastest_safe_activation_policy(
+    policy: ActivationExecutionPolicy,
+    *,
+    physical_tokens: int,
+    physical_token_limits: Mapping[str, int],
+) -> str:
+    """Choose the fastest measured policy that is safe for this exact shape.
+
+    Automatic activation calibration resolves a policy for the largest
+    possible physical cohort. Smaller document-major cohorts often fit a
+    faster policy even when that maximum does not. This selector preserves an
+    explicit request verbatim, and otherwise uses only measured finite
+    candidates whose conservative shape boundary covers the invocation.
+    """
+
+    if physical_tokens <= 0:
+        raise ValueError("activation invocation must contain physical tokens")
+    if policy.requested != "auto":
+        return policy.resolved
+    timings = {
+        item.policy: item.elapsed_seconds
+        for item in policy.candidates
+        if item.finite
+    }
+    timings.setdefault(policy.resolved, float("inf"))
+    feasible = tuple(
+        name
+        for name in ACTIVATION_POLICIES
+        if (
+            physical_token_limits.get(name, 0) >= physical_tokens
+            and name in timings
+        )
+    )
+    if not feasible:
+        # The maximum-shape resolution is the safety authority even if a
+        # serialized legacy receipt omitted an explicit limit for it.
+        return policy.resolved
+    return min(
+        feasible,
+        key=lambda name: (
+            timings[name],
+            ACTIVATION_POLICIES.index(name),
+        ),
     )

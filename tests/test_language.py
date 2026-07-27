@@ -172,3 +172,42 @@ def test_routed_and_dense_generation_have_identical_seeded_sampling_semantics():
         generator=routed_generator,
     )
     torch.testing.assert_close(actual, expected)
+
+
+def test_generation_forbidden_tokens_are_excluded_in_dense_and_routed_paths():
+    torch.manual_seed(47)
+    vocabulary = 19
+    routed = MRRNLanguageModel(
+        tiny_language_config(vocabulary),
+        vocabulary_router_config=VocabularyRouterConfig(
+            cluster_size=4,
+            clustering_iterations=2,
+            initial_refinement_clusters=2,
+            maximum_refinement_clusters=128,
+            minimum_vocabulary_size=2,
+            minimum_model_dimension=1,
+        ),
+    ).eval()
+    dense = MRRNLanguageModel(
+        tiny_language_config(vocabulary),
+        vocabulary_router_config=VocabularyRouterConfig(enabled=False),
+    ).eval()
+    dense.load_state_dict(routed.state_dict())
+    allowed = 7
+    forbidden = tuple(value for value in range(vocabulary) if value != allowed)
+    prompt = torch.tensor([[1, 2, 3]])
+    for model in (dense, routed):
+        generated = model.generate(
+            prompt,
+            maximum_new_tokens=3,
+            temperature=0,
+            top_k=1,
+            forbidden_token_ids=forbidden,
+        )
+        assert generated[0, -3:].tolist() == [allowed, allowed, allowed]
+        with pytest.raises(ValueError, match="complete vocabulary"):
+            model.generate(
+                prompt,
+                maximum_new_tokens=1,
+                forbidden_token_ids=tuple(range(vocabulary)),
+            )

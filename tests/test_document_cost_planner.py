@@ -195,7 +195,7 @@ def test_measured_cost_fit_binds_per_length_time_and_shape_memory():
             activation_policy="retain",
             hardware_fingerprint="b" * 64,
             activation_bytes_per_token=128,
-            length_band_observations=((256, 0.01, 1, 10),),
+            length_band_observations=((384, 0.01, 1, 10),),
         )
 
 
@@ -210,6 +210,38 @@ def test_plan_receipt_binds_shape_memory_and_compiler_cost_authority():
     assert plan.cost_receipt.unique_static_shapes > 0
     assert plan.cost_receipt.predicted_peak_memory_bytes > 0
     assert plan.cost_receipt.shape_compile_cost == pytest.approx(0.125)
+
+
+def test_cost_planner_prices_the_shape_conditional_activation_policy():
+    planner = make_planner(
+        activation_policy="whole_span",
+        activation_policy_token_limits={
+            "retain": 4,
+            "selective": 8,
+            "whole_span": 16,
+        },
+        activation_policy_timings={
+            "retain": 1.0,
+            "selective": 1.5,
+            "whole_span": 2.0,
+        },
+        cost_model=replace(
+            make_planner().cost_model,
+            backward_multiplier_retain=1.0,
+            backward_multiplier_selective=2.0,
+            backward_multiplier_whole_span=4.0,
+        ),
+    )
+    assert planner._activation_policy_for_physical_tokens(4) == "retain"
+    assert planner._activation_policy_for_physical_tokens(8) == "selective"
+    assert planner._activation_policy_for_physical_tokens(16) == "whole_span"
+    sequences = planner._extract_sequences(packed_documents((4, 4)))
+    group = tuple(sequences)
+    signature = planner._candidate_signature(group)
+    conditional = planner._candidate_cost(group, signature)
+    planner.activation_policy_token_limits = {}
+    all_recomputed = planner._candidate_cost(group, signature)
+    assert conditional < all_recomputed
 
 
 def test_compile_aware_dynamic_program_matches_global_unique_shape_optimum():

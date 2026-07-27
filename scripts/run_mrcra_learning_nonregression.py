@@ -48,9 +48,10 @@ from mrrn.learning_nonregression import (
 from mrrn.lm_training import (
     build_evaluation_batches,
     ByteTextTokenizer,
+    DEFAULT_TOKENIZER_NAME,
     FineWebTextSource,
-    HuggingFaceTextTokenizer,
     PackedTokenStream,
+    load_text_tokenizer,
 )
 from mrrn.training_execution_fixture import (
     RepeatingPackedFixtureStream,
@@ -110,9 +111,10 @@ def _build_quick_components(seed: int):
 
 
 def _build_fineweb_components(args, seed: int):
-    tokenizer = HuggingFaceTextTokenizer(
+    tokenizer = load_text_tokenizer(
         args.tokenizer,
         revision=args.tokenizer_revision,
+        manifest_path=args.tokenizer_manifest,
     )
 
     def stream():
@@ -415,15 +417,22 @@ def _resolve_hugging_face_revisions(args) -> None:
     dataset = api.dataset_info(
         args.dataset_id, revision=args.dataset_revision
     )
-    tokenizer = api.model_info(
-        args.tokenizer, revision=args.tokenizer_revision
-    )
-    if not dataset.sha or not tokenizer.sha:
+    if not dataset.sha:
         raise RuntimeError(
-            "FineWeb learning authority could not resolve immutable Hub SHAs"
+            "FineWeb learning authority could not resolve an immutable dataset SHA"
         )
     args.dataset_revision = dataset.sha
-    args.tokenizer_revision = tokenizer.sha
+    tokenizer_path = Path(args.tokenizer)
+    if args.tokenizer != DEFAULT_TOKENIZER_NAME and not tokenizer_path.is_file():
+        tokenizer = api.model_info(
+            args.tokenizer, revision=args.tokenizer_revision
+        )
+        if not tokenizer.sha:
+            raise RuntimeError(
+                "FineWeb learning authority could not resolve an immutable "
+                "tokenizer SHA"
+            )
+        args.tokenizer_revision = tokenizer.sha
 
 
 def parser() -> argparse.ArgumentParser:
@@ -445,8 +454,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dataset-id", default="HuggingFaceFW/fineweb")
     result.add_argument("--dataset-config", default="sample-10BT")
     result.add_argument("--dataset-revision", default="main")
-    result.add_argument("--tokenizer", default="openai-community/gpt2")
+    result.add_argument("--tokenizer", default=DEFAULT_TOKENIZER_NAME)
     result.add_argument("--tokenizer-revision", default="main")
+    result.add_argument("--tokenizer-manifest")
     result.add_argument("--eval-fraction-permyriad", type=int, default=100)
     result.add_argument("--eval-batches", type=int, default=1)
     result.add_argument("--shuffle-buffer", type=int, default=10_000)
@@ -525,6 +535,7 @@ def main() -> None:
         "dataset_revision": args.dataset_revision,
         "tokenizer": args.tokenizer,
         "tokenizer_revision": args.tokenizer_revision,
+        "tokenizer_manifest": args.tokenizer_manifest,
         "eval_fraction_permyriad": args.eval_fraction_permyriad,
         "eval_batches": args.eval_batches,
         "shuffle_buffer": args.shuffle_buffer,
@@ -602,6 +613,11 @@ def main() -> None:
                 "--shuffle-buffer",
                 str(args.shuffle_buffer),
             ]
+            if args.tokenizer_manifest is not None:
+                command.extend((
+                    "--tokenizer-manifest",
+                    args.tokenizer_manifest,
+                ))
             timeout_seconds = (
                 args.worker_timeout_seconds
                 if args.worker_timeout_seconds is not None

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from math import gcd
+from math import gcd, isfinite
 
 import torch
 from torch import Tensor
@@ -546,6 +546,8 @@ class DocumentMajorBatchPlanner:
         device_torch_fingerprint: str = "portable",
         actor_configuration_digest: str = "portable",
         compiler_policy: str = "off",
+        activation_policy_token_limits: dict[str, int] | None = None,
+        activation_policy_timings: dict[str, float] | None = None,
     ) -> None:
         if min(tbptt_length, token_budget, alignment, cognitive_stride) <= 0:
             raise ValueError("document planner sizes must be positive")
@@ -590,6 +592,29 @@ class DocumentMajorBatchPlanner:
             raise ValueError(
                 "every static bucket must align with the carrier support"
             )
+        policy_names = {"retain", "selective", "whole_span"}
+        if (
+            any(
+                name not in policy_names
+                or not isinstance(limit, int)
+                or limit < 0
+                for name, limit in (
+                    activation_policy_token_limits or {}
+                ).items()
+            )
+            or any(
+                name not in policy_names
+                or not isinstance(seconds, (int, float))
+                or not isfinite(float(seconds))
+                or seconds < 0
+                for name, seconds in (
+                    activation_policy_timings or {}
+                ).items()
+            )
+        ):
+            raise ValueError(
+                "document activation-policy calibration is malformed"
+            )
         if tbptt_length > bucket_lengths[-1]:
             raise ValueError("largest static bucket must cover the TBPTT length")
         if token_budget < bucket_lengths[0]:
@@ -611,6 +636,12 @@ class DocumentMajorBatchPlanner:
         self.device_torch_fingerprint = device_torch_fingerprint
         self.actor_configuration_digest = actor_configuration_digest
         self.compiler_policy = compiler_policy
+        self.activation_policy_token_limits = dict(
+            activation_policy_token_limits or {}
+        )
+        self.activation_policy_timings = dict(
+            activation_policy_timings or {}
+        )
         self._last_rejected_memory_candidates = 0
         self._group_cache: dict[
             tuple[object, ...], tuple[tuple[int, ...], ...]
@@ -890,16 +921,68 @@ class DocumentMajorBatchPlanner:
         *,
         known_shapes: frozenset[tuple[int, int]] = frozenset(),
     ) -> float:
-        return self.cost_model.estimate(
-            padded_lengths=signature,
-            valid_lengths_by_row=tuple(
-                tuple(span.length for span in sequence.spans)
-                for sequence in sequences
+        valid_lengths = tuple(
+            tuple(span.length for span in sequence.spans)
+            for sequence in sequences
+        )
+        if not self.activation_policy_token_limits:
+            return self.cost_model.estimate(
+                padded_lengths=signature,
+                valid_lengths_by_row=valid_lengths,
+                cognitive_stride=self.cognitive_stride,
+                activation_policy=self.activation_policy,
+                known_shapes=known_shapes,
+                compiler_enabled=self.compiler_policy == "on",
+            )
+
+        # Price each physical span with the same shape-conditional activation
+        # policy that execution will use. Treating every span as the
+        # maximum-shape fallback systematically overprices safe selective or
+        # retained cohorts and can make the dynamic planner choose a slower
+        # grouping despite an otherwise accurate measured cost model.
+        total = 0.0
+        observed_shapes = known_shapes
+        for index, padded_length in enumerate(signature):
+            physical_tokens = len(sequences) * padded_length
+            activation_policy = self._activation_policy_for_physical_tokens(
+                physical_tokens
+            )
+            total += self.cost_model.estimate(
+                padded_lengths=(padded_length,),
+                valid_lengths_by_row=tuple(
+                    (row[index],) for row in valid_lengths
+                ),
+                cognitive_stride=self.cognitive_stride,
+                activation_policy=activation_policy,
+                known_shapes=observed_shapes,
+                compiler_enabled=self.compiler_policy == "on",
+            )
+            observed_shapes = observed_shapes.union(
+                ((len(sequences), padded_length),)
+            )
+        return total
+
+    def _activation_policy_for_physical_tokens(
+        self, physical_tokens: int,
+    ) -> str:
+        if physical_tokens <= 0:
+            raise ValueError("document activation shape must be positive")
+        feasible = tuple(
+            name
+            for name in ("retain", "selective", "whole_span")
+            if (
+                self.activation_policy_token_limits.get(name, 0)
+                >= physical_tokens
+            )
+        )
+        if not feasible:
+            return self.activation_policy
+        return min(
+            feasible,
+            key=lambda name: (
+                self.activation_policy_timings.get(name, float("inf")),
+                ("retain", "selective", "whole_span").index(name),
             ),
-            cognitive_stride=self.cognitive_stride,
-            activation_policy=self.activation_policy,
-            known_shapes=known_shapes,
-            compiler_enabled=self.compiler_policy == "on",
         )
 
     def _candidate_fits_memory(

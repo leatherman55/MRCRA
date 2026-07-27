@@ -22,7 +22,10 @@ from mrrn.language import MRCRALanguageModel  # noqa: E402
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vocabulary-size", type=int, default=50_257)
+    parser.add_argument(
+        "--vocabulary-size", type=int, default=24_576,
+        help="Exact total vocabulary, including SentencePiece meta/byte pieces.",
+    )
     profile = parser.add_mutually_exclusive_group()
     profile.add_argument(
         "--lightmodel", action="store_true",

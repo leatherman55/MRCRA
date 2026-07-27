@@ -300,13 +300,27 @@ def measured_document_cost_model(
         or shape_compile_cost < 0
         or (
             length_band_observations
-            and tuple(
-                observation[0]
-                for observation in length_band_observations
+            and (
+                tuple(
+                    sorted(
+                        observation[0]
+                        for observation in length_band_observations
+                    )
+                )
+                != tuple(
+                    observation[0]
+                    for observation in length_band_observations
+                )
+                or len({
+                    observation[0]
+                    for observation in length_band_observations
+                })
+                != len(length_band_observations)
+                or any(
+                    observation[0] not in length_bands
+                    for observation in length_band_observations
+                )
             )
-            != tuple(length_bands)[
-                : len(length_band_observations)
-            ]
         )
         or any(
             len(observation) != 4
@@ -360,12 +374,20 @@ def measured_document_cost_model(
             for length, cost in observed_band_costs
         )
         observed_by_length = dict(observed_band_costs)
-        last_observed_cost = observed_band_costs[-1][1]
         band_costs = tuple(
             (
                 int(length),
                 observed_by_length.get(
-                    int(length), last_observed_cost
+                    int(length),
+                    next(
+                        (
+                            cost
+                            for observed_length, cost
+                            in observed_band_costs
+                            if observed_length >= int(length)
+                        ),
+                        observed_band_costs[-1][1],
+                    ),
                 ),
             )
             for length in length_bands

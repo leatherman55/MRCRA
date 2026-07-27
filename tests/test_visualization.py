@@ -200,6 +200,13 @@ class _TokenizerStub:
     def __init__(self, name, *, revision):
         self.name, self.revision = name, revision
 
+    def identity(self):
+        return {
+            "kind": "huggingface",
+            "name": self.name,
+            "revision": self.revision,
+        }
+
     def encode_prompt(self, text):
         return [1, 2, 3, 4]
 
@@ -369,7 +376,7 @@ def test_checkpoint_spectral_evidence_rejects_invalid_inputs(tmp_path):
         },
         invalid,
     )
-    with pytest.raises(ValueError, match="Hugging Face"):
+    with pytest.raises(ValueError, match="unsupported tokenizer"):
         checkpoint_spectral_evidence(invalid, prompt="x")
 
 

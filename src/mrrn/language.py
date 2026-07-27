@@ -97,32 +97,50 @@ def _generation_candidates(
     vocabulary_size: int,
     router: CertifiedBalancedVocabularyRouter | None,
     seen_token_mask: Tensor,
+    forbidden_token_mask: Tensor,
     repetition_penalty: float,
     top_k: int | None,
 ) -> _GenerationCandidates:
     """Return the compact exact sampling authority without dense re-expansion."""
 
-    if latent.ndim != 2 or seen_token_mask.shape != (vocabulary_size,):
+    if (
+        latent.ndim != 2
+        or seen_token_mask.shape != (vocabulary_size,)
+        or forbidden_token_mask.shape != (vocabulary_size,)
+    ):
         raise ValueError("generation latent and seen-token mask are incompatible")
-    top_k = None if top_k is None else min(top_k, vocabulary_size)
+    forbidden_count = int(forbidden_token_mask.sum())
+    allowed_count = vocabulary_size - forbidden_count
+    if allowed_count <= 0:
+        raise ValueError("generation forbids the complete vocabulary")
+    top_k = None if top_k is None else min(top_k, allowed_count)
     if router is not None and top_k is not None:
         routed = router.exact_top_k(
             latent,
-            top_k,
+            min(vocabulary_size, top_k + forbidden_count),
             seen_token_mask=seen_token_mask,
             repetition_penalty=repetition_penalty,
             return_on_input_device=False,
         )
         # Canonical token order makes the random stream independent of the
         # router's cluster traversal while preserving every threshold tie.
-        ordering = routed.token_ids.masked_fill(~routed.mask, vocabulary_size).argsort(-1)
+        allowed = routed.mask & ~forbidden_token_mask.to(
+            routed.token_ids.device
+        )[routed.token_ids.clamp_min(0)]
+        allowed_values = routed.logits.masked_fill(~allowed, -torch.inf)
+        threshold = allowed_values.topk(top_k, -1).values[:, -1:]
+        allowed &= routed.logits >= threshold
+        ordering = routed.token_ids.masked_fill(~allowed, vocabulary_size).argsort(-1)
         return _GenerationCandidates(
             routed.token_ids.gather(-1, ordering),
             routed.logits.gather(-1, ordering),
-            routed.mask.gather(-1, ordering),
+            allowed.gather(-1, ordering),
             routed.metrics,
         )
     logits = F.linear(latent.float(), weight.float(), bias.float())
+    logits.masked_fill_(
+        forbidden_token_mask.to(logits.device).unsqueeze(0), -torch.inf,
+    )
     logits = _apply_repetition_penalty(
         logits, seen_token_mask, repetition_penalty
     )
@@ -368,6 +386,7 @@ class MRRNLanguageModel(nn.Module):
         *,
         maximum_new_tokens: int,
         eos_token_id: int | None = None,
+        forbidden_token_ids: Sequence[int] = (),
         temperature: float = 0.8,
         top_k: int | None = 50,
         top_p: float = 0.95,
@@ -386,6 +405,11 @@ class MRRNLanguageModel(nn.Module):
             raise ValueError("top_p and repetition_penalty are invalid")
         if eos_token_id is not None and not 0 <= eos_token_id < self.vocabulary_size:
             raise ValueError("eos_token_id lies outside the vocabulary")
+        if any(
+            not isinstance(value, int) or not 0 <= value < self.vocabulary_size
+            for value in forbidden_token_ids
+        ):
+            raise ValueError("forbidden generation token lies outside the vocabulary")
         device = next(self.parameters()).device
         tokens = input_ids.to(device=device, dtype=torch.long)
         router = self.build_vocabulary_router()
@@ -395,6 +419,15 @@ class MRRNLanguageModel(nn.Module):
             device=device if router is None else router.execution_device,
         )
         seen_token_mask[tokens.reshape(-1).to(seen_token_mask.device)] = True
+        forbidden_token_mask = torch.zeros_like(seen_token_mask)
+        if forbidden_token_ids:
+            forbidden_token_mask[
+                torch.tensor(
+                    tuple(dict.fromkeys(forbidden_token_ids)),
+                    dtype=torch.int64,
+                    device=forbidden_token_mask.device,
+                )
+            ] = True
         state = self.initial_stream_state(1, device=device, dtype=self.token_embedding.weight.dtype)
         latent = None
         for position in range(tokens.shape[1]):
@@ -415,6 +448,7 @@ class MRRNLanguageModel(nn.Module):
                 vocabulary_size=self.vocabulary_size,
                 router=router,
                 seen_token_mask=seen_token_mask,
+                forbidden_token_mask=forbidden_token_mask,
                 repetition_penalty=repetition_penalty,
                 top_k=retrieval_top_k,
             )
@@ -812,7 +846,9 @@ class MRCRALanguageModel(nn.Module):
     @torch.no_grad()
     def generate(
         self, input_ids: Tensor, *, maximum_new_tokens: int,
-        eos_token_id: int | None = None, temperature: float = 0.8,
+        eos_token_id: int | None = None,
+        forbidden_token_ids: Sequence[int] = (),
+        temperature: float = 0.8,
         top_k: int | None = 50, top_p: float = 0.95,
         repetition_penalty: float = 1.0,
         source_uri: str = "language://prompt",
@@ -828,6 +864,11 @@ class MRCRALanguageModel(nn.Module):
             raise ValueError("top_p and repetition_penalty are invalid")
         if eos_token_id is not None and not 0 <= eos_token_id < self.vocabulary_size:
             raise ValueError("eos_token_id lies outside the vocabulary")
+        if any(
+            not isinstance(value, int) or not 0 <= value < self.vocabulary_size
+            for value in forbidden_token_ids
+        ):
+            raise ValueError("forbidden generation token lies outside the vocabulary")
         device = next(self.parameters()).device
         tokens = input_ids.to(device=device, dtype=torch.long)
         router = self.build_vocabulary_router()
@@ -837,6 +878,15 @@ class MRCRALanguageModel(nn.Module):
             device=device if router is None else router.execution_device,
         )
         seen_token_mask[tokens.reshape(-1).to(seen_token_mask.device)] = True
+        forbidden_token_mask = torch.zeros_like(seen_token_mask)
+        if forbidden_token_ids:
+            forbidden_token_mask[
+                torch.tensor(
+                    tuple(dict.fromkeys(forbidden_token_ids)),
+                    dtype=torch.int64,
+                    device=forbidden_token_mask.device,
+                )
+            ] = True
         prompt = self(
             tokens,
             source_uris=(source_uri,),
@@ -860,6 +910,7 @@ class MRCRALanguageModel(nn.Module):
                 vocabulary_size=self.vocabulary_size,
                 router=router,
                 seen_token_mask=seen_token_mask,
+                forbidden_token_mask=forbidden_token_mask,
                 repetition_penalty=repetition_penalty,
                 top_k=retrieval_top_k,
             )

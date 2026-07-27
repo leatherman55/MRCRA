@@ -7,8 +7,11 @@ from mrrn.evaluation import CausalTransformerBaseline, parameter_statistics
 from mrrn.mlx_backend import (
     MLXCausalTransformer,
     MLXMRRN,
+    configure_mlx_memory,
     mlx_available,
     mlx_exact_tiled_cross_entropy,
+    mlx_memory_statistics,
+    mlx_torch_exact_cross_entropy,
 )
 from mrrn.model import MRRN
 from mrrn.vocabulary_router import VocabularyRouterConfig
@@ -117,6 +120,97 @@ def test_mlx_exact_tiled_cross_entropy_matches_dense_loss_and_every_gradient():
         )
     assert np.count_nonzero(np.array(gradients[1])) == weight_np.size
     assert np.count_nonzero(np.array(gradients[2])) == bias_np.size
+
+
+def test_mlx_torch_bridge_preserves_exact_loss_and_complete_autograd():
+    torch.manual_seed(20260727)
+    hidden_a = torch.randn(2, 5, 7, requires_grad=True)
+    weight_a = torch.randn(29, 7, requires_grad=True)
+    bias_a = torch.randn(29, requires_grad=True)
+    labels = torch.randint(0, 29, (2, 5))
+    mask = torch.tensor([
+        [True, True, False, True, False],
+        [True, False, True, True, True],
+    ])
+    expected = torch.nn.functional.cross_entropy(
+        torch.nn.functional.linear(
+            hidden_a, weight_a, bias_a,
+        )[mask],
+        labels[mask],
+    )
+    expected.backward()
+
+    hidden_b = hidden_a.detach().clone().requires_grad_(True)
+    weight_b = weight_a.detach().clone().requires_grad_(True)
+    bias_b = bias_a.detach().clone().requires_grad_(True)
+    actual = mlx_torch_exact_cross_entropy(
+        hidden_b,
+        weight_b,
+        labels,
+        bias_b,
+        mask=mask,
+        vocabulary_tile_size=8,
+    )
+    actual.backward()
+    torch.testing.assert_close(actual, expected, atol=3e-6, rtol=3e-6)
+    for actual_gradient, expected_gradient in (
+        (hidden_b.grad, hidden_a.grad),
+        (weight_b.grad, weight_a.grad),
+        (bias_b.grad, bias_a.grad),
+    ):
+        torch.testing.assert_close(
+            actual_gradient,
+            expected_gradient,
+            atol=8e-6,
+            rtol=8e-6,
+        )
+    assert int(torch.count_nonzero(weight_b.grad)) == weight_b.numel()
+    assert int(torch.count_nonzero(bias_b.grad)) == bias_b.numel()
+
+
+def test_mlx_torch_bridge_rejects_invalid_targets_before_accelerator_work():
+    hidden = torch.randn(1, 3, 4, requires_grad=True)
+    weight = torch.randn(7, 4, requires_grad=True)
+    labels = torch.tensor([[0, 7, 2]])
+    mask = torch.ones_like(labels, dtype=torch.bool)
+    with pytest.raises(ValueError, match="within the vocabulary"):
+        mlx_torch_exact_cross_entropy(
+            hidden,
+            weight,
+            labels,
+            mask=mask,
+            vocabulary_tile_size=4,
+        )
+
+
+def test_mlx_exact_loss_obeys_bounded_cache_policy_and_releases_free_buffers():
+    policy = configure_mlx_memory(
+        memory_limit_bytes=512 << 20,
+        cache_limit_bytes=32 << 20,
+    )
+    try:
+        hidden = torch.randn(2, 16, 7, requires_grad=True)
+        weight = torch.randn(257, 7, requires_grad=True)
+        bias = torch.randn(257, requires_grad=True)
+        labels = torch.randint(0, 257, (2, 16))
+        loss = mlx_torch_exact_cross_entropy(
+            hidden,
+            weight,
+            labels,
+            bias,
+            mask=torch.ones_like(labels, dtype=torch.bool),
+            vocabulary_tile_size=64,
+        )
+        loss.backward()
+        memory = mlx_memory_statistics()
+        assert memory["peak_bytes"] > 0
+        assert memory["cache_bytes"] == 0
+        assert memory["cache_bytes"] <= 32 << 20
+    finally:
+        configure_mlx_memory(
+            memory_limit_bytes=policy.previous_memory_limit_bytes,
+            cache_limit_bytes=policy.previous_cache_limit_bytes,
+        )
 
 
 def test_mlx_mrrn_compiled_exact_cce_method_preserves_mask_and_reductions():

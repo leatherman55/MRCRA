@@ -1,0 +1,92 @@
+{
+  "artifact": "MRCRA tokenizer source-byte comparison",
+  "clock_report": {
+    "alignment": 32,
+    "authority": "measurement report only; training clocks change only through an explicit checkpointed configuration",
+    "baseline": "gpt2_control",
+    "candidate": "mrcra_unigram_24k",
+    "candidate_tokens_per_baseline_token": 1.0482465788122997,
+    "source_equivalent_candidate_clocks": {
+      "carrier_execution_chunk": 288,
+      "carrier_tbptt": 4320,
+      "light_event_chunk": 160,
+      "local_attention_window": 64,
+      "optimization_context": 34368,
+      "serious_event_chunk": 288,
+      "ultralight_cognitive_stride": 160,
+      "ultralight_event_chunk": 96
+    }
+  },
+  "dataset": {
+    "config": "sample-10BT",
+    "id": "HuggingFaceFW/fineweb",
+    "maximum_documents": 200,
+    "partition": "eval",
+    "revision": "9bb295ddab0e05d785b879661af7260fed5140fc"
+  },
+  "metrics": {
+    "gpt2_control": {
+      "bytes_per_content_token": 4.418928016744323,
+      "content_tokens": 150021,
+      "content_tokens_per_kibibyte": 231.73040975545004,
+      "content_tokens_per_second": 489189.00960435224,
+      "document_end_tokens": 200,
+      "documents": 200,
+      "encoding_seconds": 0.30667287501273677,
+      "utf8_bytes": 662932,
+      "utf8_bytes_per_second": 2161691.0200240794
+    },
+    "mrcra_unigram_24k": {
+      "bytes_per_content_token": 4.215542512670181,
+      "content_tokens": 157259,
+      "content_tokens_per_kibibyte": 242.91060923292284,
+      "content_tokens_per_second": 1274640.2016130202,
+      "document_end_tokens": 200,
+      "documents": 200,
+      "encoding_seconds": 0.12337520800065249,
+      "utf8_bytes": 662932,
+      "utf8_bytes_per_second": 5373299.958258177
+    }
+  },
+  "tokenizers": {
+    "gpt2_control": {
+      "eos_token_id": 50256,
+      "kind": "huggingface",
+      "name": "gpt2",
+      "pad_token_id": 50256,
+      "revision": "main",
+      "vocabulary_size": 50257
+    },
+    "mrcra_unigram_24k": {
+      "artifact_filename": "mrcra-unigram-24k.model",
+      "byte_fallback": true,
+      "eos_token_id": 1,
+      "kind": "sentencepiece",
+      "manifest_filename": "mrcra-unigram-24k.json",
+      "manifest_sha256": "91f59117e5b1c2da36d15fa7a008f0c5cacb9d1642ead423b98b1480971a3732",
+      "model_sha256": "4cf347e61b2e1756070a7582ce101b5e5c45b8f046f0516e470201d7bc75cfec",
+      "model_type": "unigram",
+      "normalization": "identity",
+      "pad_token_id": 1,
+      "schema_version": 1,
+      "training_corpus": {
+        "dataset_config": "sample-10BT",
+        "dataset_id": "HuggingFaceFW/fineweb",
+        "dataset_revision": "9bb295ddab0e05d785b879661af7260fed5140fc",
+        "dataset_split": "train",
+        "documents": 43277,
+        "evaluation_fraction_permyriad": 100,
+        "partition": "train",
+        "sentences": 44471,
+        "sha256": "399e77643b00d66bc156d121f23cefa3d8bf61db5dfddfbe115e42e32af6d10e",
+        "shuffle_buffer": 10000,
+        "shuffle_seed": 20260721,
+        "utf8_bytes": 134210118
+      },
+      "unk_token_id": 0,
+      "vocabulary_filename": "mrcra-unigram-24k.vocabulary.json",
+      "vocabulary_sha256": "0a5d64ea5ffd732e89da3102b63aac8a0e7016b503f5e0a26c83a74ee7d722f5",
+      "vocabulary_size": 24576
+    }
+  }
+}

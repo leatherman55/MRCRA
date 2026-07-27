@@ -49,6 +49,53 @@ def _mlx():
     return mx
 
 
+@dataclass(frozen=True, slots=True)
+class MLXMemoryPolicy:
+    """Process-global MLX allocator policy applied by the training authority."""
+
+    memory_limit_bytes: int
+    cache_limit_bytes: int
+    previous_memory_limit_bytes: int
+    previous_cache_limit_bytes: int
+
+
+def configure_mlx_memory(
+    *,
+    memory_limit_bytes: int,
+    cache_limit_bytes: int,
+) -> MLXMemoryPolicy:
+    """Bound MLX unified-memory growth and discard pre-policy free buffers."""
+
+    if (
+        memory_limit_bytes <= 0
+        or cache_limit_bytes < 0
+        or cache_limit_bytes > memory_limit_bytes
+    ):
+        raise ValueError("MLX memory limits are malformed")
+    mx = _mlx()
+    previous_memory = int(mx.set_memory_limit(int(memory_limit_bytes)))
+    previous_cache = int(mx.set_cache_limit(int(cache_limit_bytes)))
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    return MLXMemoryPolicy(
+        int(memory_limit_bytes),
+        int(cache_limit_bytes),
+        previous_memory,
+        previous_cache,
+    )
+
+
+def mlx_memory_statistics() -> dict[str, int]:
+    """Return authoritative MLX allocator counters without allocating arrays."""
+
+    mx = _mlx()
+    return {
+        "active_bytes": int(mx.get_active_memory()),
+        "cache_bytes": int(mx.get_cache_memory()),
+        "peak_bytes": int(mx.get_peak_memory()),
+    }
+
+
 def _array(tensor: torch.Tensor):
     mx = _mlx()
     return mx.array(tensor.detach().cpu().numpy())
@@ -274,6 +321,251 @@ def mlx_exact_tiled_cross_entropy(
     if reduction == "sum":
         return total
     return total / mx.maximum(mx.sum(valid), mx.array(1, dtype=mx.uint32))
+
+
+class _MLXTorchExactCrossEntropy(torch.autograd.Function):
+    """Exact MLX loss/adjoint bridge for a canonical CPU PyTorch graph.
+
+    MLX evaluates the regular vocabulary contraction on Apple Metal while the
+    model, optimizer, and checkpoint authority remain PyTorch tensors. The
+    complete latent, classifier, and bias gradients are copied back; no row
+    filtering or approximate routing occurs.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        labels: torch.Tensor,
+        mask: torch.Tensor,
+        vocabulary_tile_size: int,
+    ) -> torch.Tensor:
+        mx = _mlx()
+        try:
+            return _MLXTorchExactCrossEntropy._forward_with_mlx(
+                ctx,
+                mx,
+                hidden,
+                weight,
+                bias,
+                labels,
+                mask,
+                vocabulary_tile_size,
+            )
+        finally:
+            # Gradients have been copied into canonical PyTorch tensors before
+            # this boundary returns. Retaining MLX's free unified-memory
+            # buffers across heterogeneous document shapes can otherwise
+            # accumulate a many-gigabyte physical footprint and provoke an
+            # uncatchable macOS SIGKILL.
+            mx.clear_cache()
+
+    @staticmethod
+    def _forward_with_mlx(
+        ctx,
+        mx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        labels: torch.Tensor,
+        mask: torch.Tensor,
+        vocabulary_tile_size: int,
+    ) -> torch.Tensor:
+        if any(
+            tensor.device.type != "cpu"
+            for tensor in (hidden, weight, labels, mask)
+        ) or (bias is not None and bias.device.type != "cpu"):
+            raise ValueError(
+                "the MLX/PyTorch exact-loss bridge requires canonical CPU tensors"
+            )
+        hidden_mx = mx.array(
+            hidden.detach().float().contiguous().numpy()
+        )
+        weight_mx = mx.array(
+            weight.detach().float().contiguous().numpy()
+        )
+        labels_mx = mx.array(
+            labels.detach().to(torch.int32).contiguous().numpy()
+        )
+        mask_mx = mx.array(
+            mask.detach().contiguous().numpy()
+        )
+        bias_mx = (
+            None
+            if bias is None
+            else mx.array(bias.detach().float().contiguous().numpy())
+        )
+
+        if bias_mx is None:
+            def objective(local_hidden, local_weight):
+                return mlx_exact_tiled_cross_entropy(
+                    local_hidden,
+                    local_weight,
+                    labels_mx,
+                    None,
+                    mask=mask_mx,
+                    vocabulary_tile_size=int(vocabulary_tile_size),
+                )
+
+            value, gradients = mx.value_and_grad(
+                objective, argnums=(0, 1)
+            )(hidden_mx, weight_mx)
+            hidden_gradient, weight_gradient = gradients
+            bias_gradient = None
+        else:
+            def objective(local_hidden, local_weight, local_bias):
+                return mlx_exact_tiled_cross_entropy(
+                    local_hidden,
+                    local_weight,
+                    labels_mx,
+                    local_bias,
+                    mask=mask_mx,
+                    vocabulary_tile_size=int(vocabulary_tile_size),
+                )
+
+            value, gradients = mx.value_and_grad(
+                objective, argnums=(0, 1, 2)
+            )(hidden_mx, weight_mx, bias_mx)
+            hidden_gradient, weight_gradient, bias_gradient = gradients
+        if bias_gradient is None:
+            mx.eval(value, hidden_gradient, weight_gradient)
+        else:
+            mx.eval(
+                value, hidden_gradient, weight_gradient, bias_gradient,
+            )
+        value_array = np.array(value)
+        hidden_gradient_array = np.array(hidden_gradient, copy=True)
+        weight_gradient_array = np.array(weight_gradient, copy=True)
+        bias_gradient_array = (
+            None
+            if bias_gradient is None
+            else np.array(bias_gradient, copy=True)
+        )
+        if not np.isfinite(value_array).all():
+            raise RuntimeError("MLX exact loss produced a non-finite value")
+        for name, array in (
+            ("hidden", hidden_gradient_array),
+            ("weight", weight_gradient_array),
+            ("bias", bias_gradient_array),
+        ):
+            if array is not None and not np.isfinite(array).all():
+                raise RuntimeError(
+                    f"MLX exact loss produced a non-finite {name} gradient"
+                )
+        retained = [
+            torch.from_numpy(hidden_gradient_array).to(
+                dtype=hidden.dtype
+            ),
+            torch.from_numpy(weight_gradient_array).to(
+                dtype=weight.dtype
+            ),
+        ]
+        if bias_gradient_array is not None:
+            retained.append(
+                torch.from_numpy(bias_gradient_array).to(
+                    dtype=bias.dtype
+                )
+            )
+        ctx.save_for_backward(*retained)
+        ctx.has_bias = bias is not None
+        return hidden.new_tensor(float(value_array))
+
+    @staticmethod
+    def backward(ctx, output_gradient: torch.Tensor):
+        retained = ctx.saved_tensors
+        hidden_gradient, weight_gradient = retained[:2]
+        bias_gradient = retained[2] if ctx.has_bias else None
+        return (
+            hidden_gradient * output_gradient,
+            weight_gradient * output_gradient,
+            (
+                None
+                if bias_gradient is None
+                else bias_gradient * output_gradient
+            ),
+            None,
+            None,
+            None,
+        )
+
+
+def mlx_torch_exact_cross_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    mask: torch.Tensor,
+    vocabulary_tile_size: int = 4_096,
+) -> torch.Tensor:
+    """Return exact full-vocabulary CE with MLX execution and PyTorch grads."""
+
+    if vocabulary_tile_size <= 0:
+        raise ValueError("MLX vocabulary tile size must be positive")
+    if hidden.device.type != "cpu" or weight.device.type != "cpu":
+        raise ValueError("the MLX exact-loss bridge requires CPU tensors")
+    if bias is not None and bias.device.type != "cpu":
+        raise ValueError("the MLX exact-loss bridge requires a CPU bias")
+    if labels.device.type != "cpu" or mask.device.type != "cpu":
+        raise ValueError("the MLX exact-loss bridge requires CPU targets")
+    if hidden.ndim < 2 or weight.ndim != 2:
+        raise ValueError("hidden must be rank >=2 and weight must be rank 2")
+    if hidden.shape[-1] != weight.shape[1]:
+        raise ValueError("hidden width must match classifier weight width")
+    if tuple(hidden.shape[:-1]) != tuple(labels.shape):
+        raise ValueError("labels must match the non-channel hidden shape")
+    if tuple(labels.shape) != tuple(mask.shape):
+        raise ValueError("mask must match labels")
+    if labels.dtype not in {
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    }:
+        raise ValueError("labels must have an integer dtype")
+    if mask.dtype != torch.bool:
+        raise ValueError("mask must have boolean dtype")
+    if bias is not None and tuple(bias.shape) != (weight.shape[0],):
+        raise ValueError("bias must have one entry per vocabulary item")
+    valid_labels = labels[mask]
+    if valid_labels.numel() and (
+        int(valid_labels.min()) < 0
+        or int(valid_labels.max()) >= weight.shape[0]
+    ):
+        raise ValueError("valid labels must lie within the vocabulary")
+    if not torch.is_grad_enabled() or not any(
+        value is not None and value.requires_grad
+        for value in (hidden, weight, bias)
+    ):
+        mx = _mlx()
+        try:
+            value = mlx_exact_tiled_cross_entropy(
+                mx.array(hidden.detach().float().contiguous().numpy()),
+                mx.array(weight.detach().float().contiguous().numpy()),
+                mx.array(labels.detach().to(torch.int32).contiguous().numpy()),
+                (
+                    None
+                    if bias is None
+                    else mx.array(bias.detach().float().contiguous().numpy())
+                ),
+                mask=mx.array(mask.detach().contiguous().numpy()),
+                vocabulary_tile_size=vocabulary_tile_size,
+            )
+            mx.eval(value)
+            scalar = float(np.array(value))
+            if not np.isfinite(scalar):
+                raise RuntimeError(
+                    "MLX exact loss produced a non-finite value"
+                )
+            return hidden.new_tensor(scalar)
+        finally:
+            mx.clear_cache()
+    return _MLXTorchExactCrossEntropy.apply(
+        hidden, weight, bias, labels, mask, vocabulary_tile_size,
+    )
 
 
 @dataclass(slots=True)

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import platform
 from queue import Full, Queue
+import shutil
 import tempfile
 from threading import Lock, Thread
 from time import monotonic, perf_counter, sleep
@@ -53,6 +54,10 @@ from .trackio_dashboard import (
 
 
 CHECKPOINT_FORMAT_VERSION = 2
+DEFAULT_TOKENIZER_NAME = "mrcra-unigram-24k"
+DEFAULT_TOKENIZER_VOCABULARY_SIZE = 24_576
+DEFAULT_TOKENIZER_MODEL_FILENAME = "mrcra-unigram-24k.model"
+DEFAULT_TOKENIZER_MANIFEST_FILENAME = "mrcra-unigram-24k.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,11 +75,61 @@ class TokenizedDocument:
 class TextTokenizer(Protocol):
     vocabulary_size: int
     eos_token_id: int
+    pad_token_id: int
+    forbidden_generation_token_ids: tuple[int, ...]
 
     def encode_document(self, text: str) -> TokenizedDocument: ...
+    def encode_documents(
+        self, texts: Sequence[str],
+    ) -> tuple[TokenizedDocument, ...]: ...
     def encode_prompt(self, text: str) -> list[int]: ...
     def decode(self, token_ids: Sequence[int]) -> str: ...
     def identity(self) -> dict[str, Any]: ...
+
+
+def _exact_byte_lengths_from_offsets(
+    text: str,
+    offsets: Sequence[tuple[int, int]],
+    *,
+    offsets_are_utf8_bytes: bool,
+) -> list[int]:
+    """Assign every source byte to exactly one token despite overlapping spans.
+
+    Byte-level tokenizers commonly emit multiple token IDs for one Unicode
+    scalar and repeat its offset for each ID.  Counting each raw span therefore
+    double-counts bytes.  This monotone coverage allocator charges only newly
+    covered bytes and fails closed on gaps, backwards spans, or incomplete
+    coverage.
+    """
+
+    source_bytes = text.encode("utf-8")
+    if offsets_are_utf8_bytes:
+        converted = [(int(start), int(end)) for start, end in offsets]
+        limit = len(source_bytes)
+    else:
+        prefix = [0]
+        for character in text:
+            prefix.append(prefix[-1] + len(character.encode("utf-8")))
+        limit = len(text)
+        converted = []
+        for start, end in offsets:
+            if not 0 <= int(start) <= int(end) <= limit:
+                raise ValueError("tokenizer returned an invalid source-text offset")
+            converted.append((prefix[int(start)], prefix[int(end)]))
+
+    covered = 0
+    lengths: list[int] = []
+    for start, end in converted:
+        if not 0 <= start <= end <= len(source_bytes):
+            raise ValueError("tokenizer returned an invalid UTF-8 byte offset")
+        if start > covered:
+            raise ValueError("tokenizer offsets leave source bytes unrepresented")
+        newly_covered = max(0, end - max(start, covered))
+        lengths.append(newly_covered)
+        covered = max(covered, end)
+    if covered != len(source_bytes):
+        raise ValueError("tokenizer offsets do not exactly cover the source bytes")
+    return lengths
 
 
 class HuggingFaceTextTokenizer:
@@ -92,6 +147,12 @@ class HuggingFaceTextTokenizer:
         self.name, self.revision = name, revision
         self.vocabulary_size = len(tokenizer)
         self.eos_token_id = int(tokenizer.eos_token_id)
+        self.pad_token_id = (
+            self.eos_token_id
+            if getattr(tokenizer, "pad_token_id", None) is None
+            else int(tokenizer.pad_token_id)
+        )
+        self.forbidden_generation_token_ids = ()
 
     def encode_document(self, text: str) -> TokenizedDocument:
         if not isinstance(text, str):
@@ -108,14 +169,17 @@ class HuggingFaceTextTokenizer:
         offsets = encoded["offset_mapping"]
         if len(token_ids) != len(offsets):
             raise ValueError("tokenizer returned misaligned token offsets")
-        byte_lengths = []
-        for start, end in offsets:
-            if not 0 <= start <= end <= len(text):
-                raise ValueError("tokenizer returned an invalid source-text offset")
-            byte_lengths.append(len(text[start:end].encode("utf-8")))
+        byte_lengths = _exact_byte_lengths_from_offsets(
+            text, offsets, offsets_are_utf8_bytes=False,
+        )
         token_ids.append(self.eos_token_id)
         byte_lengths.append(0)
         return TokenizedDocument(tuple(token_ids), tuple(byte_lengths))
+
+    def encode_documents(
+        self, texts: Sequence[str],
+    ) -> tuple[TokenizedDocument, ...]:
+        return tuple(self.encode_document(text) for text in texts)
 
     def encode_prompt(self, text: str) -> list[int]:
         result = self.tokenizer.encode(text, add_special_tokens=False)
@@ -131,6 +195,247 @@ class HuggingFaceTextTokenizer:
             "revision": self.revision,
             "vocabulary_size": self.vocabulary_size,
             "eos_token_id": self.eos_token_id,
+            "pad_token_id": self.pad_token_id,
+        }
+
+
+class SentencePieceTextTokenizer:
+    """Immutable lossless byte-fallback SentencePiece Unigram tokenizer."""
+
+    IDENTITY_SCHEMA_VERSION = 1
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        *,
+        manifest_path: str | Path | None = None,
+    ) -> None:
+        try:
+            import sentencepiece as sentencepiece
+            from sentencepiece import sentencepiece_model_pb2
+        except ImportError as error:
+            raise RuntimeError(
+                "install the 'train' extra to use SentencePiece tokenization"
+            ) from error
+
+        self.model_path = Path(model_path).resolve()
+        self.manifest_path = (
+            self.model_path.with_suffix(".json")
+            if manifest_path is None else Path(manifest_path).resolve()
+        )
+        if not self.model_path.is_file() or not self.manifest_path.is_file():
+            raise FileNotFoundError(
+                "SentencePiece requires both an immutable .model artifact and "
+                "its provenance .json manifest"
+            )
+        model_bytes = self.model_path.read_bytes()
+        manifest_bytes = self.manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("SentencePiece provenance manifest is invalid") from error
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+            raise ValueError("unsupported SentencePiece provenance manifest")
+
+        model_digest = sha256(model_bytes).hexdigest()
+        if manifest.get("model_sha256") != model_digest:
+            raise ValueError("SentencePiece model digest differs from its manifest")
+        processor = sentencepiece.SentencePieceProcessor(
+            model_proto=model_bytes,
+        )
+        model_proto = sentencepiece_model_pb2.ModelProto()
+        model_proto.ParseFromString(model_bytes)
+        trainer = model_proto.trainer_spec
+        normalizer = model_proto.normalizer_spec
+        if (
+            int(trainer.model_type) != 1
+            or not bool(trainer.byte_fallback)
+            or normalizer.name != "identity"
+            or bool(normalizer.add_dummy_prefix)
+            or bool(normalizer.remove_extra_whitespaces)
+        ):
+            raise ValueError(
+                "MRCRA requires Unigram, byte fallback, identity normalization, "
+                "no dummy prefix, and exact whitespace preservation"
+            )
+        vocabulary_size = int(processor.vocab_size())
+        if manifest.get("vocabulary_size") != vocabulary_size:
+            raise ValueError("SentencePiece vocabulary size differs from its manifest")
+        if vocabulary_size < 258:
+            raise ValueError("production SentencePiece vocabulary is unexpectedly small")
+        if processor.eos_id() < 0 or processor.unk_id() < 0:
+            raise ValueError("SentencePiece model requires EOS and UNK identifiers")
+        if processor.bos_id() >= 0 or processor.pad_id() >= 0:
+            raise ValueError(
+                "MRCRA SentencePiece models keep BOS/PAD out of the learned "
+                "vocabulary; masked packing uses EOS as inert padding"
+            )
+        special_ids = manifest.get("special_token_ids")
+        expected_special = {
+            "unknown": int(processor.unk_id()),
+            "document_end": int(processor.eos_id()),
+        }
+        if special_ids != expected_special:
+            raise ValueError("SentencePiece special-token map differs from its manifest")
+        corpus = manifest.get("training_corpus")
+        if (
+            not isinstance(corpus, dict)
+            or not isinstance(corpus.get("sha256"), str)
+            or len(corpus["sha256"]) != 64
+        ):
+            raise ValueError("SentencePiece manifest lacks a corpus digest")
+        vocabulary_name = manifest.get("vocabulary_artifact")
+        vocabulary_digest = manifest.get("vocabulary_sha256")
+        if not isinstance(vocabulary_name, str) or Path(vocabulary_name).name != vocabulary_name:
+            raise ValueError("SentencePiece manifest lacks a safe vocabulary artifact name")
+        if not isinstance(vocabulary_digest, str) or len(vocabulary_digest) != 64:
+            raise ValueError("SentencePiece manifest lacks a vocabulary digest")
+        vocabulary_path = self.manifest_path.parent / vocabulary_name
+        if not vocabulary_path.is_file():
+            raise FileNotFoundError(
+                "SentencePiece human-auditable vocabulary artifact is missing"
+            )
+        if sha256(vocabulary_path.read_bytes()).hexdigest() != vocabulary_digest:
+            raise ValueError(
+                "SentencePiece vocabulary digest differs from its manifest"
+            )
+
+        self.processor = processor
+        self.manifest = manifest
+        self.vocabulary_size = vocabulary_size
+        self.eos_token_id = int(processor.eos_id())
+        self.pad_token_id = self.eos_token_id
+        self.unk_token_id = int(processor.unk_id())
+        self.forbidden_generation_token_ids = (self.unk_token_id,)
+        self.model_sha256 = model_digest
+        self.manifest_sha256 = sha256(manifest_bytes).hexdigest()
+        self.vocabulary_path = vocabulary_path.resolve()
+        self.vocabulary_sha256 = vocabulary_digest
+        # Prove the loaded immutable model's promised byte-fallback behavior
+        # once. Re-decoding every FineWeb document adds a complete second
+        # token traversal to the hot path despite the model and normalization
+        # contract being fixed by cryptographic digest.
+        contract_probe = (
+            "".join(chr(value) for value in range(256))
+            + "🙂漢字e\u0301\r\n\t"
+        )
+        probe_ids = [
+            int(value)
+            for value in processor.encode(contract_probe, out_type=int)
+        ]
+        if (
+            self.unk_token_id in probe_ids
+            or processor.decode(probe_ids).encode("utf-8")
+            != contract_probe.encode("utf-8")
+        ):
+            raise ValueError(
+                "SentencePiece model failed its lossless byte-fallback probe"
+            )
+
+    def _document_from_proto(
+        self, text: str, proto: Any,
+    ) -> TokenizedDocument:
+        """Convert native SentencePiece offsets in one checked traversal."""
+
+        source_byte_count = len(text.encode("utf-8"))
+        covered = 0
+        token_ids: list[int] = []
+        byte_lengths: list[int] = []
+        for piece in proto.pieces:
+            token_id = int(piece.id)
+            start, end = int(piece.begin), int(piece.end)
+            if token_id == self.unk_token_id:
+                raise ValueError(
+                    "byte-fallback SentencePiece unexpectedly emitted UNK"
+                )
+            if (
+                token_id < 0
+                or token_id >= self.vocabulary_size
+                or not 0 <= start <= end <= source_byte_count
+                or start > covered
+            ):
+                raise ValueError(
+                    "SentencePiece returned invalid token or UTF-8 offsets"
+                )
+            token_ids.append(token_id)
+            byte_lengths.append(
+                max(0, end - max(start, covered))
+            )
+            covered = max(covered, end)
+        if covered != source_byte_count:
+            raise ValueError(
+                "SentencePiece offsets do not exactly cover source bytes"
+            )
+        token_ids.append(self.eos_token_id)
+        byte_lengths.append(0)
+        return TokenizedDocument(
+            tuple(token_ids), tuple(byte_lengths),
+        )
+
+    def encode_document(self, text: str) -> TokenizedDocument:
+        if not isinstance(text, str):
+            raise TypeError("document text must be a string")
+        proto = self.processor.encode(text, out_type="proto")
+        return self._document_from_proto(text, proto)
+
+    def encode_documents(
+        self, texts: Sequence[str],
+    ) -> tuple[TokenizedDocument, ...]:
+        values = tuple(texts)
+        if any(not isinstance(text, str) for text in values):
+            raise TypeError("document text must be a string")
+        if not values:
+            return ()
+        protos = self.processor.encode(
+            list(values),
+            out_type="proto",
+            # Two native workers improve the measured Unigram dynamic program
+            # while leaving CPU capacity for the concurrently executing model.
+            num_threads=2,
+        )
+        if len(protos) != len(values):
+            raise RuntimeError(
+                "SentencePiece batch encoding changed document cardinality"
+            )
+        return tuple(
+            self._document_from_proto(text, proto)
+            for text, proto in zip(values, protos, strict=True)
+        )
+
+    def encode_prompt(self, text: str) -> list[int]:
+        if not isinstance(text, str):
+            raise TypeError("prompt text must be a string")
+        result = [int(value) for value in self.processor.encode(text, out_type=int)]
+        if self.unk_token_id in result:
+            raise ValueError("byte-fallback SentencePiece unexpectedly emitted UNK")
+        if self.processor.decode(result).encode("utf-8") != text.encode("utf-8"):
+            raise ValueError("SentencePiece failed its byte-exact round-trip contract")
+        return result or [self.eos_token_id]
+
+    def decode(self, token_ids: Sequence[int]) -> str:
+        values = [int(value) for value in token_ids]
+        if any(value < 0 or value >= self.vocabulary_size for value in values):
+            raise ValueError("token id lies outside the SentencePiece vocabulary")
+        return self.processor.decode(values)
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "kind": "sentencepiece",
+            "schema_version": self.IDENTITY_SCHEMA_VERSION,
+            "model_type": "unigram",
+            "model_sha256": self.model_sha256,
+            "manifest_sha256": self.manifest_sha256,
+            "artifact_filename": self.model_path.name,
+            "manifest_filename": self.manifest_path.name,
+            "vocabulary_filename": self.vocabulary_path.name,
+            "vocabulary_sha256": self.vocabulary_sha256,
+            "vocabulary_size": self.vocabulary_size,
+            "eos_token_id": self.eos_token_id,
+            "pad_token_id": self.pad_token_id,
+            "unk_token_id": self.unk_token_id,
+            "byte_fallback": True,
+            "normalization": "identity",
+            "training_corpus": self.manifest["training_corpus"],
         }
 
 
@@ -139,10 +444,17 @@ class ByteTextTokenizer:
 
     vocabulary_size = 257
     eos_token_id = 256
+    pad_token_id = 256
+    forbidden_generation_token_ids: tuple[int, ...] = ()
 
     def encode_document(self, text: str) -> TokenizedDocument:
         values = list(text.encode("utf-8"))
         return TokenizedDocument(tuple(values + [self.eos_token_id]), tuple([1] * len(values) + [0]))
+
+    def encode_documents(
+        self, texts: Sequence[str],
+    ) -> tuple[TokenizedDocument, ...]:
+        return tuple(self.encode_document(text) for text in texts)
 
     def encode_prompt(self, text: str) -> list[int]:
         return list(text.encode("utf-8")) or [self.eos_token_id]
@@ -155,7 +467,126 @@ class ByteTextTokenizer:
             "kind": "utf8-bytes",
             "vocabulary_size": self.vocabulary_size,
             "eos_token_id": self.eos_token_id,
+            "pad_token_id": self.pad_token_id,
         }
+
+
+def canonical_sentencepiece_paths() -> tuple[Path, Path]:
+    """Return packaged paths for the canonical MRCRA tokenizer artifacts."""
+
+    directory = Path(__file__).resolve().parent / "tokenizers"
+    return (
+        directory / DEFAULT_TOKENIZER_MODEL_FILENAME,
+        directory / DEFAULT_TOKENIZER_MANIFEST_FILENAME,
+    )
+
+
+def load_text_tokenizer(
+    name_or_path: str = DEFAULT_TOKENIZER_NAME,
+    *,
+    revision: str = "main",
+    manifest_path: str | Path | None = None,
+) -> TextTokenizer:
+    """Load the canonical tokenizer, a local SentencePiece model, or HF control."""
+
+    if name_or_path == DEFAULT_TOKENIZER_NAME:
+        model, manifest = canonical_sentencepiece_paths()
+        return SentencePieceTextTokenizer(model, manifest_path=manifest)
+    path = Path(name_or_path)
+    if path.suffix == ".model" or path.is_file():
+        return SentencePieceTextTokenizer(path, manifest_path=manifest_path)
+    if manifest_path is not None:
+        raise ValueError("--tokenizer-manifest applies only to SentencePiece models")
+    return HuggingFaceTextTokenizer(name_or_path, revision=revision)
+
+
+def tokenizer_from_identity(
+    identity: dict[str, Any],
+    *,
+    search_roots: Sequence[str | Path] = (),
+) -> TextTokenizer:
+    """Reconstruct and verify a tokenizer from checkpoint identity."""
+
+    kind = identity.get("kind")
+    if kind == "huggingface":
+        tokenizer: TextTokenizer = HuggingFaceTextTokenizer(
+            identity["name"], revision=identity["revision"],
+        )
+    elif kind == "sentencepiece":
+        model_name = identity.get("artifact_filename")
+        manifest_name = identity.get("manifest_filename")
+        if not isinstance(model_name, str) or not isinstance(manifest_name, str):
+            raise ValueError("SentencePiece checkpoint identity lacks artifact names")
+        candidates: list[tuple[Path, Path]] = []
+        for raw_root in search_roots:
+            root = Path(raw_root)
+            candidates.extend((
+                (root / model_name, root / manifest_name),
+                (root / "tokenizer" / model_name, root / "tokenizer" / manifest_name),
+            ))
+        canonical_model, canonical_manifest = canonical_sentencepiece_paths()
+        candidates.append((canonical_model, canonical_manifest))
+        tokenizer = None
+        observed_errors: list[Exception] = []
+        observed_artifact = False
+        for model, manifest in candidates:
+            if not model.is_file() or not manifest.is_file():
+                continue
+            observed_artifact = True
+            try:
+                candidate = SentencePieceTextTokenizer(
+                    model, manifest_path=manifest,
+                )
+            except (FileNotFoundError, ValueError) as error:
+                observed_errors.append(error)
+                continue
+            if candidate.identity() == identity:
+                tokenizer = candidate
+                break
+        if tokenizer is None and not observed_artifact:
+            raise FileNotFoundError(
+                "checkpoint tokenizer artifacts were not found in the package "
+                "or beside the retained run"
+            )
+        if tokenizer is None:
+            raise ValueError(
+                "available SentencePiece artifact differs from checkpoint identity"
+            ) from (observed_errors[-1] if observed_errors else None)
+    elif kind == "utf8-bytes":
+        tokenizer = ByteTextTokenizer()
+    else:
+        raise ValueError("checkpoint names an unsupported tokenizer kind")
+    if tokenizer.identity() != identity:
+        raise ValueError("loaded tokenizer differs from checkpoint identity")
+    return tokenizer
+
+
+def materialize_tokenizer_artifacts(
+    tokenizer: TextTokenizer,
+    output_directory: str | Path,
+) -> tuple[Path, ...]:
+    """Copy immutable local tokenizer evidence into a self-contained run."""
+
+    if not isinstance(tokenizer, SentencePieceTextTokenizer):
+        return ()
+    destination = Path(output_directory) / "tokenizer"
+    destination.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for source in (
+        tokenizer.model_path,
+        tokenizer.manifest_path,
+        tokenizer.vocabulary_path,
+    ):
+        target = destination / source.name
+        if target.exists():
+            if sha256(target.read_bytes()).digest() != sha256(source.read_bytes()).digest():
+                raise ValueError("run directory contains a different tokenizer artifact")
+        else:
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+        copied.append(target)
+    return tuple(copied)
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,6 +870,8 @@ class PackedBatch:
 class PackedTokenStream:
     """Lossless document packing with one-token overlap between sequence blocks."""
 
+    TOKENIZER_BATCH_DOCUMENTS = 16
+
     def __init__(self, source: StatefulTextSource, tokenizer: TextTokenizer) -> None:
         self.source, self.tokenizer = source, tokenizer
         self.token_buffer: list[int] = []
@@ -455,18 +888,51 @@ class PackedTokenStream:
         if self._iterator is None:
             self._iterator = iter(self.source)
         while len(self.token_buffer) < required:
-            document = next(self._iterator)
-            encoded = self.tokenizer.encode_document(document.text)
-            if max(encoded.token_ids) >= self.tokenizer.vocabulary_size:
-                raise ValueError("tokenizer emitted an id outside its declared vocabulary")
-            self.token_buffer.extend(encoded.token_ids)
-            self.byte_buffer.extend(encoded.byte_lengths)
-            self.segment_buffer.extend([self.next_segment_id] * len(encoded.token_ids))
-            self.source_buffer.extend(
-                [f"dataset://document/{document.identifier}"] * len(encoded.token_ids)
+            documents: list[TextDocument] = []
+            for _ in range(self.TOKENIZER_BATCH_DOCUMENTS):
+                try:
+                    documents.append(next(self._iterator))
+                except StopIteration:
+                    if not documents:
+                        raise
+                    break
+            batch_encoder = getattr(
+                self.tokenizer, "encode_documents", None
             )
-            self.next_segment_id += 1
-            self.documents_packed += 1
+            encoded_documents = (
+                tuple(
+                    self.tokenizer.encode_document(document.text)
+                    for document in documents
+                )
+                if batch_encoder is None
+                else tuple(
+                    batch_encoder(
+                        tuple(document.text for document in documents)
+                    )
+                )
+            )
+            if len(encoded_documents) != len(documents):
+                raise RuntimeError(
+                    "tokenizer batch changed document cardinality"
+                )
+            for document, encoded in zip(
+                documents, encoded_documents, strict=True,
+            ):
+                if max(encoded.token_ids) >= self.tokenizer.vocabulary_size:
+                    raise ValueError(
+                        "tokenizer emitted an id outside its declared vocabulary"
+                    )
+                self.token_buffer.extend(encoded.token_ids)
+                self.byte_buffer.extend(encoded.byte_lengths)
+                self.segment_buffer.extend(
+                    [self.next_segment_id] * len(encoded.token_ids)
+                )
+                self.source_buffer.extend(
+                    [f"dataset://document/{document.identifier}"]
+                    * len(encoded.token_ids)
+                )
+                self.next_segment_id += 1
+                self.documents_packed += 1
 
     def next_batch(self, batch_size: int, sequence_length: int) -> PackedBatch:
         if min(batch_size, sequence_length) <= 0:
@@ -1455,6 +1921,7 @@ class NextTokenTrainer:
             raise ValueError("evaluation batches must match the configured batch and sequence sizes")
         self.model, self.tokenizer, self.train_stream = model, tokenizer, train_stream
         self.config = config
+        materialize_tokenizer_artifacts(tokenizer, config.output_dir)
         self.device = _device_for(config.device)
         _configure_cuda(self.device)
         self.amp_dtype = _precision_for(self.device, config.precision)
@@ -1699,6 +2166,9 @@ class NextTokenTrainer:
                 prompt,
                 maximum_new_tokens=self.config.generation_tokens,
                 eos_token_id=self.tokenizer.eos_token_id,
+                forbidden_token_ids=(
+                    self.tokenizer.forbidden_generation_token_ids
+                ),
                 temperature=0.8,
                 top_k=50,
                 top_p=0.95,

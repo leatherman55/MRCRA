@@ -61,3 +61,23 @@ def test_resource_soak_acceptance_rejects_growth_leaks_and_accounting_drift():
         "wall_clock_accounting_error",
         "nonfinite_metrics",
     }.issubset(failed)
+
+
+def test_resource_soak_acceptance_does_not_call_process_resume_baseline_a_leak():
+    first = tuple(
+        (1_500 << 20) - index * (10 << 20)
+        for index in range(50)
+    )
+    second = tuple(
+        (2_800 << 20) + min(index, 8) * (2 << 20)
+        for index in range(50)
+    )
+    report = build_resource_soak_report(
+        replace(passing_sample(), rss_bytes=first + second)
+    )
+    assert report.passed
+    measurements = {
+        item.name: item.measurement for item in report.criteria
+    }
+    assert measurements["rss_growth_slope"] <= 1 << 20
+    assert measurements["rss_range"] == 16 << 20
