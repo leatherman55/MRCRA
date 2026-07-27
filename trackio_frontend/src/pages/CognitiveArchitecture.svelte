@@ -1,7 +1,12 @@
 <script>
   import { onMount } from "svelte";
   import { getArtifactBlobUrl, getArtifactManifest, getRunArtifacts } from "../lib/api.js";
-  import { getAppPollIntervalMs, isRateLimitCooldownActive, isTabHidden } from "../lib/hostPolling.js";
+  import {
+    createSingleFlightPoller,
+    getAppPollIntervalMs,
+    isRateLimitCooldownActive,
+    isTabHidden,
+  } from "../lib/hostPolling.js";
   import {
     causalTimeline,
     deliberationLattice,
@@ -17,6 +22,7 @@
   let loadedKey = $state("");
   let view = $state("reconstruction");
   let requestId = 0;
+  const runEvidencePoll = createSingleFlightPoller();
   const views = [
     ["reconstruction", "Reconstructive Descent"],
     ["deliberation", "Deliberation Lattice"],
@@ -90,7 +96,9 @@
   onMount(() => {
     const timer = setInterval(() => {
       if (!realtimeEnabled || isTabHidden() || isRateLimitCooldownActive()) return;
-      loadEvidence({ quiet: true });
+      runEvidencePoll(() => loadEvidence({ quiet: true })).catch((cause) => {
+        console.error("Failed to poll cognitive evidence:", cause);
+      });
     }, getAppPollIntervalMs());
     return () => clearInterval(timer);
   });

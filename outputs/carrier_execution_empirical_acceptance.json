@@ -1,0 +1,172 @@
+{
+  "claim_boundary": "Mechanism-level float64 CPU evidence for exact custom adjoints, coarse checkpoint continuity, and deterministic document batching, plus finite float32 forward/backward smoke tests on every locally available execution device. This does not claim a target GPU/MPS throughput multiplier.",
+  "criteria": [
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "affine_scan_forward_error",
+      "passed": true,
+      "threshold": 1e-11,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 1.7763568394002505e-15,
+      "name": "affine_scan_gradient_error",
+      "passed": true,
+      "threshold": 1e-10,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.218213058419244,
+      "name": "affine_scan_saved_tensor_byte_ratio",
+      "passed": true,
+      "threshold": 0.75,
+      "unit": "ratio"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 3.0,
+      "name": "affine_scan_saved_tensor_count",
+      "passed": true,
+      "threshold": 3.0,
+      "unit": "tensors"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "simplex_residual_forward_error",
+      "passed": true,
+      "threshold": 1e-12,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "simplex_residual_gradient_error",
+      "passed": true,
+      "threshold": 1e-11,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.37037037037037035,
+      "name": "simplex_residual_autograd_node_ratio",
+      "passed": true,
+      "threshold": 0.75,
+      "unit": "ratio"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "coarse_checkpoint_forward_error",
+      "passed": true,
+      "threshold": 1e-10,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "coarse_checkpoint_input_gradient_error",
+      "passed": true,
+      "threshold": 1e-09,
+      "unit": "absolute"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.0,
+      "name": "coarse_checkpoint_continuation_state_error",
+      "passed": true,
+      "threshold": 1e-10,
+      "unit": "absolute"
+    },
+    {
+      "direction": "minimum",
+      "measurement": 1.0,
+      "name": "coarse_checkpoint_receipt_present",
+      "passed": true,
+      "threshold": 1.0,
+      "unit": "boolean"
+    },
+    {
+      "direction": "minimum",
+      "measurement": 1.0,
+      "name": "document_target_bijection",
+      "passed": true,
+      "threshold": 1.0,
+      "unit": "boolean"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.3333333333333333,
+      "name": "document_physical_invocation_ratio",
+      "passed": true,
+      "threshold": 0.75,
+      "unit": "ratio"
+    },
+    {
+      "direction": "minimum",
+      "measurement": 0.6666666666666666,
+      "name": "document_padding_efficiency",
+      "passed": true,
+      "threshold": 0.6,
+      "unit": "ratio"
+    },
+    {
+      "direction": "maximum",
+      "measurement": 0.6749097103360168,
+      "name": "document_cost_ratio_vs_exact_signature",
+      "passed": true,
+      "threshold": 1.0,
+      "unit": "ratio"
+    },
+    {
+      "direction": "minimum",
+      "measurement": 1.0,
+      "name": "portable_cpu_forward_backward_finite",
+      "passed": true,
+      "threshold": 1.0,
+      "unit": "boolean"
+    },
+    {
+      "direction": "minimum",
+      "measurement": 1.0,
+      "name": "portable_mps_forward_backward_finite",
+      "passed": true,
+      "threshold": 1.0,
+      "unit": "boolean"
+    }
+  ],
+  "device": "cpu,mps",
+  "dtype": "float64-audit+float32-device-smoke",
+  "format_version": 1,
+  "passed": true,
+  "suite": "mrcra-carrier-execution-optimization",
+  "telemetry": {
+    "checkpoint_granularity": "whole_carrier_span",
+    "checkpoint_history_tensor_count": 9,
+    "checkpoint_state_tensor_count": 16,
+    "cuda_available": false,
+    "document_cohorts": 2,
+    "document_cost_ratio_vs_exact_signature": 0.6749097103360168,
+    "document_count": 6,
+    "document_exact_signature_estimated_cost": 131265.025,
+    "document_logical_spans": 6,
+    "document_physical_invocations": 2,
+    "document_physical_tokens": 48,
+    "document_selected_estimated_cost": 88592.04,
+    "document_target_digest": "327904fbec8dcae49d356265385e9562e08dcf847352dc30392570a7569d91aa",
+    "document_valid_tokens": 32,
+    "mps_available": true,
+    "portable_devices_tested": "cpu,mps",
+    "scan_optimized_forward_seconds": 0.0005623750039376318,
+    "scan_optimized_saved_bytes": 24384,
+    "scan_optimized_saved_tensors": 3,
+    "scan_reference_forward_seconds": 0.0007174169877544045,
+    "scan_reference_saved_bytes": 111744,
+    "scan_reference_saved_tensors": 58,
+    "simplex_optimized_autograd_nodes": 10,
+    "simplex_reference_autograd_nodes": 27
+  }
+}

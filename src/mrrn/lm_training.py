@@ -16,8 +16,10 @@ from math import ceil, exp, isfinite, log
 import os
 from pathlib import Path
 import platform
+from queue import Full, Queue
 import tempfile
-from time import perf_counter
+from threading import Lock, Thread
+from time import monotonic, perf_counter, sleep
 from typing import Any, Iterable, Iterator, Protocol, Sequence
 
 try:
@@ -704,7 +706,10 @@ class LMTrainingConfig:
     trackio_project: str = "mrrn-fineweb"
     run_name: str = "mrrn-4p7m-fineweb-stable-20m"
     trackio_space_id: str | None = None
-    show_dashboard: bool = True
+    trackio_remote_log_interval: int = 4
+    # Logging remains authoritative by default.  The resource-intensive local
+    # web observer is opt-in and can run in a separate process.
+    show_dashboard: bool = False
     spectral_dashboard: bool = True
     spectral_snapshot_interval: int = 100
     spectral_snapshot_tokens: int = 32
@@ -725,6 +730,7 @@ class LMTrainingConfig:
             self.gradient_warning_norm, self.gradient_abort_norm,
             self.stability_patience,
             self.spectral_snapshot_interval, self.spectral_snapshot_tokens,
+            self.trackio_remote_log_interval,
         )
         if min(positive) <= 0:
             raise ValueError("token, batch, interval, and limit controls must be positive")
@@ -883,6 +889,56 @@ class TrackioReporter:
                 os.environ.pop("TRACKIO_FRONTEND_DIR", None)
             else:
                 os.environ["TRACKIO_FRONTEND_DIR"] = previous_frontend
+        # Keep one bounded append stream instead of reopening the local
+        # authority file on every optimizer step.  Metric rows are flushed at
+        # a fixed cadence; alerts, artifacts, remote backpressure, and finish
+        # force durability immediately.
+        self._metric_handle = self.metric_path.open(
+            "a",
+            encoding="utf-8",
+            buffering=64 * 1024,
+        )
+        self._metric_lock = Lock()
+        self._metric_rows_since_flush = 0
+        self._metric_flush_interval = 16
+        self._remote_queue: Queue[
+            tuple[int, dict[str, float]] | object
+        ] = Queue(maxsize=64)
+        self._remote_stop = object()
+        self._remote_error: Exception | None = None
+        self._remote_dropped = 0
+        self._remote_drain_timeouts = 0
+        self._remote_coalesced_metric_rows = 0
+        self._pending_remote_metric: (
+            tuple[int, dict[str, float]] | None
+        ) = None
+        self._remote_log_interval = config.trackio_remote_log_interval
+        self._checkpoint_alerts_seen = 0
+        self._checkpoint_alerts_remotely_coalesced = 0
+
+        def remote_worker() -> None:
+            while True:
+                item = self._remote_queue.get()
+                try:
+                    if item is self._remote_stop:
+                        return
+                    step, metrics = item
+                    self.trackio.log(metrics, step=step)
+                except Exception as error:
+                    # Trackio is observational. Preserve the first failure for
+                    # a local receipt while training metrics continue to the
+                    # authoritative JSONL mirror.
+                    if self._remote_error is None:
+                        self._remote_error = error
+                finally:
+                    self._remote_queue.task_done()
+
+        self._remote_thread = Thread(
+            target=remote_worker,
+            name="mrrn-trackio-log-writer",
+            daemon=True,
+        )
+        self._remote_thread.start()
         if config.show_dashboard and config.trackio_space_id is None:
             try:
                 trackio.show(
@@ -896,31 +952,156 @@ class TrackioReporter:
             except Exception as error:
                 self._write({"kind": "dashboard_warning", "message": str(error)})
 
+    def _flush_metric_mirror(self) -> None:
+        with self._metric_lock:
+            self._metric_handle.flush()
+            self._metric_rows_since_flush = 0
+
     def _write(self, payload: dict[str, Any]) -> None:
-        with self.metric_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
+        metric_row = payload.get("kind") == "metrics"
+        with self._metric_lock:
+            self._metric_handle.write(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            self._metric_rows_since_flush += 1
+            if (
+                not metric_row
+                or self._metric_rows_since_flush
+                >= self._metric_flush_interval
+            ):
+                self._metric_handle.flush()
+                self._metric_rows_since_flush = 0
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         cleaned = {name: float(value) for name, value in metrics.items()}
         if not all(isfinite(value) for value in cleaned.values()):
             raise FloatingPointError("refusing to log non-finite training metrics")
-        self.trackio.log(cleaned, step=step)
         self._write({"kind": "metrics", "step": step, "metrics": cleaned})
+        if step % self._remote_log_interval:
+            if self._pending_remote_metric is not None:
+                self._remote_coalesced_metric_rows += 1
+            self._pending_remote_metric = (step, cleaned)
+            return
+        if self._pending_remote_metric is not None:
+            self._remote_coalesced_metric_rows += 1
+            self._pending_remote_metric = None
+        try:
+            self._remote_queue.put_nowait((step, cleaned))
+        except Full:
+            # The complete local stream remains authoritative; bounded remote
+            # backpressure may omit dashboard-only intermediate points.
+            self._remote_dropped += 1
+            self._flush_metric_mirror()
+
+    def _enqueue_pending_remote_metric(
+        self, *, deadline: float,
+    ) -> bool:
+        pending = self._pending_remote_metric
+        if pending is None:
+            return True
+        while monotonic() < deadline:
+            try:
+                self._remote_queue.put_nowait(pending)
+                self._pending_remote_metric = None
+                return True
+            except Full:
+                sleep(0.001)
+        self._remote_dropped += 1
+        self._pending_remote_metric = None
+        self._flush_metric_mirror()
+        return False
+
+    def _drain_remote_logs(self, *, timeout_seconds: float = 5.0) -> bool:
+        """Wait a bounded time for observational delivery.
+
+        ``Queue.join`` has no timeout and can deadlock training shutdown if a
+        third-party logging call stops returning. Polling the queue's protected
+        unfinished-task counter keeps the training authority bounded.
+        """
+
+        if timeout_seconds <= 0:
+            raise ValueError("Trackio drain timeout must be positive")
+        deadline = monotonic() + timeout_seconds
+        if not self._enqueue_pending_remote_metric(deadline=deadline):
+            self._remote_drain_timeouts += 1
+            return False
+        while monotonic() < deadline:
+            with self._remote_queue.all_tasks_done:
+                if self._remote_queue.unfinished_tasks == 0:
+                    return True
+            sleep(0.005)
+        self._remote_drain_timeouts += 1
+        return False
 
     def alert(self, title: str, text: str, *, level: str, step: int) -> None:
+        if level not in {"info", "warn", "error"}:
+            raise ValueError("unknown Trackio alert level")
+        checkpoint_alert = title == "MRCRA checkpoint saved" and level == "info"
+        if checkpoint_alert:
+            self._checkpoint_alerts_seen += 1
+        # Preserve every alert in the authoritative local stream. Repetitive
+        # success notices are sent remotely on the first occurrence and every
+        # tenth checkpoint; warnings, errors, and first-event alerts are never
+        # coalesced.
+        coalesced = (
+            checkpoint_alert
+            and self._checkpoint_alerts_seen != 1
+            and self._checkpoint_alerts_seen % 10 != 0
+        )
+        if coalesced:
+            self._checkpoint_alerts_remotely_coalesced += 1
+            self._write({
+                "kind": "alert",
+                "step": step,
+                "title": title,
+                "text": text,
+                "level": level,
+                "remote_coalesced": True,
+            })
+            return
+        drained = self._drain_remote_logs()
         alert_level = {
             "info": self.trackio.AlertLevel.INFO,
             "warn": self.trackio.AlertLevel.WARN,
             "error": self.trackio.AlertLevel.ERROR,
         }[level]
-        self.trackio.alert(title=title, text=text, level=alert_level)
-        self._write({"kind": "alert", "step": step, "title": title, "text": text, "level": level})
+        if drained:
+            try:
+                self.trackio.alert(
+                    title=title, text=text, level=alert_level
+                )
+            except Exception as error:
+                if self._remote_error is None:
+                    self._remote_error = error
+        self._write({
+            "kind": "alert",
+            "step": step,
+            "title": title,
+            "text": text,
+            "level": level,
+            "remote_coalesced": False,
+            "remote_delivery_attempted": drained,
+        })
 
     def log_spectral_evidence(self, evidence: dict[str, Any], *, step: int) -> int:
         """Version a complete evidence snapshot as a Trackio run artifact."""
 
         if not self.config.spectral_dashboard:
             return 0
+        if not self._drain_remote_logs():
+            self._write({
+                "kind": "spectral_snapshot_deferred",
+                "step": step,
+                "reason": "remote metric queue did not drain within its bound",
+            })
+            return 0
+        self._flush_metric_mirror()
         baseline = self.config.spectral_baseline_metrics
         if baseline is None:
             candidate = Path(self.config.output_dir).parent / "fineweb-4p7m" / "metrics.jsonl"
@@ -967,6 +1148,14 @@ class TrackioReporter:
     def log_phase_transition_trace(self, path: Path, *, step: int) -> int:
         """Persist the first hard-event receipt as a versioned Trackio artifact."""
 
+        if not self._drain_remote_logs():
+            self._write({
+                "kind": "phase_transition_trace_deferred",
+                "step": step,
+                "path": str(path),
+                "reason": "remote metric queue did not drain within its bound",
+            })
+            return 0
         artifact = self.trackio.Artifact(
             "mrcra-first-hard-event",
             type="mrcra-phase-transition",
@@ -993,7 +1182,51 @@ class TrackioReporter:
         return version
 
     def finish(self) -> None:
-        self.trackio.finish()
+        drained = self._drain_remote_logs()
+        if drained:
+            try:
+                self._remote_queue.put_nowait(self._remote_stop)
+            except Full:  # pragma: no cover - drain guarantees room
+                drained = False
+        if drained:
+            self._remote_thread.join(timeout=5.0)
+        worker_alive = self._remote_thread.is_alive()
+        if (
+            self._remote_dropped
+            or self._remote_error is not None
+            or self._remote_drain_timeouts
+            or self._remote_coalesced_metric_rows
+            or self._checkpoint_alerts_remotely_coalesced
+            or worker_alive
+        ):
+            self._write({
+                "kind": "trackio_remote_summary",
+                "dropped_remote_metric_rows": self._remote_dropped,
+                "coalesced_remote_metric_rows": (
+                    self._remote_coalesced_metric_rows
+                ),
+                "drain_timeouts": self._remote_drain_timeouts,
+                "worker_alive_at_bounded_finish": worker_alive,
+                "checkpoint_alerts_remotely_coalesced": (
+                    self._checkpoint_alerts_remotely_coalesced
+                ),
+                "error": (
+                    None
+                    if self._remote_error is None
+                    else f"{type(self._remote_error).__name__}: "
+                    f"{self._remote_error}"
+                ),
+            })
+        if not worker_alive:
+            try:
+                self.trackio.finish()
+            except Exception as error:
+                self._write({
+                    "kind": "trackio_finish_warning",
+                    "error": f"{type(error).__name__}: {error}",
+                })
+        self._flush_metric_mirror()
+        self._metric_handle.close()
 
 
 def _device_for(selection: str) -> torch.device:

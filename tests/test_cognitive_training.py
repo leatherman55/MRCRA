@@ -1,5 +1,7 @@
 from dataclasses import replace
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,7 +11,8 @@ import mrrn.cognitive_training as cognitive_training
 from mrrn.cognitive_training import (
     MRCRANextTokenTrainer, MRCRATrainingConfig,
     _concatenate_event_phase_logits, _diagnostic_snapshot_due,
-    event_phase_metrics, exact_fused_cross_entropy, exact_tiled_cross_entropy,
+    event_phase_metrics, exact_cut_cross_entropy,
+    exact_fused_cross_entropy, exact_tiled_cross_entropy,
 )
 from mrrn.controller import OperationalSchemaState
 from mrrn.config import CognitiveConfig, MRCRAConfig, MRRNConfig
@@ -158,6 +161,163 @@ def training_config(path):
         micro_batch_size=1, gradient_accumulation_steps=1,
         warmup_tokens=8, trackio_enabled=False, show_dashboard=False,
         spectral_dashboard=False, checkpoint_interval=10,
+        activation_calibration=False,
+    )
+
+
+def test_sampled_cstm_fails_closed_without_document_major_authority(tmp_path):
+    with pytest.raises(ValueError, match="sampled CSTM requires"):
+        replace(
+            training_config(tmp_path),
+            integrated_cognitive_path=True,
+            document_static_batching=False,
+            cstm_enabled=True,
+            cstm_execution="sampled",
+            cognitive_stride=2,
+        )
+    reference = replace(
+        training_config(tmp_path),
+        integrated_cognitive_path=True,
+        document_static_batching=False,
+        cstm_enabled=True,
+        cstm_execution="legacy_dense",
+        cognitive_stride=2,
+    )
+    assert reference.cstm_execution == "legacy_dense"
+
+
+def test_pre_optimizer_oom_replays_cached_batch_once_under_safer_policy(
+    tmp_path, monkeypatch,
+):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "oom-recovery"),
+        total_tokens=8,
+        activation_policy="retain",
+        activation_memory_reserve_bytes=1,
+        cstm_enabled=False,
+    )
+    stream = PackedTokenStream(
+        SequenceTextSource(("recoverable allocator pressure",)),
+        tokenizer,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        stream,
+        config,
+    )
+    original = trainer._run_context
+    calls = 0
+
+    def fail_first(batch, *, gradient_divisor):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            trainer.model.cstm_predictor.target_second_moment.fill_(999)
+            trainer.cstm_coverage.predictor_updates = 7
+            raise torch.OutOfMemoryError("synthetic out of memory")
+        return original(batch, gradient_divisor=gradient_divisor)
+
+    monkeypatch.setattr(trainer, "_run_context", fail_first)
+    state = trainer.train(maximum_steps=1)
+
+    assert calls == 2
+    assert state.step == 1
+    assert state.tokens_seen == 8
+    assert trainer.activation_execution_policy.resolved == "whole_span"
+    assert trainer.runtime["activation_oom_retries"] == 1
+    assert trainer.last_step_metrics["execution/activation_oom_retries"] == 1
+    assert len(trainer.execution_policy_history) == 2
+    assert "OOM" in trainer.execution_policy_history[-1]["reason"]
+    assert not bool(
+        trainer.model.cstm_predictor.target_second_moment.ne(0).any()
+    )
+    assert trainer.cstm_coverage.predictor_updates == 0
+
+
+def test_cpu_thread_calibration_uses_actual_carrier_and_preserves_state_and_rng():
+    torch.manual_seed(227)
+    model = MRCRALanguageModel(tiny_config())
+    before_rng = torch.random.get_rng_state().clone()
+    before = {
+        name: value.detach().clone()
+        for name, value in model.state_dict().items()
+    }
+    selected, timings = cognitive_training._calibrate_cpu_thread_count(
+        model, maximum_length=4,
+    )
+    assert selected in timings
+    assert timings[selected] == min(timings.values())
+    assert torch.equal(torch.random.get_rng_state(), before_rng)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, before[name], atol=0, rtol=0)
+
+
+def test_activation_calibration_preserves_model_optimizer_rng_and_stream(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    documents = ("activation calibration is execution-only evidence",)
+    torch.manual_seed(311)
+    seed_model = MRCRALanguageModel(tiny_config())
+    initial = {
+        name: value.detach().clone()
+        for name, value in seed_model.state_dict().items()
+    }
+
+    def construct(path, *, calibrate):
+        model = MRCRALanguageModel(tiny_config())
+        model.load_state_dict(initial)
+        stream = PackedTokenStream(
+            SequenceTextSource(documents), tokenizer
+        )
+        before_stream = stream.state_dict()
+        torch.manual_seed(971)
+        expected_rng = torch.random.get_rng_state().clone()
+        trainer = MRCRANextTokenTrainer(
+            model,
+            tokenizer,
+            stream,
+            replace(
+                training_config(path),
+                device="cpu",
+                cpu_threads=1,
+                cpu_interop_threads=1,
+                cstm_enabled=False,
+                activation_policy="retain",
+                activation_calibration=calibrate,
+                    activation_memory_reserve_bytes=1,
+                exact_loss_backend="tiled",
+            ),
+        )
+        assert torch.equal(torch.random.get_rng_state(), expected_rng)
+        assert stream.state_dict() == before_stream
+        assert all(
+            parameter.grad is None
+            for parameter in trainer.model.parameters()
+        )
+        return trainer
+
+    uncalibrated = construct(
+        tmp_path / "activation-uncalibrated", calibrate=False
+    )
+    calibrated = construct(
+        tmp_path / "activation-calibrated", calibrate=True
+    )
+    for name, expected in uncalibrated.model.state_dict().items():
+        torch.testing.assert_close(
+            calibrated.model.state_dict()[name],
+            expected,
+            atol=0,
+            rtol=0,
+            msg=name,
+        )
+    assert calibrated.optimizer.state_dict() == (
+        uncalibrated.optimizer.state_dict()
+    )
+    assert calibrated.scheduler.state_dict() == (
+        uncalibrated.scheduler.state_dict()
     )
 
 
@@ -208,6 +368,173 @@ def test_exact_fused_cross_entropy_matches_dense_loss_and_gradients():
     torch.testing.assert_close(hidden_b.grad, hidden_a.grad, atol=1e-15, rtol=1e-15)
     torch.testing.assert_close(weight_b.grad, weight_a.grad, atol=1e-15, rtol=1e-15)
     torch.testing.assert_close(bias_b.grad, bias_a.grad, atol=1e-15, rtol=1e-15)
+
+
+@pytest.mark.parametrize(
+    "implementation", ["cce_kahan_full_c", "cce_exact", "torch_compile"]
+)
+def test_cut_cross_entropy_adapter_preserves_exact_loss_bias_mask_and_gradients(
+    monkeypatch, implementation
+):
+    calls = []
+
+    def linear_cross_entropy(
+        hidden, weight, labels, *, bias, reduction, impl
+    ):
+        calls.append((reduction, impl))
+        return F.cross_entropy(
+            F.linear(hidden, weight, bias),
+            labels,
+            reduction=reduction,
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "cut_cross_entropy",
+        SimpleNamespace(linear_cross_entropy=linear_cross_entropy),
+    )
+    torch.manual_seed(231)
+    hidden_a = torch.randn(2, 5, 7, requires_grad=True)
+    weight_a = torch.randn(19, 7, requires_grad=True)
+    bias_a = torch.randn(19, requires_grad=True)
+    labels = torch.randint(0, 19, (2, 5))
+    lengths = torch.randint(0, 4, (2, 5), dtype=torch.int64)
+    mask = torch.tensor([
+        [True, True, False, True, False],
+        [True, False, True, True, True],
+    ])
+    dense = F.cross_entropy(
+        F.linear(hidden_a, weight_a, bias_a)[mask], labels[mask]
+    )
+    dense.backward()
+
+    hidden_b = hidden_a.detach().clone().requires_grad_(True)
+    weight_b = weight_a.detach().clone().requires_grad_(True)
+    bias_b = bias_a.detach().clone().requires_grad_(True)
+    cce = exact_cut_cross_entropy(
+        hidden_b,
+        labels,
+        lengths,
+        mask,
+        weight_b,
+        bias_b,
+        implementation=implementation,
+    )
+    cce.loss.backward()
+    assert calls == [("none", implementation)]
+    assert cce.token_count == int(mask.sum())
+    assert cce.byte_count == int(lengths[mask].sum())
+    torch.testing.assert_close(cce.loss, dense)
+    torch.testing.assert_close(hidden_b.grad, hidden_a.grad)
+    torch.testing.assert_close(weight_b.grad, weight_a.grad)
+    torch.testing.assert_close(bias_b.grad, bias_a.grad)
+
+
+def test_cut_cross_entropy_adapter_rejects_unsafe_filtered_pretraining_policy():
+    with pytest.raises(ValueError, match="unsafe"):
+        exact_cut_cross_entropy(
+            torch.randn(1, 2, 3),
+            torch.tensor([[1, 2]]),
+            torch.ones(1, 2, dtype=torch.int64),
+            torch.ones(1, 2, dtype=torch.bool),
+            torch.randn(4, 3),
+            torch.randn(4),
+            implementation="cce",
+        )
+
+
+def test_exact_loss_backend_configuration_rejects_unknown_or_unbounded_fused():
+    with pytest.raises(ValueError, match="unknown"):
+        replace(training_config("unused"), exact_loss_backend="approximate")
+    with pytest.raises(ValueError, match="workspace"):
+        replace(
+            training_config("unused"),
+            exact_loss_backend="fused",
+            maximum_fused_loss_bytes=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("requested", "cce_available", "resolved"),
+    [
+        ("auto", True, "torch_compile"),
+        ("cce_kahan_full_c", True, "torch_compile"),
+        ("cce_exact", True, "torch_compile"),
+        ("auto", False, "tiled"),
+        ("cce_kahan_full_c", False, "tiled"),
+        ("cce_exact", False, "tiled"),
+    ],
+)
+def test_cpu_and_macos_exact_cce_authority_never_depends_on_cuda(
+    tmp_path, monkeypatch, requested, cce_available, resolved
+):
+    monkeypatch.setattr(
+        cognitive_training,
+        "find_spec",
+        lambda name: object()
+        if name == "cut_cross_entropy" and cce_available
+        else None,
+    )
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(("portable exact authority",)), tokenizer),
+        replace(
+            training_config(tmp_path / f"{requested}-{cce_available}"),
+            device="cpu",
+            exact_loss_backend=requested,
+        ),
+    )
+    assert trainer._exact_loss_backend == resolved
+    assert trainer.runtime["requested_exact_loss_backend"] == requested
+    assert trainer.runtime["exact_loss_backend"] == resolved
+    assert trainer.runtime["loss_projection"] == f"{resolved}_exact_full_softmax"
+
+
+def test_explicit_torch_compile_requires_the_external_cce_package(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(cognitive_training, "find_spec", lambda name: None)
+    tokenizer = ByteTextTokenizer()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        MRCRANextTokenTrainer(
+            MRCRALanguageModel(tiny_config()),
+            tokenizer,
+            PackedTokenStream(SequenceTextSource(("missing cce",)), tokenizer),
+            replace(
+                training_config(tmp_path / "missing-cce"),
+                device="cpu",
+                exact_loss_backend="torch_compile",
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "requested", ["auto", "cce_kahan_full_c", "cce_exact"]
+)
+def test_portable_compiled_cce_fails_closed_to_tiled_when_workspace_is_too_small(
+    tmp_path, monkeypatch, requested
+):
+    monkeypatch.setattr(
+        cognitive_training,
+        "find_spec",
+        lambda name: object() if name == "cut_cross_entropy" else None,
+    )
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(("bounded cce",)), tokenizer),
+        replace(
+            training_config(tmp_path / requested),
+            device="cpu",
+            exact_loss_backend=requested,
+            maximum_fused_loss_bytes=1,
+        ),
+    )
+    assert trainer._exact_loss_backend == "tiled"
+    assert trainer.runtime["compiled_cce_fits_workspace"] is False
 
 
 def test_deferred_runtime_validation_checks_completed_state_at_boundary():
@@ -275,6 +602,303 @@ def test_stateful_chunked_trainer_updates_and_checkpoint_resume_is_exact(tmp_pat
         reference.model.state_dict().values(), restored.model.state_dict().values(), strict=True
     ):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def test_reporter_exception_cannot_cancel_valid_optimizer_step(
+    tmp_path, monkeypatch,
+):
+    class FailingReporter:
+        def __init__(self, *args, **kwargs):
+            self.finished = False
+
+        def log(self, metrics, *, step):
+            raise OSError(f"intentional observer failure at {step}")
+
+        def alert(self, *args, **kwargs):
+            raise OSError("intentional alert failure")
+
+        def finish(self):
+            self.finished = True
+
+    monkeypatch.setattr(
+        cognitive_training, "TrackioReporter", FailingReporter
+    )
+    tokenizer = ByteTextTokenizer()
+    model = MRCRALanguageModel(tiny_config())
+    before = {
+        name: value.detach().clone()
+        for name, value in model.state_dict().items()
+    }
+    config = replace(
+        training_config(tmp_path / "reporter-failure"),
+        total_tokens=8,
+        trackio_enabled=True,
+    )
+    trainer = MRCRANextTokenTrainer(
+        model,
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("observer failures are not gradients",)),
+            tokenizer,
+        ),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    assert trainer.state.step == 1
+    assert trainer.state.tokens_seen == 8
+    assert trainer.last_step_metrics["observation/failure_count"] == 1.0
+    assert any(
+        not torch.equal(before[name], value.detach().cpu())
+        for name, value in trainer.model.state_dict().items()
+        if value.dtype.is_floating_point
+    )
+    failures = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / "reporter-failure"
+            / "observation_failures.jsonl"
+        ).read_text().splitlines()
+    ]
+    assert failures == [{
+        "error_type": "OSError",
+        "kind": "observation_failure",
+        "message": "intentional observer failure at 1",
+        "operation": "log",
+        "sequence": 1,
+    }]
+
+
+def test_trackio_and_null_observers_preserve_identical_optimization_authority(
+    tmp_path, monkeypatch,
+):
+    class BoundedReporter:
+        def __init__(self, *args, **kwargs):
+            self.rows = []
+
+        def log(self, metrics, *, step):
+            self.rows.append((step, tuple(sorted(metrics))))
+
+        def alert(self, *args, **kwargs):
+            return None
+
+        def log_phase_transition_trace(self, *args, **kwargs):
+            return 0
+
+        def finish(self):
+            return None
+
+    monkeypatch.setattr(
+        cognitive_training, "TrackioReporter", BoundedReporter
+    )
+    tokenizer = ByteTextTokenizer()
+    documents = ("observer authority cannot mutate optimization",)
+    torch.manual_seed(20260726)
+    initial_model = MRCRALanguageModel(tiny_config())
+    initial = {
+        name: value.detach().clone()
+        for name, value in initial_model.state_dict().items()
+    }
+
+    def execute(path, *, trackio):
+        model = MRCRALanguageModel(tiny_config())
+        model.load_state_dict(initial)
+        trainer = MRCRANextTokenTrainer(
+            model,
+            tokenizer,
+            PackedTokenStream(SequenceTextSource(documents), tokenizer),
+            replace(
+                training_config(path),
+                total_tokens=8,
+                device="cpu",
+                trackio_enabled=trackio,
+                exact_loss_backend="tiled",
+            ),
+        )
+        torch.manual_seed(911)
+        trainer.train(maximum_steps=1)
+        payload = torch.load(trainer.save_checkpoint(), weights_only=True)
+        payload["training_state"] = dict(payload["training_state"])
+        payload["training_state"].pop("elapsed_seconds")
+        return payload
+
+    null_payload = execute(tmp_path / "null", trackio=False)
+    observed_payload = execute(tmp_path / "observed", trackio=True)
+
+    def assert_tree_equal(left, right):
+        assert type(left) is type(right)
+        if isinstance(left, torch.Tensor):
+            torch.testing.assert_close(left, right, atol=0, rtol=0)
+        elif isinstance(left, dict):
+            assert set(left) == set(right)
+            for key in left:
+                assert_tree_equal(left[key], right[key])
+        elif isinstance(left, (list, tuple)):
+            assert len(left) == len(right)
+            for first, second in zip(left, right, strict=True):
+                assert_tree_equal(first, second)
+        else:
+            assert left == right
+
+    for key in (
+        "model",
+        "optimizer",
+        "scheduler",
+        "training_state",
+        "train_stream",
+        "cstm_sampling",
+        "torch_rng",
+    ):
+        assert_tree_equal(null_payload[key], observed_payload[key])
+
+
+def test_format16_execution_and_observation_changes_resume_with_append_only_receipt(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    documents = ("execution identity remains semantically exact",)
+    config = replace(
+        training_config(tmp_path / "format16-execution"),
+        activation_policy="retain",
+        log_interval=1,
+        cstm_enabled=False,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    checkpoint = trainer.save_checkpoint()
+    saved = torch.load(checkpoint, weights_only=True)
+    assert saved["format_version"] == 16
+    assert len(saved["execution_policy_history"]) == 1
+
+    resumed = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        replace(config, activation_policy="whole_span", log_interval=2),
+    )
+    resumed.load_checkpoint(checkpoint)
+    assert resumed.state.step == trainer.state.step
+    assert len(resumed.execution_policy_history) == 2
+    assert (
+        resumed.execution_policy_history[-1]["execution_digest"]
+        == resumed._identity_digest(resumed._identity()["execution"])
+    )
+    transition = resumed.execution_policy_history[-1]
+    assert transition["old_policy_digest"] == (
+        resumed.execution_policy_history[-2]["execution_digest"]
+    )
+    assert transition["new_policy_digest"] == transition["execution_digest"]
+    assert transition["equivalence_receipt_digest"] == (
+        resumed._equivalence_receipt_digest(
+            transition["old_policy_digest"],
+            transition["new_policy_digest"],
+            transition["execution"],
+        )
+    )
+    assert "resume-time execution-policy change" in (
+        resumed.execution_policy_history[-1]["reason"]
+    )
+
+
+def test_format16_optimization_change_still_fails_closed(tmp_path):
+    tokenizer = ByteTextTokenizer()
+    documents = ("optimization identity cannot drift",)
+    config = replace(
+        training_config(tmp_path / "format16-optimization"),
+        cstm_enabled=False,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    checkpoint = trainer.save_checkpoint()
+    changed = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        replace(config, learning_rate=config.learning_rate * 2),
+    )
+    with pytest.raises(ValueError, match="training contract differs"):
+        changed.load_checkpoint(checkpoint)
+
+
+def test_checkpoint_save_is_atomic_and_cleans_temporary_files_on_failure(
+    tmp_path, monkeypatch,
+):
+    tokenizer = ByteTextTokenizer()
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(("atomic checkpoint",)), tokenizer),
+        replace(
+            training_config(tmp_path / "atomic-checkpoint"),
+            cstm_enabled=False,
+        ),
+    )
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("injected serialization failure")
+
+    monkeypatch.setattr(torch, "save", fail_save)
+    with pytest.raises(OSError, match="injected"):
+        trainer.save_checkpoint()
+    directory = tmp_path / "atomic-checkpoint" / "checkpoints"
+    assert not list(directory.glob("*.tmp"))
+    assert not list(directory.glob("step-*.pt"))
+    assert not (directory / "latest.json").exists()
+
+
+def test_format15_migrates_activation_checkpointing_out_of_semantic_identity(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    documents = ("legacy activation policy is execution only",)
+    config = replace(
+        training_config(tmp_path / "format15-activation"),
+        activation_policy="retain",
+        cstm_enabled=False,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    payload = torch.load(trainer.save_checkpoint(), weights_only=True)
+    payload["format_version"] = 15
+    payload["identity"] = trainer._legacy_identity()
+    for field in (
+        "cstm_max_substrate_vjps",
+        "cstm_target_participation_budget",
+        "cstm_predictor_update_interval",
+        "trackio_remote_log_interval",
+    ):
+        payload["identity"]["training"].pop(field)
+    carrier = payload["identity"]["model_config"]["carrier"]
+    carrier["activation_checkpointing"] = not carrier[
+        "activation_checkpointing"
+    ]
+    legacy = tmp_path / "format15-activation.pt"
+    torch.save(payload, legacy)
+
+    resumed = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        replace(config, activation_policy="whole_span"),
+    )
+    resumed.load_checkpoint(legacy)
+    assert resumed.state.step == trainer.state.step
+    assert resumed.activation_execution_policy.resolved == "whole_span"
 
 
 def test_bounded_training_calls_preserve_prefetch_and_rng_continuity(tmp_path):
@@ -382,6 +1006,7 @@ def test_v3_training_checkpoint_migrates_append_only_action_rows_and_foundation_
     current_path = trainer.save_checkpoint()
     payload = torch.load(current_path, weights_only=True)
     payload["format_version"] = 3
+    payload["identity"] = trainer._legacy_identity()
     cognitive_identity = payload["identity"]["model_config"]["cognitive"]
     for name in (
         "reconstruction_capacity", "action_candidate_capacity", "action_argument_dim",
@@ -513,6 +1138,14 @@ def test_integrated_stage1_path_trains_cognition_and_uses_matching_evaluation(tm
         ), name
     assert trainer._last_runtime is not None and trainer._last_ledger is not None
     assert trainer.state.last_evaluation_metrics["eval/integrated_cognitive_path"] == 1.0
+    timing = trainer.last_step_metrics
+    assert timing["performance/evaluation_seconds"] > 0
+    assert timing["performance/wall_clock_step_seconds"] >= timing[
+        "performance/step_seconds"
+    ]
+    assert timing["performance/wall_clock_tokens_per_second"] <= timing[
+        "performance/training_tokens_per_second"
+    ]
     ablation = trainer.state.last_evaluation_metrics
     assert ablation["eval/phase_ablation/hard_structure_ce_gain"] == pytest.approx(
         ablation["eval/phase_ablation/soft_only_ce_nats_per_token"]
@@ -529,6 +1162,503 @@ def test_integrated_stage1_path_trains_cognition_and_uses_matching_evaluation(tm
         .read_text(encoding="utf-8").splitlines()
     ]
     assert rows[-1]["metrics"]["eval/integrated_cognitive_path"] == 1.0
+
+
+def test_integrated_cstm_produces_honest_multiscale_receipts_and_governed_gradients(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "integrated-cstm"),
+        total_tokens=32,
+        context_length=32,
+        execution_chunk_size=4,
+        tbptt_length=8,
+        warmup_tokens=8,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        progress_interval_tokens=32,
+        cstm_enabled=True,
+        cstm_weight=0.04,
+        cstm_warmup_tokens=0,
+        cstm_ramp_tokens=1,
+        cstm_sampling_duty_cycle=1.0,
+        cstm_target_participation_budget=4,
+    )
+    model = MRCRALanguageModel(tiny_config())
+    head_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.cstm_predictor.named_parameters()
+    }
+    trainer = MRCRANextTokenTrainer(
+        model,
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource((
+                "abcdefghijklmnopqrstuvwxyz0123456789 repeated causal structure",
+            )),
+            tokenizer,
+        ),
+        config,
+    )
+    batch = trainer.train_stream.next_batch(1, 32)
+    trainer.optimizer.zero_grad(set_to_none=True)
+    local = trainer._run_context(batch, gradient_divisor=1)
+
+    assert local["cstm/enabled"] == 1
+    assert local["cstm/objective_weight"] == pytest.approx(0.04)
+    assert local["cstm/standardized_huber"] > 0
+    assert local["cstm/standardized_huber_sum"] > 0
+    assert local["cstm/spectral_target_views"] > 0
+    assert (
+        local["cstm/context_valid_weight"]
+        >= local["cstm/weighted_prediction_rows"]
+    )
+    assert local["cstm/sampling_active"] == 1
+    assert local["cstm/sampling_obligations"] >= 1
+    assert 0 < local["cstm/sampling_inclusion_probability"] <= 1
+    assert local["cstm/substrate_vjp_count"] == 1
+    assert 0 < local["cstm/row_inclusion_probability_min"] < 1
+    assert local["cstm/row_inclusion_weight_max"] > 1
+    assert local["cstm/actual_token_participations"] <= 4
+    assert (
+        local["cstm/estimated_dense_token_participations"]
+        > local["cstm/actual_token_participations"]
+    )
+    assert local["cstm/estimated_dense_standardized_huber"] > 0
+    assert local["cstm/coefficient_targets"] > local["cstm/spectral_target_views"]
+    assert local["cstm/raw_token_view_equivalents"] > local["cstm/spectral_target_views"]
+    assert local["cstm/supervision_relations_per_primary_target"] > 0
+    assert local["softmax/training/exact_full_vocabulary"] == 1
+    assert local["softmax/training/backend_id"] in {0, 1, 2, 3, 4}
+    assert local["softmax/training/external_cce_available"] in {0, 1}
+    assert local["softmax/training/compiled_cce_fits_workspace"] in {0, 1}
+    assert local["softmax/training/estimated_full_logits_mib"] > 0
+    # CSTM is retained separately until exact-CE gradients are authoritative.
+    assert trainer._cstm_auxiliary_gradients
+    assert any(
+        name.startswith("cstm_predictor.")
+        for name in trainer._cstm_auxiliary_gradients
+    )
+    assert any(
+        name.startswith("cognitive.carrier.")
+        for name in trainer._cstm_auxiliary_gradients
+    )
+    assert any(
+        name.startswith("cognitive.")
+        and not name.startswith("cognitive.carrier.")
+        for name in trainer._cstm_auxiliary_gradients
+    )
+    assert all(
+        name.startswith("cstm/") or not name.startswith("progress/")
+        for name in local
+    )
+
+    merge = trainer._merge_cstm_gradients()
+    assert merge["cstm/auxiliary_applied"] == 1
+    assert merge["cstm/auxiliary_gradient_norm_before"] > 0
+    assert (
+        merge["cstm/auxiliary_gradient_norm_after"]
+        <= merge["cstm/auxiliary_gradient_norm_before"] + 1e-7
+    )
+    assert merge["cstm/auxiliary_gradient_norm_after/carrier"] > 0
+    assert not trainer._cstm_auxiliary_gradients
+    trainer.optimizer.step()
+    assert any(
+        not torch.equal(
+            parameter.detach(),
+            head_before[name],
+        )
+        for name, parameter in model.cstm_predictor.named_parameters()
+    )
+    # The cognitive gate is deliberately zero-initialized: the first update
+    # establishes a predictor-supported coupling before CSTM is allowed to
+    # press on cognition. Its nonzero update is the causal precondition; the
+    # multi-step learning acceptance test proves the subsequent live
+    # cognitive-substrate adjoint on an eligible sampled obligation.
+    assert bool(model.cstm_predictor.cognitive_gate.detach().ne(0).any())
+    # The corpus accounting remains the packer's real token/target count.
+    assert batch.token_count == 32
+    assert int(local["train/valid_targets"]) <= batch.token_count
+    assert "progress/tokens_seen" not in local
+
+
+def test_sampled_cstm_budget_must_fit_one_complete_coarsest_row(tmp_path):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "undersized-cstm-row-budget"),
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=True,
+        cstm_execution="sampled",
+        cstm_target_participation_budget=3,
+    )
+    with pytest.raises(
+        ValueError,
+        match="cannot fit one complete row at the coarsest carrier scale",
+    ):
+        MRCRANextTokenTrainer(
+            MRCRALanguageModel(tiny_config()),
+            tokenizer,
+            PackedTokenStream(
+                SequenceTextSource(("strict CSTM budget",)), tokenizer
+            ),
+            config,
+        )
+
+
+def test_off_duty_sampled_cstm_traverses_only_detached_predictor_path(
+    tmp_path, monkeypatch,
+):
+    original = cognitive_training.deterministic_cstm_sample
+
+    def controlled_sample(*args, duty_probability, **kwargs):
+        return original(
+            *args,
+            duty_probability=duty_probability,
+            uniform_override=(0.9, 0.01),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        cognitive_training,
+        "deterministic_cstm_sample",
+        controlled_sample,
+    )
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "off-duty-cstm"),
+        total_tokens=32,
+        context_length=32,
+        execution_chunk_size=4,
+        tbptt_length=8,
+        warmup_tokens=8,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=True,
+        cstm_warmup_tokens=0,
+        cstm_ramp_tokens=1,
+        cstm_sampling_duty_cycle=0.25,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource((
+                "abcdefghijklmnopqrstuvwxyz0123456789 detached predictor",
+            )),
+            tokenizer,
+        ),
+        config,
+    )
+    local = trainer._run_context(
+        trainer.train_stream.next_batch(1, 32),
+        gradient_divisor=1,
+    )
+    assert local["cstm/predictor_update"] == 1
+    assert local["cstm/substrate_update"] == 0
+    assert local["cstm/substrate_vjp_count"] == 0
+    assert trainer._cstm_auxiliary_gradients
+    assert all(
+        name.startswith("cstm_predictor.")
+        for name in trainer._cstm_auxiliary_gradients
+    )
+
+
+def test_document_major_static_execution_preserves_exact_objective_and_gradients(
+    tmp_path,
+):
+    """Regrouping may reduce invocations but may not change learning pressure."""
+
+    tokenizer = ByteTextTokenizer()
+    source_documents = (
+        "alpha",
+        "bravo",
+        "cider",
+        "delta",
+        "ember",
+        "fable",
+        "gamut",
+        "helix",
+    )
+    batch_stream = PackedTokenStream(
+        SequenceTextSource(source_documents), tokenizer
+    )
+    batch = batch_stream.next_batch(1, 32)
+    base_training = replace(
+        training_config(tmp_path / "document-major"),
+        total_tokens=32,
+        context_length=32,
+        execution_chunk_size=4,
+        tbptt_length=8,
+        warmup_tokens=8,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=False,
+        phase_transition_telemetry=False,
+        spectral_regularization_weight=0.0,
+        exact_loss_backend="fused",
+        maximum_fused_loss_bytes=64 << 20,
+    )
+    model_config = replace(
+        tiny_config(),
+        carrier=replace(
+            tiny_config().carrier, activation_checkpointing=False
+        ),
+    )
+    torch.manual_seed(1291)
+    initial_model = MRCRALanguageModel(model_config)
+    initial_state = {
+        name: value.detach().clone()
+        for name, value in initial_model.state_dict().items()
+    }
+
+    serial_model = MRCRALanguageModel(model_config)
+    serial_model.load_state_dict(initial_state)
+    serial = MRCRANextTokenTrainer(
+        serial_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(source_documents), tokenizer),
+        replace(base_training, document_static_batching=False),
+    )
+    document_model = MRCRALanguageModel(model_config)
+    document_model.load_state_dict(initial_state)
+    document = MRCRANextTokenTrainer(
+        document_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(source_documents), tokenizer),
+        replace(base_training, document_static_batching=True),
+    )
+    exact_model = MRCRALanguageModel(model_config)
+    exact_model.load_state_dict(initial_state)
+    exact = MRCRANextTokenTrainer(
+        exact_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(source_documents), tokenizer),
+        replace(
+            base_training,
+            document_static_batching=True,
+            document_grouping_policy="exact_signature",
+        ),
+    )
+    serial.optimizer.zero_grad(set_to_none=True)
+    document.optimizer.zero_grad(set_to_none=True)
+    exact.optimizer.zero_grad(set_to_none=True)
+    serial_metrics = serial._run_context(batch, gradient_divisor=1)
+    document_metrics = document._run_context(batch, gradient_divisor=1)
+    exact_metrics = exact._run_context(batch, gradient_divisor=1)
+
+    assert document_metrics["document_batching/target_bijection"] == 1
+    assert document_metrics["train/valid_targets"] == serial_metrics[
+        "train/valid_targets"
+    ]
+    assert document_metrics["train/utf8_bytes"] == serial_metrics[
+        "train/utf8_bytes"
+    ]
+    assert document_metrics["train/nll_sum"] == pytest.approx(
+        serial_metrics["train/nll_sum"], rel=2e-6, abs=2e-5
+    )
+    assert document_metrics[
+        "train/cross_entropy_nats_per_token"
+    ] == pytest.approx(
+        serial_metrics["train/cross_entropy_nats_per_token"],
+        rel=2e-6,
+        abs=2e-6,
+    )
+    for metrics in (document_metrics, exact_metrics):
+        assert metrics["train/valid_targets"] == serial_metrics[
+            "train/valid_targets"
+        ]
+        assert metrics["train/utf8_bytes"] == serial_metrics[
+            "train/utf8_bytes"
+        ]
+        assert metrics["train/nll_sum"] == pytest.approx(
+            serial_metrics["train/nll_sum"], rel=2e-6, abs=2e-5
+        )
+    logical_spans = sum(
+        len(sequence.spans)
+        for sequence in document.document_batch_planner.plan(batch).sequences
+    )
+    assert (
+        document_metrics["document_batching/physical_invocations"]
+        < logical_spans
+    )
+    serial_parameters = dict(serial_model.named_parameters())
+    for candidate_model in (document_model, exact_model):
+        checked = 0
+        for name, parameter in candidate_model.named_parameters():
+            reference = serial_parameters[name]
+            if reference.grad is None:
+                assert parameter.grad is None, name
+            else:
+                torch.testing.assert_close(
+                    parameter.grad,
+                    reference.grad,
+                    atol=3e-5,
+                    rtol=3e-4,
+                    msg=name,
+                )
+                checked += 1
+        assert checked > 20
+
+
+def test_cstm_warmup_is_exact_pure_ce_and_allocates_no_auxiliary_gradients(tmp_path):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "cstm-warmup"),
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=True,
+        cstm_warmup_tokens=10_000,
+        cstm_ramp_tokens=1,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(("warmup must remain exact",)), tokenizer),
+        config,
+    )
+    local = trainer._run_context(trainer.train_stream.next_batch(1, 8))
+    assert local["cstm/enabled"] == 1
+    assert local["cstm/objective_weight"] == 0
+    assert local["cstm/spectral_target_views"] == 0
+    assert not trainer._cstm_auxiliary_gradients
+
+
+def test_active_cstm_checkpoint_resume_preserves_parameters_rms_and_horizon_schedule(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    documents = (
+        "abcdefghijklmnopqrstuvwxyz0123456789 repeating spectral sequence",
+        "another sufficiently long independent causal training document",
+    )
+    config = replace(
+        training_config(tmp_path / "cstm-reference"),
+        total_tokens=64,
+        context_length=32,
+        execution_chunk_size=4,
+        tbptt_length=8,
+        warmup_tokens=8,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        progress_interval_tokens=32,
+        cstm_enabled=True,
+        cstm_weight=0.04,
+        cstm_warmup_tokens=0,
+        cstm_ramp_tokens=1,
+        cstm_sampling_duty_cycle=1.0,
+    )
+    torch.manual_seed(743)
+    initial_model = MRCRALanguageModel(tiny_config())
+    initial = {
+        name: value.detach().clone()
+        for name, value in initial_model.state_dict().items()
+    }
+
+    reference_model = MRCRALanguageModel(tiny_config())
+    reference_model.load_state_dict(initial)
+    reference = MRCRANextTokenTrainer(
+        reference_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    reference.train(maximum_steps=2)
+
+    interrupted_model = MRCRALanguageModel(tiny_config())
+    interrupted_model.load_state_dict(initial)
+    interrupted = MRCRANextTokenTrainer(
+        interrupted_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        replace(config, output_dir=str(tmp_path / "cstm-interrupted")),
+    )
+    interrupted.train(maximum_steps=1)
+    checkpoint = interrupted.save_checkpoint()
+    saved_rms = interrupted.model.cstm_predictor.target_second_moment.clone()
+    saved_coverage = interrupted.cstm_coverage.state_dict()
+    assert interrupted.model.cstm_predictor.target_rms_initialized.any()
+
+    resumed_model = MRCRALanguageModel(tiny_config())
+    resumed = MRCRANextTokenTrainer(
+        resumed_model,
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        replace(config, output_dir=str(tmp_path / "cstm-interrupted")),
+    )
+    resumed.load_checkpoint(checkpoint)
+    torch.testing.assert_close(
+        resumed.model.cstm_predictor.target_second_moment,
+        saved_rms,
+        atol=0,
+        rtol=0,
+    )
+    assert resumed.cstm_coverage.state_dict() == saved_coverage
+    resumed.train(maximum_steps=1)
+
+    assert resumed.state.step == reference.state.step == 2
+    assert resumed.state.tokens_seen == reference.state.tokens_seen == 64
+    for name, expected in reference.model.state_dict().items():
+        torch.testing.assert_close(
+            resumed.model.state_dict()[name],
+            expected,
+            atol=1e-6,
+            rtol=1e-6,
+            msg=lambda message, name=name: f"{name}: {message}",
+        )
+
+
+def test_format16_sampled_cstm_missing_or_corrupt_coverage_fails_closed(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    documents = (
+        "abcdefghijklmnopqrstuvwxyz0123456789 sampled checkpoint authority",
+    )
+    config = replace(
+        training_config(tmp_path / "cstm-corrupt-state"),
+        total_tokens=32,
+        context_length=32,
+        execution_chunk_size=4,
+        tbptt_length=8,
+        warmup_tokens=8,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=True,
+        cstm_warmup_tokens=0,
+        cstm_ramp_tokens=1,
+        cstm_sampling_duty_cycle=1.0,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    payload = torch.load(trainer.save_checkpoint(), weights_only=True)
+    for name, state in (
+        ("missing", None),
+        (
+            "corrupt",
+            {
+                **payload["cstm_sampling"],
+                "schema_version": 999,
+            },
+        ),
+    ):
+        changed = dict(payload, cstm_sampling=state)
+        path = tmp_path / f"{name}-coverage.pt"
+        torch.save(changed, path)
+        restored = MRCRANextTokenTrainer(
+            MRCRALanguageModel(tiny_config()),
+            tokenizer,
+            PackedTokenStream(SequenceTextSource(documents), tokenizer),
+            config,
+        )
+        with pytest.raises(ValueError, match="coverage"):
+            restored.load_checkpoint(path)
 
 
 def test_first_hard_event_is_alerted_artifacted_and_immediately_checkpointed(
@@ -691,6 +1821,7 @@ def test_v5_checkpoint_migrates_to_digest_bound_retained_evaluation(tmp_path):
     trainer.train(maximum_steps=1)
     payload = torch.load(trainer.save_checkpoint(), weights_only=True)
     payload["format_version"] = 5
+    payload["identity"] = trainer._legacy_identity()
     payload["identity"].pop("evaluation")
     for name in ("evaluation_interval", "evaluation_batches", "require_evaluation"):
         payload["identity"]["training"].pop(name)
@@ -716,6 +1847,7 @@ def test_v7_checkpoint_migrates_missing_phase_transition_contract_fields(tmp_pat
     trainer.train(maximum_steps=1)
     payload = torch.load(trainer.save_checkpoint(), weights_only=True)
     payload["format_version"] = 7
+    payload["identity"] = trainer._legacy_identity()
     phase_fields = (
         "phase_transition_telemetry", "phase_transition_ablation",
         "phase_transition_ablation_batches", "proposal_slope_ema_decay",
@@ -741,3 +1873,147 @@ def test_v7_checkpoint_migrates_missing_phase_transition_contract_fields(tmp_pat
     assert restored.state.first_hard_event_step == 0
     assert restored.state.event_proposal_observations == 0
     assert restored.config.phase_transition_telemetry is True
+
+
+def test_v12_checkpoint_migrates_to_deterministic_cstm_head_and_format16_contract(
+    tmp_path,
+):
+    """The immediate pre-CSTM format must continue without invented history."""
+
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "v12"),
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=True,
+        cstm_warmup_tokens=10_000,
+    )
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("format twelve migration document",)),
+            tokenizer,
+        ),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    payload = torch.load(trainer.save_checkpoint(), weights_only=True)
+    payload["format_version"] = 12
+    payload["identity"] = trainer._legacy_identity()
+    payload["identity"].pop("cstm_architecture")
+    for name in (
+        "cstm_enabled",
+        "cstm_weight",
+        "cstm_warmup_tokens",
+        "cstm_ramp_tokens",
+        "cstm_carrier_gradient_cap",
+        "cstm_cognitive_gradient_cap",
+        "cstm_head_gradient_cap",
+    ):
+        payload["identity"]["training"].pop(name)
+    cstm_model_names = {
+        name for name in payload["model"]
+        if name.startswith("cstm_predictor.")
+    }
+    for name in cstm_model_names:
+        payload["model"].pop(name)
+
+    # Format 12 had no CSTM parameters in its optimizer groups. Remove those
+    # exact serialized IDs while preserving every pre-existing actor state.
+    serialized_optimizer = payload["optimizer"]
+    live_names = {
+        id(parameter): name
+        for name, parameter in trainer.model.named_parameters()
+    }
+    cstm_parameter_ids = set()
+    for live_group, saved_group in zip(
+        trainer.optimizer.param_groups,
+        serialized_optimizer["param_groups"],
+        strict=True,
+    ):
+        retained_ids = []
+        for parameter, parameter_id in zip(
+            live_group["params"], saved_group["params"], strict=True
+        ):
+            if live_names[id(parameter)].startswith("cstm_predictor."):
+                cstm_parameter_ids.add(parameter_id)
+            else:
+                retained_ids.append(parameter_id)
+        saved_group["params"] = retained_ids
+    for parameter_id in cstm_parameter_ids:
+        serialized_optimizer["state"].pop(parameter_id, None)
+
+    legacy = tmp_path / "v12.pt"
+    torch.save(payload, legacy)
+    torch.manual_seed(991)
+    restored_model = MRCRALanguageModel(tiny_config())
+    expected_cstm = {
+        name: value.detach().clone()
+        for name, value in restored_model.state_dict().items()
+        if name.startswith("cstm_predictor.")
+    }
+    restored = MRCRANextTokenTrainer(
+        restored_model,
+        tokenizer,
+        PackedTokenStream(
+            SequenceTextSource(("format twelve migration document",)),
+            tokenizer,
+        ),
+        config,
+    )
+    restored.load_checkpoint(legacy)
+
+    for name, expected in expected_cstm.items():
+        torch.testing.assert_close(
+            restored.model.state_dict()[name],
+            expected,
+            atol=0,
+            rtol=0,
+        )
+    assert not restored.model.cstm_predictor.target_rms_initialized.any()
+    assert restored.cstm_enabled
+
+
+def test_v14_checkpoint_migrates_to_default_document_major_execution_contract(
+    tmp_path,
+):
+    tokenizer = ByteTextTokenizer()
+    config = replace(
+        training_config(tmp_path / "v14-document-migration"),
+        total_tokens=32,
+        integrated_cognitive_path=True,
+        cognitive_stride=2,
+        cstm_enabled=False,
+        document_static_batching=True,
+    )
+    documents = ("document batching migration authority",)
+    trainer = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    trainer.train(maximum_steps=1)
+    payload = torch.load(trainer.save_checkpoint(), weights_only=True)
+    payload["format_version"] = 14
+    payload["identity"] = trainer._legacy_identity()
+    for name in (
+        "document_static_batching",
+        "document_bucket_lengths",
+        "document_batch_token_budget",
+    ):
+        payload["identity"]["training"].pop(name)
+    legacy = tmp_path / "format-14.pt"
+    torch.save(payload, legacy)
+
+    restored = MRCRANextTokenTrainer(
+        MRCRALanguageModel(tiny_config()),
+        tokenizer,
+        PackedTokenStream(SequenceTextSource(documents), tokenizer),
+        config,
+    )
+    restored.load_checkpoint(legacy)
+    assert restored.state.step == trainer.state.step
+    assert restored.document_batch_planner is not None
+    assert restored.runtime["document_static_batching"] is True

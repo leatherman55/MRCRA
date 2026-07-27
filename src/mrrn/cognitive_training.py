@@ -18,28 +18,57 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
+from importlib.util import find_spec
 import json
-from math import ceil, isfinite, log
+from math import ceil, isfinite, lcm, log
+import multiprocessing
 import os
 from pathlib import Path
 import tempfile
 from time import perf_counter
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+from .activation_execution import (
+    ActivationExecutionPolicy,
+    calibrate_activation_candidates,
+    census_activation_partitions,
+    measure_saved_tensor_bytes,
+    maximum_safe_retain_physical_tokens,
+    observe_memory,
+    resolve_activation_execution_policy,
+    select_activation_dominant_partitions,
+)
 from .cognitive_checkpoint import runtime_state_dict, runtime_state_from_dict
+from .carrier_execution import resolve_carrier_execution_policy
 from .cognitive_diagnostics import cognitive_metrics
 from .cognitive_model import HardEventTrace, MRCRAOutput, MRCRARuntimeState
+from .cstm import (
+    CSTMLoss,
+    build_causal_spectral_targets,
+    causal_spectral_target_mask,
+)
+from .cstm_schedule import (
+    CSTMCoverageState,
+    CSTMObligation,
+    CSTMSamplingDecision,
+    deterministic_cstm_sample,
+)
 from .cognitive_supervision import EvidenceBackedCognitiveSupervisor
 from .cognitive_surprise import (
     CognitiveRASLConfig, CognitiveResonantAdjointSurpriseLearner,
     CognitiveTrajectoryBatch, build_language_candidate_set,
 )
 from .cognitive_types import CognitiveClocks, InternalAction
+from .document_batching import DocumentBatchPlan, DocumentMajorBatchPlanner
+from .document_cost_model import (
+    DocumentExecutionCostModel,
+    measured_document_cost_model,
+)
 from .cognitive_objectives import (
     CognitiveObjectiveSchedule, ObjectiveFamily, ObjectiveTerm,
     combine_cognitive_objectives,
@@ -66,12 +95,73 @@ from .surprise import ResonantAdjointSurpriseConfig
 
 # Version 10 binds replay to compact pre-consequence cognitive behavior
 # evidence, version 11 adds consequence-driven replay scheduling, and version
-# 12 removes PC-RASL from the default production authority. Versions 3--9
+# 12 removes PC-RASL from the default production authority, version 13
+# adds CSTM, version 14 binds the exact vocabulary-loss execution policy, and
+# version 15 binds deterministic document-major static execution. Version 16
+# separates semantic/optimization identity from interchangeable execution and
+# observation policies, and records activation-policy provenance.
+# Versions 3--9
 # migrate conservatively and restart PC-RASL causal state when exact behavior
 # evidence did not exist.
-MRCRA_TRAINING_FORMAT_VERSION = 12
-LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS = {3, 4, 5, 6, 7, 8, 9, 10, 11}
+MRCRA_TRAINING_FORMAT_VERSION = 16
+LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS = {
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+}
 PRE_BEHAVIOR_EVIDENCE_FORMAT_VERSIONS = {3, 4, 5, 6, 7, 8, 9}
+
+_EXECUTION_TRAINING_FIELDS = frozenset({
+    "execution_chunk_size",
+    "tbptt_length",
+    "vocabulary_tile_size",
+    "micro_batch_size",
+    "gradient_accumulation_steps",
+    "document_static_batching",
+    "document_bucket_lengths",
+    "document_batch_token_budget",
+    "document_grouping_policy",
+    "document_plan_cache_capacity",
+    "document_cost_calibration",
+    "checkpoint_tiles",
+    "maximum_retained_loss_bytes",
+    "maximum_fused_loss_bytes",
+    "exact_loss_backend",
+    "device",
+    "precision",
+    "cpu_threads",
+    "cpu_interop_threads",
+    "data_prefetch",
+    "compile_tensor_cores",
+    "performance_calibration",
+    "activation_policy",
+    "activation_memory_reserve_bytes",
+    "activation_calibration",
+    "allow_unsafe_activation_policy",
+    "apple_mps_loss_offload",
+})
+_OBSERVATION_TRAINING_FIELDS = frozenset({
+    "log_interval",
+    "checkpoint_interval",
+    "keep_checkpoints",
+    "evaluation_interval",
+    "evaluation_batches",
+    "require_evaluation",
+    "progress_interval_tokens",
+    "trackio_project",
+    "run_name",
+    "trackio_space_id",
+    "trackio_remote_log_interval",
+    "spectral_dashboard",
+    "spectral_baseline_metrics",
+    "spectral_snapshot_interval",
+    "spectral_snapshot_tokens",
+    "spectral_dashboard_prompt",
+    "phase_transition_telemetry",
+    "phase_transition_ablation",
+    "phase_transition_ablation_batches",
+    "proposal_slope_ema_decay",
+    "low_clip_coefficient_threshold",
+    "low_clip_coefficient_patience",
+})
 
 _V4_COGNITIVE_DEFAULT_FIELDS = (
     "reconstruction_capacity", "action_candidate_capacity", "action_argument_dim",
@@ -213,6 +303,70 @@ def exact_fused_cross_entropy(
     )
 
 
+def exact_cut_cross_entropy(
+    output_latent: Tensor,
+    labels: Tensor,
+    target_byte_lengths: Tensor,
+    mask: Tensor,
+    output_weight: Tensor,
+    output_bias: Tensor | None,
+    *,
+    implementation: str,
+) -> TiledCrossEntropy:
+    """Execute exact full-vocabulary likelihood through Apple's CCE API.
+
+    ``cce_kahan_full_c`` is the pretraining policy: it uses stable partition
+    accumulation and never filters classifier-row gradients. ``cce_exact`` is
+    the no-filtering reference used for audits. The objective and NLL returned
+    by every accepted implementation are full-vocabulary quantities.
+    """
+
+    if implementation not in {
+        "cce_kahan_full_c",
+        "cce_exact",
+        "torch_compile",
+    }:
+        raise ValueError("unsafe or unsupported Cut Cross-Entropy implementation")
+    if output_latent.ndim != 3 or labels.shape != output_latent.shape[:2]:
+        raise ValueError("output latents and labels must have batch/time shape")
+    if labels.dtype != torch.int64 or target_byte_lengths.shape != labels.shape:
+        raise ValueError("labels and byte lengths must be aligned int64 tensors")
+    if target_byte_lengths.dtype != torch.int64 or bool((target_byte_lengths < 0).any()):
+        raise ValueError("target byte lengths must be nonnegative")
+    if mask.shape != labels.shape or mask.dtype != torch.bool or not bool(mask.any()):
+        raise ValueError("Cut Cross-Entropy requires a nonempty boolean mask")
+    if output_weight.ndim != 2 or output_weight.shape[1] != output_latent.shape[-1]:
+        raise ValueError("output weight is incompatible with output latents")
+    if output_bias is not None and output_bias.shape != (output_weight.shape[0],):
+        raise ValueError("output bias is incompatible with output weight")
+    selected_labels = labels[mask]
+    if int(selected_labels.min()) < 0 or int(selected_labels.max()) >= output_weight.shape[0]:
+        raise ValueError("labels lie outside the output vocabulary")
+    try:
+        from cut_cross_entropy import linear_cross_entropy
+    except ImportError as error:
+        raise RuntimeError(
+            "Cut Cross-Entropy was requested but is not installed; "
+            "install the mrrn[cce] optional dependency"
+        ) from error
+    nll = linear_cross_entropy(
+        output_latent[mask],
+        output_weight,
+        selected_labels,
+        bias=output_bias,
+        reduction="none",
+        impl=implementation,
+    )
+    if nll.shape != selected_labels.shape:
+        raise RuntimeError("Cut Cross-Entropy returned an unexpected NLL shape")
+    nll = nll.float()
+    if not bool(torch.isfinite(nll).all()):
+        raise FloatingPointError("Cut Cross-Entropy produced non-finite NLL")
+    return TiledCrossEntropy(
+        nll.mean(), nll.sum(), int(mask.sum()), int(target_byte_lengths[mask].sum())
+    )
+
+
 def _diagnostic_snapshot_due(
     step: int, interval: int, last_attempt_step: int = -1,
 ) -> bool:
@@ -319,7 +473,10 @@ class MRCRATrainingConfig:
     context_length: int = 32_768
     execution_chunk_size: int = 256
     tbptt_length: int = 4_096
-    vocabulary_tile_size: int = 2_048
+    # 4K is the measured cross-platform knee for GPT-2-scale vocabularies:
+    # it halves launch/reduction overhead versus 2K without the less stable
+    # workspace growth of 8K/16K tiles on unified-memory Apple systems.
+    vocabulary_tile_size: int = 4_096
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 1
     learning_rate: float = 6e-5
@@ -330,18 +487,42 @@ class MRCRATrainingConfig:
     spectral_regularization_weight: float = 1e-4
     state_regularization_weight: float = 1e-5
     event_compute_regularization_weight: float = 1e-5
+    cstm_enabled: bool = True
+    cstm_weight: float = 0.04
+    cstm_warmup_tokens: int = 100_000
+    cstm_ramp_tokens: int = 400_000
+    cstm_carrier_gradient_cap: float = 0.10
+    cstm_cognitive_gradient_cap: float = 0.05
+    cstm_head_gradient_cap: float = 0.10
+    cstm_execution: str = "sampled"
+    cstm_sampling_duty_cycle: float = 0.25
+    cstm_sampling_uniform_mixture: float = 0.05
+    cstm_max_substrate_vjps: int = 1
+    cstm_target_participation_budget: int = 8_192
+    cstm_predictor_update_interval: int = 1
+    cstm_maximum_coverage_gap: int = 4_096
+    allow_cstm_execution_upgrade: bool = False
     state_target_rms: float = 8.0
     curriculum_stage: int = 1
     training_profile: str = "substrate_language_pretraining"
     trainer_mode: str = TrainerMode.INDEPENDENT_PACKED_DOCUMENTS.value
     required_auxiliary_families: tuple[int, ...] = ()
     integrated_cognitive_path: bool = False
+    document_static_batching: bool = True
+    document_bucket_lengths: tuple[int, ...] = tuple(
+        range(64, 4_096 + 1, 64)
+    )
+    document_batch_token_budget: int = 8_192
+    document_grouping_policy: str = "cost_aware"
+    document_plan_cache_capacity: int = 128
+    document_cost_calibration: bool = True
     cognitive_stride: int = 128
     cognitive_tbptt_events: int = 4
     progress_interval_tokens: int = 2_048
     checkpoint_tiles: bool | None = None
     maximum_retained_loss_bytes: int = 1 << 30
     maximum_fused_loss_bytes: int = 512 << 20
+    exact_loss_backend: str = "auto"
     log_interval: int = 1
     checkpoint_interval: int = 25
     keep_checkpoints: int = 3
@@ -371,12 +552,20 @@ class MRCRATrainingConfig:
     cpu_interop_threads: int = 1
     data_prefetch: bool = True
     compile_tensor_cores: bool | None = None
+    performance_calibration: bool = True
+    activation_policy: str = "auto"
+    activation_memory_reserve_bytes: int = 4 << 30
+    activation_calibration: bool = True
+    allow_unsafe_activation_policy: bool = False
     apple_mps_loss_offload: bool = False
     trackio_enabled: bool = True
     trackio_project: str = "mrcra-fineweb"
     run_name: str = "mrcra-120m-fineweb-20m-32k"
     trackio_space_id: str | None = None
-    show_dashboard: bool = True
+    trackio_remote_log_interval: int = 4
+    # Do not colocate a polling/rendering web server with the training process
+    # unless the caller explicitly requests it.
+    show_dashboard: bool = False
     spectral_dashboard: bool = True
     spectral_baseline_metrics: str | None = None
     spectral_snapshot_interval: int = 25
@@ -401,7 +590,9 @@ class MRCRATrainingConfig:
             self.spectral_snapshot_interval, self.spectral_snapshot_tokens,
             self.progress_interval_tokens, self.cognitive_stride,
             self.cognitive_tbptt_events,
-            self.cpu_threads, self.cpu_interop_threads,
+            self.document_batch_token_budget,
+            self.activation_memory_reserve_bytes,
+            self.cpu_interop_threads,
             self.phase_transition_ablation_batches,
             self.low_clip_coefficient_patience,
             self.progress_probe_length,
@@ -412,9 +603,16 @@ class MRCRATrainingConfig:
             self.pc_rasl_captures_per_observation,
             self.pc_rasl_updates_per_observation,
             self.pc_rasl_critic_warmup_observations,
+            self.cstm_maximum_coverage_gap,
+            self.cstm_max_substrate_vjps,
+            self.cstm_target_participation_budget,
+            self.cstm_predictor_update_interval,
+            self.trackio_remote_log_interval,
         )
         if min(positive) <= 0:
             raise ValueError("MRCRA training sizes and intervals must be positive")
+        if self.cpu_threads < 0:
+            raise ValueError("CPU threads must be zero for auto or positive")
         if self.execution_chunk_size > self.tbptt_length or self.tbptt_length > self.context_length:
             raise ValueError("execution_chunk_size <= tbptt_length <= context_length is required")
         if self.tbptt_length % self.execution_chunk_size:
@@ -431,8 +629,47 @@ class MRCRATrainingConfig:
             or self.event_compute_regularization_weight < 0
         ):
             raise ValueError("regularization weights cannot be negative")
+        if not isinstance(self.cstm_enabled, bool):
+            raise ValueError("CSTM enablement must be boolean")
+        if (
+            self.cstm_weight < 0
+            or self.cstm_warmup_tokens < 0
+            or self.cstm_ramp_tokens <= 0
+            or min(
+                self.cstm_carrier_gradient_cap,
+                self.cstm_cognitive_gradient_cap,
+                self.cstm_head_gradient_cap,
+            ) < 0
+        ):
+            raise ValueError("CSTM schedule, weight, and gradient caps are invalid")
+        if self.cstm_enabled and self.cstm_weight <= 0:
+            raise ValueError("enabled CSTM requires a positive objective weight")
+        if self.cstm_execution not in {"sampled", "legacy_dense"}:
+            raise ValueError("unknown CSTM execution policy")
+        if not 0 < self.cstm_sampling_duty_cycle <= 1:
+            raise ValueError("CSTM sampling duty cycle must lie in (0,1]")
+        if not 0 <= self.cstm_sampling_uniform_mixture < 1:
+            raise ValueError("CSTM sampling uniform mixture must lie in [0,1)")
+        if self.cstm_max_substrate_vjps != 1:
+            raise ValueError(
+                "the production CSTM authority permits exactly one maximum "
+                "substrate VJP per optimizer context"
+            )
+        if not isinstance(self.allow_cstm_execution_upgrade, bool):
+            raise ValueError("CSTM execution upgrade authority must be boolean")
         if self.maximum_fused_loss_bytes < 0 or self.maximum_retained_loss_bytes < 0:
             raise ValueError("loss workspace limits cannot be negative")
+        if self.exact_loss_backend not in {
+            "auto",
+            "cce_kahan_full_c",
+            "cce_exact",
+            "torch_compile",
+            "fused",
+            "tiled",
+        }:
+            raise ValueError("unknown exact full-vocabulary loss backend")
+        if self.exact_loss_backend == "fused" and self.maximum_fused_loss_bytes <= 0:
+            raise ValueError("fused exact loss requires a positive workspace budget")
         if self.checkpoint_tiles is not None and not isinstance(self.checkpoint_tiles, bool):
             raise ValueError("checkpoint_tiles must be boolean or None for automatic selection")
         if (
@@ -503,8 +740,44 @@ class MRCRATrainingConfig:
         mode = TrainerMode(self.trainer_mode)
         if not isinstance(self.integrated_cognitive_path, bool):
             raise ValueError("integrated_cognitive_path must be boolean")
+        if not isinstance(self.document_static_batching, bool):
+            raise ValueError("document_static_batching must be boolean")
+        if (
+            self.integrated_cognitive_path
+            and self.cstm_enabled
+            and self.cstm_execution == "sampled"
+            and not self.document_static_batching
+        ):
+            raise ValueError(
+                "sampled CSTM requires document_static_batching so its "
+                "physical-invocation sampling authority is explicit; use "
+                "cstm_execution='legacy_dense' for the serial reference path"
+            )
+        if self.document_grouping_policy not in {
+            "cost_aware", "exact_signature",
+        }:
+            raise ValueError("unknown document grouping policy")
+        if self.document_plan_cache_capacity < 0:
+            raise ValueError("document plan cache capacity cannot be negative")
+        if not isinstance(self.document_cost_calibration, bool):
+            raise ValueError("document cost calibration must be boolean")
+        if (
+            not self.document_bucket_lengths
+            or tuple(sorted(set(self.document_bucket_lengths)))
+            != self.document_bucket_lengths
+            or min(self.document_bucket_lengths) <= 0
+        ):
+            raise ValueError(
+                "document bucket lengths must be unique increasing positive values"
+            )
+        if self.tbptt_length > self.document_bucket_lengths[-1]:
+            raise ValueError(
+                "largest document bucket must cover the configured TBPTT span"
+            )
         if not isinstance(self.apple_mps_loss_offload, bool):
             raise ValueError("apple_mps_loss_offload must be boolean")
+        if not isinstance(self.allow_unsafe_activation_policy, bool):
+            raise ValueError("unsafe activation policy override must be boolean")
         if not isinstance(self.data_prefetch, bool):
             raise ValueError("data_prefetch must be boolean")
         if (
@@ -517,6 +790,14 @@ class MRCRATrainingConfig:
             and not isinstance(self.compile_tensor_cores, bool)
         ):
             raise ValueError("compile_tensor_cores must be boolean or None")
+        if not isinstance(self.performance_calibration, bool):
+            raise ValueError("performance_calibration must be boolean")
+        if self.activation_policy not in {
+            "auto", "retain", "selective", "whole_span",
+        }:
+            raise ValueError("unknown activation execution policy")
+        if not isinstance(self.activation_calibration, bool):
+            raise ValueError("activation_calibration must be boolean")
         if self.integrated_cognitive_path and (
             profile.name != "substrate_language_pretraining"
             or mode != TrainerMode.INDEPENDENT_PACKED_DOCUMENTS
@@ -650,6 +931,149 @@ def _runtime_state_energy(state: MRCRARuntimeState, target_rms: float) -> tuple[
     return penalty, rms.max()
 
 
+def _cpu_thread_calibration_worker(
+    model_config,
+    model_authority: str,
+    state_path: str,
+    maximum_length: int,
+    threads: int,
+    result_queue,
+) -> None:
+    """Measure one candidate in a spawn-isolated PyTorch runtime."""
+
+    try:
+        torch.set_num_threads(threads)
+        model = MRCRALanguageModel(
+            model_config, model_authority=model_authority
+        )
+        model.load_state_dict(
+            torch.load(
+                state_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+        )
+        model.eval()
+        carrier = model.cognitive.carrier
+        carrier.configure_activation_execution("retain")
+        length = min(
+            maximum_length,
+            max(64, 2 ** (carrier.config.scales - 1)),
+        )
+        values = torch.linspace(
+            -0.2,
+            0.2,
+            steps=length * carrier.config.input_dim,
+            dtype=model.token_embedding.weight.dtype,
+        ).reshape(1, length, carrier.config.input_dim)
+        mask = torch.ones(1, length, dtype=torch.bool)
+        samples: list[float] = []
+        output = None
+        for repetition in range(3):
+            started = perf_counter()
+            with torch.inference_mode():
+                output = carrier.prefill(
+                    values, mask, project_output=False,
+                ).latent
+            elapsed = perf_counter() - started
+            if repetition:
+                samples.append(elapsed)
+        if output is None or not torch.isfinite(output).all():
+            raise RuntimeError(
+                "CPU calibration produced no finite carrier output"
+            )
+        checksum = sha256(
+            output.detach().contiguous().view(torch.uint8).numpy().tobytes()
+        ).hexdigest()
+        result_queue.put(
+            {
+                "ok": True,
+                "threads": threads,
+                "seconds": sum(samples) / len(samples),
+                "checksum": checksum,
+            }
+        )
+    except BaseException as error:
+        result_queue.put(
+            {
+                "ok": False,
+                "threads": threads,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+
+
+def _calibrate_cpu_thread_count(
+    model: MRCRALanguageModel,
+    *,
+    maximum_length: int,
+) -> tuple[int, dict[int, float]]:
+    """Measure the real carrier in one fresh subprocess per candidate."""
+
+    available = max(1, os.cpu_count() or 1)
+    candidates = tuple(
+        value for value in (2, 4, 6, 8) if value <= available
+    ) or (1,)
+    rng = torch.random.get_rng_state()
+    original_threads = torch.get_num_threads()
+    completed = False
+    timings: dict[int, float] = {}
+    checksums: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="mrcra-cpu-calibration-"
+        ) as directory:
+            state_path = str(Path(directory) / "model-state.pt")
+            torch.save(model.state_dict(), state_path)
+            context = multiprocessing.get_context("spawn")
+            for threads in candidates:
+                result_queue = context.Queue(maxsize=1)
+                process = context.Process(
+                    target=_cpu_thread_calibration_worker,
+                    args=(
+                        model.config,
+                        model.model_authority,
+                        state_path,
+                        maximum_length,
+                        threads,
+                        result_queue,
+                    ),
+                )
+                process.start()
+                process.join(timeout=180)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=10)
+                    raise RuntimeError(
+                        f"CPU calibration candidate {threads} timed out"
+                    )
+                if process.exitcode != 0:
+                    raise RuntimeError(
+                        "CPU calibration subprocess exited "
+                        f"with code {process.exitcode}"
+                    )
+                result = result_queue.get(timeout=5)
+                result_queue.close()
+                result_queue.join_thread()
+                if not result.get("ok"):
+                    raise RuntimeError(
+                        "CPU calibration candidate failed: "
+                        + str(result.get("error"))
+                    )
+                timings[threads] = float(result["seconds"])
+                checksums.append(str(result["checksum"]))
+        if len(set(checksums)) != 1:
+            raise RuntimeError("CPU thread candidates changed carrier output")
+        selected = min(timings, key=lambda value: (timings[value], value))
+        torch.set_num_threads(selected)
+        completed = True
+        return selected, timings
+    finally:
+        if not completed:
+            torch.set_num_threads(original_threads)
+        torch.random.set_rng_state(rng)
+
+
 class _NullReporter:
     def log(self, metrics: dict[str, float], *, step: int) -> None:  # noqa: ARG002
         return None
@@ -662,6 +1086,66 @@ class _NullReporter:
 
     def finish(self) -> None:
         return None
+
+
+class _NonAuthoritativeReporter:
+    """Contain observer failures after optimization authority has begun.
+
+    The wrapped reporter is allowed to lose dashboard delivery, but it cannot
+    unwind an already valid optimizer mutation. Every contained failure is
+    appended to a small local receipt using only primitive text fields. The
+    receipt writer itself is best-effort because observation authority cannot
+    become a second failure path.
+    """
+
+    def __init__(self, reporter: object, output_dir: str) -> None:
+        self._reporter = reporter
+        self._failure_path = Path(output_dir) / "observation_failures.jsonl"
+        self.failure_count = 0
+
+    def _record(self, operation: str, error: BaseException) -> None:
+        self.failure_count += 1
+        payload = {
+            "kind": "observation_failure",
+            "sequence": self.failure_count,
+            "operation": operation,
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+        try:
+            self._failure_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._failure_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        payload,
+                        sort_keys=True,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+                handle.flush()
+        except Exception:
+            pass
+        print(
+            "[MRCRA OBSERVATION WARN] "
+            f"{operation} failed: {type(error).__name__}: {error}",
+            flush=True,
+        )
+
+    def __getattr__(self, name: str):
+        target = getattr(self._reporter, name)
+        if not callable(target):
+            return target
+
+        def guarded(*args, **kwargs):
+            try:
+                return target(*args, **kwargs)
+            except Exception as error:
+                self._record(name, error)
+                return None
+
+        return guarded
 
 
 class MRCRANextTokenTrainer:
@@ -684,6 +1168,31 @@ class MRCRANextTokenTrainer:
             # The implementation supports larger batches, but the serious
             # memory budget is intentionally fail-closed at microbatch one.
             raise ValueError("the serious stateful MRCRA trainer requires micro_batch_size=1")
+        if config.cstm_enabled and config.cstm_execution == "sampled":
+            # A selected scale must be able to execute at least one complete
+            # causal coefficient row without violating the advertised hard
+            # participation bound.  Sampled prediction uses the primary
+            # horizon plus one rotated extra horizon when extras exist.
+            horizon_count = (
+                1
+                if len(model.cstm_predictor.config.horizon_blocks) == 1
+                else 2
+            )
+            coarsest_support = 2 ** (model.config.carrier.scales - 1)
+            minimum_complete_row = (
+                config.micro_batch_size
+                * horizon_count
+                * coarsest_support
+            )
+            if (
+                config.cstm_target_participation_budget
+                < minimum_complete_row
+            ):
+                raise ValueError(
+                    "sampled CSTM target participation budget cannot fit one "
+                    "complete row at the coarsest carrier scale; require at "
+                    f"least {minimum_complete_row}"
+                )
         if len(evaluation_batches) != config.evaluation_batches:
             raise ValueError(
                 "retained evaluation batches must match the training configuration"
@@ -730,6 +1239,48 @@ class MRCRANextTokenTrainer:
         )
         self.schedule = CognitiveObjectiveSchedule.curriculum(config.curriculum_stage)
         self.integrated_cognitive_path = config.integrated_cognitive_path
+        carrier_alignment = 2 ** (model.config.carrier.scales - 1)
+        static_alignment = lcm(carrier_alignment, config.cognitive_stride)
+        automatic_small_buckets: list[int] = []
+        candidate = static_alignment
+        while candidate < config.document_bucket_lengths[0]:
+            automatic_small_buckets.append(candidate)
+            candidate *= 2
+        resolved_document_buckets = tuple(
+            sorted(set(automatic_small_buckets + list(config.document_bucket_lengths)))
+        )
+        self.document_batch_planner = (
+            DocumentMajorBatchPlanner(
+                tbptt_length=config.tbptt_length,
+                bucket_lengths=resolved_document_buckets,
+                token_budget=config.document_batch_token_budget,
+                alignment=carrier_alignment,
+                cognitive_stride=config.cognitive_stride,
+                padding_token_id=0,
+                grouping_policy=config.document_grouping_policy,
+                plan_cache_capacity=config.document_plan_cache_capacity,
+                actor_configuration_digest=sha256(
+                    repr(model.config).encode("utf-8")
+                ).hexdigest(),
+                device_torch_fingerprint=sha256(
+                    (
+                        f"{config.device}|{config.precision}|"
+                        f"{torch.__version__}"
+                    ).encode("utf-8")
+                ).hexdigest(),
+                compiler_policy=(
+                    "auto"
+                    if config.compile_tensor_cores is None
+                    else "on" if config.compile_tensor_cores else "off"
+                ),
+            )
+            if config.integrated_cognitive_path
+            and config.document_static_batching
+            else None
+        )
+        self.cstm_enabled = (
+            config.cstm_enabled and config.integrated_cognitive_path
+        )
         resolved_device = config.device
         device_reason = "explicit selection" if config.device != "auto" else "automatic priority"
         if (
@@ -747,9 +1298,26 @@ class MRCRANextTokenTrainer:
             device_reason = "light integrated cognition is faster on CPU than MPS"
         self.device = _device_for(resolved_device)
         _configure_cuda(self.device)
+        self.model.to(self.device)
         interop_note = "not applicable"
+        cpu_thread_calibration: dict[int, float] = {}
+        resolved_cpu_threads = config.cpu_threads
         if self.device.type == "cpu":
-            torch.set_num_threads(config.cpu_threads)
+            if config.cpu_threads == 0:
+                if config.performance_calibration:
+                    (
+                        resolved_cpu_threads,
+                        cpu_thread_calibration,
+                    ) = _calibrate_cpu_thread_count(
+                        model, maximum_length=config.tbptt_length,
+                    )
+                else:
+                    resolved_cpu_threads = min(
+                        4, max(1, os.cpu_count() or 1)
+                    )
+                    torch.set_num_threads(resolved_cpu_threads)
+            else:
+                torch.set_num_threads(config.cpu_threads)
             interop_note = "configured"
             if torch.get_num_interop_threads() != config.cpu_interop_threads:
                 try:
@@ -762,8 +1330,511 @@ class MRCRANextTokenTrainer:
                     interop_note = "existing pool retained after initialization"
         self.amp_dtype = _precision_for(self.device, config.precision)
         self.runtime = _runtime_details(self.device, self.amp_dtype)
+        activation_element_bytes = (
+            torch.empty(
+                (),
+                dtype=(
+                    self.amp_dtype
+                    or model.token_embedding.weight.dtype
+                ),
+            ).element_size()
+        )
+        executed_width = sum(
+            scale.width
+            for scale in model.config.carrier.scale_configs()
+        )
+        maximum_planned_physical_tokens = (
+            min(
+                config.document_batch_token_budget,
+                config.context_length * config.micro_batch_size,
+            )
+            if self.document_batch_planner is not None
+            else config.tbptt_length * config.micro_batch_size
+        )
+        estimated_activation_bytes = (
+            maximum_planned_physical_tokens
+            * executed_width
+            * model.config.carrier.layers
+            * activation_element_bytes
+            * 144
+        )
+        # Calibration-disabled explicit selective execution checkpoints every
+        # scale. Measured calibration below narrows this to the partitions
+        # responsible for most retained autograd storage.
+        selective_candidate_scales = tuple(
+            range(model.config.carrier.scales)
+        )
+        activation_partition_census = ()
+        calibration_measurements = ()
+        selected_measurement = None
+        # Capture capacity before calibration allocations enter the host or
+        # device allocator cache. Candidate peaks are incremental relative to
+        # that state, so this is the matching reserve authority.
+        activation_memory_before_calibration = observe_memory(self.device)
+        if config.activation_calibration:
+            carrier = model.cognitive.carrier
+            calibration_length = min(
+                config.tbptt_length,
+                maximum_planned_physical_tokens,
+                2_048,
+            )
+            # Full-size retain calibration can itself exhaust a unified-memory
+            # host before the safety policy has a chance to reject it. Measure
+            # one bounded cohort and conservatively project its incremental
+            # peak to the planner's largest authorized physical cohort.
+            calibration_batch = 1
+            calibration_physical_tokens = (
+                calibration_batch * calibration_length
+            )
+            calibration_input = torch.linspace(
+                -0.25,
+                0.25,
+                steps=(
+                    calibration_batch
+                    * calibration_length
+                    * model.config.carrier.input_dim
+                ),
+                device=self.device,
+                dtype=model.token_embedding.weight.dtype,
+            ).reshape(
+                calibration_batch,
+                calibration_length,
+                model.config.carrier.input_dim,
+            )
+            calibration_mask = torch.ones(
+                calibration_input.shape[:2],
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+            def census_candidate(
+                policy_name: str,
+                selected_scales: tuple[int, ...] = (),
+            ):
+                def execute() -> Tensor:
+                    carrier.configure_activation_execution(
+                        policy_name,
+                        selective_scales=selected_scales,
+                    )
+                    local_input = (
+                        calibration_input.detach().clone().requires_grad_(True)
+                    )
+                    return carrier.prefill(
+                        local_input,
+                        calibration_mask,
+                        project_output=False,
+                    ).latent
+
+                return execute
+
+            if config.activation_policy in {"auto", "selective"}:
+                activation_partition_census = census_activation_partitions(
+                    census_candidate("retain"),
+                    {
+                        f"scale:{scale}": census_candidate(
+                            "selective", (scale,)
+                        )
+                        for scale in range(model.config.carrier.scales)
+                    },
+                    device=self.device,
+                )
+                selective_candidate_scales = tuple(
+                    int(partition.split(":", 1)[1])
+                    for partition in select_activation_dominant_partitions(
+                        activation_partition_census,
+                        reduction_fraction=0.60,
+                    )
+                )
+
+            def activation_candidate(
+                policy_name: str,
+                candidate_input: Tensor = calibration_input,
+                candidate_mask: Tensor = calibration_mask,
+            ):
+                def execute() -> Tensor:
+                    carrier.configure_activation_execution(
+                        policy_name,
+                        selective_scales=(
+                            selective_candidate_scales
+                            if policy_name == "selective" else ()
+                        ),
+                    )
+                    model.zero_grad(set_to_none=True)
+                    local_input = (
+                        candidate_input.detach().clone().requires_grad_(True)
+                    )
+                    result = (
+                        carrier.prefill_coarse_checkpointed(
+                            local_input, candidate_mask,
+                        )
+                        if policy_name == "whole_span"
+                        else carrier.prefill(
+                            local_input,
+                            candidate_mask,
+                            project_output=False,
+                        )
+                    )
+                    result.latent.float().square().mean().backward()
+                    if local_input.grad is None:
+                        raise RuntimeError(
+                            "activation calibration omitted its input adjoint"
+                        )
+                    output = torch.cat(
+                        (
+                            result.latent.detach().reshape(-1),
+                            local_input.grad.detach().reshape(-1),
+                        )
+                    )
+                    model.zero_grad(set_to_none=True)
+                    carrier._last_composite_receipt = None
+                    return output
+
+                return execute
+
+            candidate_names = (
+                ("retain", "selective", "whole_span")
+                if config.activation_policy == "auto"
+                else (config.activation_policy,)
+            )
+            conservative_peak_bytes: dict[str, int] = {}
+            for policy_name in candidate_names:
+                def saved_graph_candidate(
+                    name: str = policy_name,
+                ) -> Tensor:
+                    carrier.configure_activation_execution(
+                        name,
+                        selective_scales=(
+                            selective_candidate_scales
+                            if name == "selective" else ()
+                        ),
+                    )
+                    local_input = (
+                        calibration_input.detach().clone().requires_grad_(True)
+                    )
+                    result = (
+                        carrier.prefill_coarse_checkpointed(
+                            local_input, calibration_mask,
+                        )
+                        if name == "whole_span"
+                        else carrier.prefill(
+                            local_input,
+                            calibration_mask,
+                            project_output=False,
+                        )
+                    )
+                    return result.latent
+
+                saved_bytes, _, _ = measure_saved_tensor_bytes(
+                    saved_graph_candidate,
+                    device=self.device,
+                )
+                conservative_peak_bytes[policy_name] = max(
+                    saved_bytes,
+                    (
+                        estimated_activation_bytes
+                        if policy_name == "retain"
+                        else 0
+                    ),
+                )
+            equivalence_outputs = {
+                name: activation_candidate(name)()
+                for name in candidate_names
+            }
+            reference_output = equivalence_outputs[candidate_names[0]]
+            equivalence_max_error = 0.0
+            equivalence_min_cosine = 1.0
+            for name in candidate_names[1:]:
+                candidate_output = equivalence_outputs[name]
+                if candidate_output.shape != reference_output.shape:
+                    raise RuntimeError(
+                        "activation candidates changed their output shape"
+                    )
+                difference = (
+                    candidate_output.float()
+                    - reference_output.float()
+                )
+                equivalence_max_error = max(
+                    equivalence_max_error,
+                    float(difference.abs().max().cpu()),
+                )
+                cosine = float(F.cosine_similarity(
+                    candidate_output.float().reshape(1, -1),
+                    reference_output.float().reshape(1, -1),
+                ).cpu())
+                equivalence_min_cosine = min(
+                    equivalence_min_cosine, cosine
+                )
+                if (
+                    not torch.allclose(
+                        candidate_output,
+                        reference_output,
+                        atol=3e-5,
+                        rtol=3e-4,
+                    )
+                    or cosine < 0.99999
+                ):
+                    raise RuntimeError(
+                        "activation candidates exceed the float32 forward/"
+                        "adjoint equivalence tolerance"
+                    )
+            equivalence_reference = (
+                reference_output.detach().float().cpu().contiguous()
+            )
+            equivalence_digest = sha256(
+                str(tuple(equivalence_reference.shape)).encode("ascii")
+                + equivalence_reference.numpy().tobytes()
+                + b"|float32-atol=3e-5|rtol=3e-4|cosine=0.99999"
+            ).hexdigest()
+            calibration_measurements = calibrate_activation_candidates(
+                {
+                    name: activation_candidate(name)
+                    for name in candidate_names
+                },
+                device=self.device,
+                calibration_physical_tokens=calibration_physical_tokens,
+                target_physical_tokens=maximum_planned_physical_tokens,
+                conservative_peak_bytes=conservative_peak_bytes,
+            )
+            calibration_measurements = tuple(
+                replace(item, output_digest=equivalence_digest)
+                for item in calibration_measurements
+            )
+            self.runtime["activation_equivalence_max_abs_error"] = (
+                equivalence_max_error
+            )
+            self.runtime["activation_equivalence_min_cosine"] = (
+                equivalence_min_cosine
+            )
+        self.activation_execution_policy = resolve_activation_execution_policy(
+            requested=config.activation_policy,
+            device=self.device,
+            required_reserve_bytes=config.activation_memory_reserve_bytes,
+            estimated_retain_bytes=estimated_activation_bytes,
+            candidates=calibration_measurements,
+            allow_unsafe_explicit=config.allow_unsafe_activation_policy,
+            memory_observation=activation_memory_before_calibration,
+        )
+        if self.document_batch_planner is not None:
+            self.document_batch_planner.activation_policy = (
+                self.activation_execution_policy.resolved
+            )
+            self.document_batch_planner.maximum_candidate_activation_bytes = (
+                max(
+                    1,
+                    self.activation_execution_policy.memory.available_bytes
+                    - config.activation_memory_reserve_bytes,
+                )
+            )
+            self.document_batch_planner.activation_bytes_per_token = max(
+                1,
+                ceil(
+                    estimated_activation_bytes
+                    / max(1, maximum_planned_physical_tokens)
+                ),
+            )
+            self.document_batch_planner.device_torch_fingerprint = (
+                self.activation_execution_policy.hardware_fingerprint
+            )
+            self.document_batch_planner._group_cache.clear()
+            selected_measurement = next(
+                (
+                    item
+                    for item in calibration_measurements
+                    if item.policy
+                    == self.activation_execution_policy.resolved
+                ),
+                None,
+            )
+            if selected_measurement is not None:
+                self.document_batch_planner.activation_bytes_per_token = max(
+                    1,
+                    ceil(
+                        selected_measurement.reserve_peak_bytes
+                        / max(1, maximum_planned_physical_tokens)
+                    ),
+                )
+                self.document_batch_planner._group_cache.clear()
+            if (
+                selected_measurement is not None
+                and config.document_cost_calibration
+            ):
+                physical = calibration_physical_tokens
+                # The activation calibration deliberately uses a single
+                # bounded cohort.  A second timing observation must therefore
+                # differ in physical-token count; reusing the whole cohort
+                # would leave the affine launch/token fit underdetermined
+                # (especially in smoke-scale configurations where the
+                # calibration batch is exactly one).
+                single_length = max(1, calibration_length // 2)
+                single_input = calibration_input[:1, :single_length]
+                single_mask = calibration_mask[:1, :single_length]
+                single_measurement = calibrate_activation_candidates(
+                    {
+                        self.activation_execution_policy.resolved:
+                        activation_candidate(
+                            self.activation_execution_policy.resolved,
+                            single_input,
+                            single_mask,
+                        )
+                    },
+                    device=self.device,
+                    calibration_physical_tokens=single_length,
+                    target_physical_tokens=single_length,
+                )[0]
+                activation_bytes_per_token = (
+                    self.document_batch_planner.activation_bytes_per_token
+                )
+                length_band_observations: list[
+                    tuple[int, float, int, int]
+                ] = []
+                for padded_length in resolved_document_buckets:
+                    if padded_length > calibration_input.shape[1]:
+                        break
+                    band_input = calibration_input[
+                        :1, :padded_length
+                    ]
+                    band_mask = calibration_mask[
+                        :1, :padded_length
+                    ]
+                    band_measurement = calibrate_activation_candidates(
+                        {
+                            self.activation_execution_policy.resolved:
+                            activation_candidate(
+                                self.activation_execution_policy.resolved,
+                                band_input,
+                                band_mask,
+                            )
+                        },
+                        device=self.device,
+                        calibration_physical_tokens=padded_length,
+                        target_physical_tokens=padded_length,
+                    )[0]
+                    length_band_observations.append(
+                        (
+                            padded_length,
+                            band_measurement.elapsed_seconds,
+                            1,
+                            band_measurement.reserve_peak_bytes,
+                        )
+                    )
+                self.document_batch_planner.cost_model = (
+                    measured_document_cost_model(
+                        single_invocation_seconds=max(
+                            single_measurement.elapsed_seconds, 1e-12
+                        ),
+                        batched_invocation_seconds=max(
+                            selected_measurement.elapsed_seconds, 1e-12
+                        ),
+                        single_physical_tokens=single_length,
+                        batched_physical_tokens=physical,
+                        length_bands=resolved_document_buckets,
+                        activation_policy=(
+                            self.activation_execution_policy.resolved
+                        ),
+                        hardware_fingerprint=(
+                            self.activation_execution_policy.hardware_fingerprint
+                        ),
+                        activation_bytes_per_token=(
+                            activation_bytes_per_token
+                        ),
+                        length_band_observations=(
+                            length_band_observations
+                        ),
+                    )
+                )
+                self.runtime[
+                    "document_cost_calibration_observations"
+                ] = [
+                    {
+                        "padded_length": length,
+                        "elapsed_seconds": seconds,
+                        "batch": batch,
+                        "peak_bytes": peak,
+                    }
+                    for length, seconds, batch, peak
+                    in length_band_observations
+                ]
+            else:
+                self.runtime[
+                    "document_cost_calibration_observations"
+                ] = []
+        selective_scales: tuple[int, ...] = (
+            selective_candidate_scales
+            if self.activation_execution_policy.resolved == "selective"
+            else ()
+        )
+        self.activation_retain_physical_token_limit = (
+            maximum_safe_retain_physical_tokens(
+                self.activation_execution_policy,
+                alignment=carrier_alignment,
+                maximum_physical_tokens=maximum_planned_physical_tokens,
+            )
+        )
+        model.cognitive.carrier.configure_activation_execution(
+            self.activation_execution_policy.resolved,
+            selective_scales=selective_scales,
+        )
+        self.runtime["activation_execution_policy"] = (
+            self.activation_execution_policy.to_dict()
+        )
+        self.runtime["activation_execution_policy_digest"] = (
+            self.activation_execution_policy.digest
+        )
+        self.runtime["carrier_activation_checkpointing"] = (
+            self.activation_execution_policy.resolved != "retain"
+        )
+        self.runtime["carrier_activation_checkpointing_policy"] = (
+            self.activation_execution_policy.resolved
+        )
+        self.runtime["carrier_activation_memory_budget_bytes"] = (
+            self.activation_execution_policy.memory.available_bytes
+            - config.activation_memory_reserve_bytes
+        )
+        self.runtime["estimated_uncheckpointed_carrier_activation_bytes"] = (
+            estimated_activation_bytes
+        )
+        self.runtime["carrier_selective_checkpoint_scales"] = (
+            selective_scales
+        )
+        self.runtime["carrier_retain_physical_token_limit"] = (
+            self.activation_retain_physical_token_limit
+        )
+        self.runtime["carrier_shape_conditional_activation"] = (
+            self.activation_execution_policy.resolved != "retain"
+            and self.activation_retain_physical_token_limit > 0
+        )
+        self.runtime["carrier_activation_partition_census"] = [
+            asdict(item) for item in activation_partition_census
+        ]
+        self.runtime["document_static_batching"] = (
+            self.document_batch_planner is not None
+        )
+        self.runtime["document_bucket_lengths"] = resolved_document_buckets
+        self.runtime["document_batch_token_budget"] = (
+            config.document_batch_token_budget
+        )
+        self.runtime["document_grouping_policy"] = (
+            config.document_grouping_policy
+        )
+        self.runtime["document_cost_model_digest"] = (
+            None
+            if self.document_batch_planner is None
+            else self.document_batch_planner.cost_model.digest
+        )
+        self.runtime["document_plan_cache_capacity"] = (
+            config.document_plan_cache_capacity
+        )
+        self.runtime["document_cost_calibration"] = (
+            config.document_cost_calibration
+        )
         self.runtime["device_selection_reason"] = device_reason
         self.runtime["cpu_threads"] = torch.get_num_threads()
+        self.runtime["cpu_threads_requested"] = config.cpu_threads
+        self.runtime["cpu_threads_resolved"] = resolved_cpu_threads
+        self.runtime["cpu_thread_calibration_seconds"] = {
+            str(key): value
+            for key, value in cpu_thread_calibration.items()
+        }
         self.runtime["cpu_interop_threads"] = torch.get_num_interop_threads()
         self.runtime["cpu_interop_configuration"] = interop_note
         self.loss_device = self.device
@@ -796,13 +1867,59 @@ class MRCRANextTokenTrainer:
             if config.checkpoint_tiles is not None
             else estimated_loss_bytes > config.maximum_retained_loss_bytes
         )
-        self.runtime["loss_projection"] = (
-            "fused_exact_full_softmax"
-            if self.loss_device.type in {"cuda", "mps"}
-            and config.maximum_fused_loss_bytes > 0
-            and estimated_loss_bytes <= config.maximum_fused_loss_bytes
-            else "tiled_exact_full_softmax"
+        cce_available = find_spec("cut_cross_entropy") is not None
+        cce_capable_cuda = (
+            self.loss_device.type == "cuda"
+            and torch.cuda.get_device_capability(self.loss_device)[0] >= 8
         )
+        compiled_cce_fits_workspace = (
+            config.maximum_fused_loss_bytes > 0
+            and estimated_loss_bytes <= config.maximum_fused_loss_bytes
+        )
+        requested_loss_backend = config.exact_loss_backend
+        if requested_loss_backend == "auto":
+            self._exact_loss_backend = (
+                "cce_kahan_full_c"
+                if cce_available and cce_capable_cuda
+                else "torch_compile"
+                if cce_available and compiled_cce_fits_workspace
+                else "fused"
+                if self.loss_device.type in {"cuda", "mps"}
+                and compiled_cce_fits_workspace
+                else "tiled"
+            )
+        elif requested_loss_backend in {"cce_kahan_full_c", "cce_exact"}:
+            # The semantic policy is available everywhere. Triton executes it
+            # on qualified CUDA; macOS/CPU use the official compiled exact
+            # implementation when installed, and our native exact tiled cut
+            # otherwise. The latter is stronger than Full-C because it filters
+            # neither classifier nor latent gradients.
+            self._exact_loss_backend = (
+                requested_loss_backend
+                if cce_available and cce_capable_cuda
+                else "torch_compile"
+                if cce_available and compiled_cce_fits_workspace
+                else "tiled"
+            )
+        else:
+            self._exact_loss_backend = requested_loss_backend
+        if (
+            self._exact_loss_backend == "torch_compile"
+            and not cce_available
+        ):
+            raise RuntimeError(
+                "the configured Cut Cross-Entropy backend is unavailable; "
+                "install the mrrn[cce] optional dependency"
+            )
+        self.runtime["loss_projection"] = (
+            f"{self._exact_loss_backend}_exact_full_softmax"
+        )
+        self.runtime["cut_cross_entropy_available"] = cce_available
+        self.runtime["compiled_cce_fits_workspace"] = (
+            compiled_cce_fits_workspace
+        )
+        self.runtime["requested_exact_loss_backend"] = requested_loss_backend
+        self.runtime["exact_loss_backend"] = self._exact_loss_backend
         self.runtime["estimated_fused_loss_bytes"] = estimated_loss_bytes
         self.runtime["loss_tile_checkpointing"] = self._checkpoint_loss_tiles
         self.runtime["maximum_retained_loss_bytes"] = config.maximum_retained_loss_bytes
@@ -812,24 +1929,195 @@ class MRCRANextTokenTrainer:
             else "auto_recompute" if self._checkpoint_loss_tiles
             else "auto_retain"
         )
-        self.model.to(self.device)
-        compile_tensor_cores = (
-            self.device.type == "cuda"
-            if config.compile_tensor_cores is None
+        self.runtime["cstm_configured"] = config.cstm_enabled
+        self.runtime["cstm_effective"] = self.cstm_enabled
+        self.runtime["cstm_objective_weight"] = config.cstm_weight
+        self.runtime["cstm_execution"] = config.cstm_execution
+        self.runtime["cstm_sampling_duty_cycle"] = (
+            config.cstm_sampling_duty_cycle
+        )
+        self.runtime["cstm_sampling_uniform_mixture"] = (
+            config.cstm_sampling_uniform_mixture
+        )
+        self.runtime["cstm_max_substrate_vjps"] = (
+            config.cstm_max_substrate_vjps
+        )
+        self.runtime["cstm_target_participation_budget"] = (
+            config.cstm_target_participation_budget
+        )
+        self.runtime["cstm_predictor_update_interval"] = (
+            config.cstm_predictor_update_interval
+        )
+        self.runtime["cstm_maximum_coverage_gap"] = (
+            config.cstm_maximum_coverage_gap
+        )
+        self.runtime["cstm_code_dimension"] = (
+            model.cstm_predictor.config.code_dimension
+        )
+        self.runtime["cstm_predictor_parameters"] = sum(
+            parameter.numel()
+            for parameter in model.cstm_predictor.parameters()
+        )
+        resolved_compile_request = (
+            False
+            if (
+                config.compile_tensor_cores is None
+                and (
+                    not config.performance_calibration
+                    or not config.activation_calibration
+                )
+            )
             else config.compile_tensor_cores
         )
+        carrier_execution = resolve_carrier_execution_policy(
+            device_type=self.device.type,
+            compile_tensor_cores=resolved_compile_request,
+            integrated=config.integrated_cognitive_path,
+            activation_checkpointing=(
+                self.activation_execution_policy.resolved != "retain"
+            ),
+            activation_policy=self.activation_execution_policy.resolved,
+        )
+        self.runtime["carrier_execution_backend"] = carrier_execution.backend
+        self.runtime["carrier_compiler_backend"] = (
+            carrier_execution.compiler_backend
+        )
+        self.runtime["carrier_affine_scan"] = carrier_execution.affine_scan
+        self.runtime["carrier_simplex_residual"] = (
+            carrier_execution.simplex_residual
+        )
+        self.runtime["carrier_scan_saved_tensor_contract"] = (
+            "transition_initial_states_mask"
+        )
+        self.runtime["carrier_checkpoint_granularity"] = (
+            carrier_execution.checkpoint_granularity
+        )
+        self.runtime["carrier_nested_scale_checkpointing"] = (
+            self.activation_execution_policy.resolved == "selective"
+        )
+        self.runtime["carrier_state_boundary"] = (
+            "flat_tensor_tree_plus_immutable_static_spec"
+        )
+        compile_tensor_cores = carrier_execution.compiler_enabled
+        compiler_first_shape_seconds = 0.0
+        compiler_steady_shape_seconds = 0.0
+        compiler_shape_cost_seconds = 0.0
         if compile_tensor_cores:
-            model.cognitive.carrier.enable_compiled_tensor_cores()
+            try:
+                model.cognitive.carrier.enable_compiled_tensor_cores(
+                    backend=carrier_execution.compiler_backend
+                )
+                if config.activation_calibration:
+                    # Measure compilation authority before optimizer
+                    # construction. The same largest-planned physical cohort
+                    # used for activation safety is compiled once and then
+                    # executed at steady state. Their nonnegative difference
+                    # is charged once per novel static shape by the planner.
+                    compiled_candidate = activation_candidate(
+                        self.activation_execution_policy.resolved
+                    )
+                    _synchronize(self.device)
+                    compile_started = perf_counter()
+                    compiled_candidate()
+                    _synchronize(self.device)
+                    compiler_first_shape_seconds = (
+                        perf_counter() - compile_started
+                    )
+                    steady_started = perf_counter()
+                    compiled_candidate()
+                    _synchronize(self.device)
+                    compiler_steady_shape_seconds = (
+                        perf_counter() - steady_started
+                    )
+                    compiler_shape_cost_seconds = max(
+                        0.0,
+                        compiler_first_shape_seconds
+                        - compiler_steady_shape_seconds,
+                    )
+                    if config.compile_tensor_cores is None:
+                        eager_seconds = (
+                            None
+                            if selected_measurement is None
+                            else selected_measurement.elapsed_seconds
+                        )
+                        amortized_compiled_seconds = (
+                            compiler_steady_shape_seconds
+                            + compiler_shape_cost_seconds
+                            / max(1, config.total_steps)
+                        )
+                        if (
+                            eager_seconds is None
+                            or not isfinite(eager_seconds)
+                            or amortized_compiled_seconds >= eager_seconds
+                        ):
+                            model.cognitive.carrier.disable_compiled_tensor_cores()
+                            compile_tensor_cores = False
+                            self.runtime[
+                                "carrier_compiler_fallback_reason"
+                            ] = (
+                                "automatic compiler rejected: measured "
+                                f"amortized={amortized_compiled_seconds:.9f}s "
+                                f"eager={eager_seconds!r}s"
+                            )
+                            self.runtime["carrier_execution_backend"] = (
+                                "portable_custom_composites"
+                            )
+            except Exception as error:
+                if config.compile_tensor_cores is not None:
+                    raise RuntimeError(
+                        "explicit carrier tensor-core compilation failed"
+                    ) from error
+                model.cognitive.carrier.disable_compiled_tensor_cores()
+                compile_tensor_cores = False
+                self.runtime["carrier_compiler_fallback_reason"] = (
+                    f"{type(error).__name__}: {error}"
+                )
+                self.runtime["carrier_execution_backend"] = (
+                    "portable_custom_composites"
+                )
+        self.runtime.setdefault(
+            "carrier_compiler_fallback_reason", "not required"
+        )
         self.runtime["compiled_tensor_cores"] = compile_tensor_cores
+        self.runtime["compiler_first_shape_seconds"] = (
+            compiler_first_shape_seconds
+        )
+        self.runtime["compiler_steady_shape_seconds"] = (
+            compiler_steady_shape_seconds
+        )
+        self.runtime["compiler_shape_cost_seconds"] = (
+            compiler_shape_cost_seconds
+        )
         self.runtime["compiled_tensor_core_policy"] = (
-            "automatic_cuda"
+            "automatic_measured_faster"
             if config.compile_tensor_cores is None and compile_tensor_cores
-            else "automatic_disabled"
+            else "automatic_measured_rejected"
             if config.compile_tensor_cores is None
             else "explicit_enabled"
             if compile_tensor_cores
             else "explicit_disabled"
         )
+        if self.document_batch_planner is not None:
+            self.document_batch_planner.compiler_policy = (
+                "on" if compile_tensor_cores else "off"
+            )
+            if (
+                compile_tensor_cores
+                and config.activation_calibration
+                and config.document_cost_calibration
+            ):
+                self.document_batch_planner.cost_model = replace(
+                    self.document_batch_planner.cost_model,
+                    shape_compile_cost=compiler_shape_cost_seconds,
+                    calibration_kind=(
+                        self.document_batch_planner.cost_model.calibration_kind
+                        + "_plus_measured_compile"
+                    ),
+                )
+            self.document_batch_planner._group_cache.clear()
+            self.runtime["document_cost_model_digest"] = (
+                self.document_batch_planner.cost_model.digest
+            )
         policy = OptimizerPolicy(
             learning_rate=config.learning_rate, weight_decay=config.weight_decay,
             warmup_steps=config.warmup_steps,
@@ -859,6 +2147,12 @@ class MRCRANextTokenTrainer:
             )
         self.scaler = torch.amp.GradScaler("cuda") if self.amp_dtype == torch.float16 else None
         self.state = MRCRATrainingState()
+        self.cstm_coverage = CSTMCoverageState()
+        self.execution_policy_history: list[dict[str, Any]] = [
+            self._execution_policy_record(
+                effective_step=0, reason="trainer initialization",
+            )
+        ]
         self._spectral_modules = tuple(
             module for module in model.modules() if isinstance(module, ResonantSpectralGLU)
         )
@@ -877,6 +2171,57 @@ class MRCRANextTokenTrainer:
         self._pc_rasl_finalized_batches: list[CognitiveTrajectoryBatch] = []
         self._pc_rasl_actor_gradients: dict[str, Tensor | None] = {}
         self._pc_rasl_step_metrics: dict[str, float] = {}
+        self._cstm_auxiliary_gradients: dict[str, Tensor | None] = {}
+        cstm_named_parameters = dict(self.model.named_parameters())
+        predictor_registry = tuple(
+            name
+            for name in cstm_named_parameters
+            if name.startswith("cstm_predictor.")
+        )
+        substrate_candidates = tuple(
+            name
+            for name in cstm_named_parameters
+            if (
+                name == "token_embedding.weight"
+                or name.startswith("cognitive.")
+            )
+        )
+        if (
+            not predictor_registry
+            or not any(
+                name.startswith("cognitive.carrier.")
+                for name in substrate_candidates
+            )
+            or not any(
+                name.startswith("cognitive.")
+                and not name.startswith("cognitive.carrier.")
+                for name in substrate_candidates
+            )
+            or set(predictor_registry) & set(substrate_candidates)
+        ):
+            raise RuntimeError(
+                "CSTM structural gradient registry is incomplete"
+            )
+        self._cstm_gradient_candidates = {
+            "predictor": predictor_registry,
+            "substrate": substrate_candidates,
+        }
+        self._cstm_reachable_parameter_names = {
+            "predictor": predictor_registry,
+            "substrate": (),
+        }
+        self.runtime["cstm_gradient_registry_schema_version"] = 1
+        self.runtime["cstm_gradient_registry_predictor_count"] = len(
+            predictor_registry
+        )
+        self.runtime["cstm_gradient_registry_substrate_count"] = 0
+        self.runtime["cstm_gradient_registry_digest"] = (
+            self._cstm_gradient_registry_digest()
+        )
+        self._cstm_step_metrics: dict[str, float] = {}
+        self._activation_oom_retries = 0
+        self.runtime["activation_oom_retries"] = 0
+        self.last_step_metrics: dict[str, float] = {}
         self._prefetch_executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="mrcra-data")
             if config.data_prefetch else None
@@ -1275,6 +2620,496 @@ class MRCRANextTokenTrainer:
             result[f"pc_rasl/gradient_scale/{subsystem}"] = float(scale.cpu())
         return result
 
+    def _cstm_objective_weight(self) -> float:
+        """Return the causal token-scheduled CSTM coefficient for this update."""
+
+        if not self.cstm_enabled:
+            return 0.0
+        progressed = self.state.tokens_seen - self.config.cstm_warmup_tokens
+        if progressed < 0:
+            return 0.0
+        ramp = min(
+            1.0,
+            (progressed + max(1, self.config.context_length))
+            / self.config.cstm_ramp_tokens,
+        )
+        return self.config.cstm_weight * ramp
+
+    def _cstm_context_weight(self, batch: PackedBatch) -> float:
+        """Count the exact valid horizon weight before TBPTT partitioning.
+
+        Causal lifting emits scale ``s`` at deterministic document-local
+        completion positions. Counting complete future blocks here makes the
+        objective invariant to graph-release grouping without duplicating
+        token-code lookup or Fourier target construction.
+        """
+
+        configured = self.model.cstm_predictor.config.horizon_blocks
+        extras = configured[1:]
+        segment_ids = batch.segment_ids[0].detach().cpu()
+        length = segment_ids.numel()
+        documents: list[tuple[int, int]] = []
+        start = 0
+        while start < length:
+            end = start + 1
+            while end < length and segment_ids[end] == segment_ids[start]:
+                end += 1
+            documents.append((start, end))
+            start = end
+        scale_count = self.model.config.carrier.scales
+        total = 0.0
+        for scale in range(scale_count):
+            support = (
+                2 ** (scale + 1)
+                if scale < scale_count - 1
+                else 2 ** (scale_count - 1)
+            )
+            horizons = (
+                (1,)
+                if not extras
+                else (
+                    1,
+                    extras[(self.state.step + scale) % len(extras)],
+                )
+            )
+            source_groups = [
+                torch.arange(
+                    document_start + support - 1,
+                    document_end,
+                    support,
+                    dtype=torch.int64,
+                    device=batch.loss_mask.device,
+                )
+                for document_start, document_end in documents
+                if document_end - document_start >= support
+            ]
+            if not source_groups:
+                continue
+            valid = causal_spectral_target_mask(
+                batch.loss_mask,
+                batch.segment_ids,
+                batch.target_segment_ids,
+                torch.cat(source_groups),
+                support=support,
+                horizons=horizons,
+            )
+            horizon_weights = valid.new_tensor(
+                (1.0,) + (0.5,) * (len(horizons) - 1),
+                dtype=torch.float32,
+            )
+            total += float(
+                (valid.to(torch.float32) * horizon_weights[None]).sum().cpu()
+            )
+        return total
+
+    def _cstm_document_sampling_decision(
+        self,
+        plan: DocumentBatchPlan,
+        *,
+        duty_probability: float | None = None,
+        seed_offset: int = 0,
+    ) -> CSTMSamplingDecision:
+        """Bind one sampled substrate VJP to a physical invocation and scale."""
+
+        obligations: list[CSTMObligation] = []
+        invocation = 0
+        scale_count = self.model.config.carrier.scales
+        configured = self.model.cstm_predictor.config.horizon_blocks
+        extras = configured[1:]
+        for cohort in plan.cohorts:
+            authority = cohort.target_authority()
+            physical_cursor = 0
+            for physical in cohort.spans:
+                invocation += 1
+                for scale in range(scale_count):
+                    support = (
+                        2 ** (scale + 1)
+                        if scale < scale_count - 1
+                        else 2 ** (scale_count - 1)
+                    )
+                    horizons = (
+                        (1,)
+                        if not extras
+                        else (
+                            1,
+                            extras[(self.state.step + scale) % len(extras)],
+                        )
+                    )
+                    source_positions = torch.arange(
+                        physical_cursor + support - 1,
+                        physical_cursor + physical.padded_length,
+                        support,
+                        dtype=torch.int64,
+                        device=authority.labels.device,
+                    )
+                    if not source_positions.numel():
+                        continue
+                    valid = causal_spectral_target_mask(
+                        authority.loss_mask,
+                        authority.segment_ids,
+                        authority.target_segment_ids,
+                        source_positions,
+                        support=support,
+                        horizons=horizons,
+                    )
+                    # This is schedule bookkeeping, not a differentiable
+                    # tensor computation.  Count valid rows as exact integers
+                    # on the active backend, then apply the exactly
+                    # representable 1 and 1/2 horizon weights on the host.
+                    # Constructing float64 on MPS is unsupported.
+                    horizon_counts = tuple(
+                        int(value)
+                        for value in valid.sum(
+                            dim=(0, 1), dtype=torch.int64
+                        ).detach().cpu().tolist()
+                    )
+                    dense_weight = float(
+                        horizon_counts[0]
+                        + 0.5 * sum(horizon_counts[1:])
+                    )
+                    if dense_weight > 0:
+                        obligations.append(
+                            CSTMObligation(invocation, scale, dense_weight)
+                        )
+                physical_cursor += physical.padded_length
+        return deterministic_cstm_sample(
+            obligations,
+            duty_probability=(
+                self.config.cstm_sampling_duty_cycle
+                if duty_probability is None else duty_probability
+            ),
+            uniform_mixture=self.config.cstm_sampling_uniform_mixture,
+            seed=self.config.seed + seed_offset,
+            optimizer_step=self.state.step,
+            target_digest=plan.receipt.original_digest,
+        )
+
+    def _accumulate_cstm_gradients(
+        self,
+        loss: Tensor,
+        *,
+        objective_weight: float,
+        gradient_divisor: int,
+        authority: str = "all",
+    ) -> None:
+        """Retain CSTM gradients separately from exact next-token authority."""
+
+        if objective_weight <= 0 or gradient_divisor <= 0:
+            return
+        if authority not in {"all", "substrate", "predictor"}:
+            raise ValueError("unknown CSTM gradient authority")
+        if loss.numel() != 1 or not bool(torch.isfinite(loss)):
+            raise FloatingPointError("CSTM auxiliary loss became non-finite")
+        model_parameters = dict(self.model.named_parameters())
+        discovering_substrate = (
+            authority in {"all", "substrate"}
+            and not self._cstm_reachable_parameter_names["substrate"]
+        )
+        substrate_names = (
+            self._cstm_gradient_candidates["substrate"]
+            if discovering_substrate
+            else self._cstm_reachable_parameter_names["substrate"]
+        )
+        parameter_names = (
+            self._cstm_reachable_parameter_names["predictor"]
+            if authority == "predictor"
+            else substrate_names
+            if authority == "substrate"
+            else (
+                self._cstm_reachable_parameter_names["predictor"]
+                + substrate_names
+            )
+        )
+        if (
+            len(set(parameter_names)) != len(parameter_names)
+            or any(name not in model_parameters for name in parameter_names)
+        ):
+            raise RuntimeError("CSTM gradient registry is corrupt")
+        named_parameters = tuple(
+            (name, model_parameters[name]) for name in parameter_names
+        )
+        if not named_parameters:
+            raise RuntimeError("CSTM gradient authority selected no parameters")
+        gradients = torch.autograd.grad(
+            loss * (objective_weight / gradient_divisor),
+            tuple(parameter for _, parameter in named_parameters),
+            retain_graph=True,
+            allow_unused=True,
+        )
+        if discovering_substrate:
+            reachable_substrate = tuple(
+                name
+                for (name, _), gradient in zip(
+                    named_parameters, gradients, strict=True
+                )
+                if (
+                    gradient is not None
+                    and name in self._cstm_gradient_candidates["substrate"]
+                )
+            )
+            if (
+                not any(
+                    name.startswith("cognitive.carrier.")
+                    for name in reachable_substrate
+                )
+                or not any(
+                    name.startswith("cognitive.")
+                    and not name.startswith("cognitive.carrier.")
+                    for name in reachable_substrate
+                )
+            ):
+                raise RuntimeError(
+                    "CSTM dependency discovery omitted carrier or cognition"
+                )
+            self._cstm_reachable_parameter_names[
+                "substrate"
+            ] = reachable_substrate
+            self.runtime[
+                "cstm_gradient_registry_substrate_count"
+            ] = len(reachable_substrate)
+            self.runtime["cstm_gradient_registry_digest"] = (
+                self._cstm_gradient_registry_digest()
+            )
+        for (name, _), gradient in zip(
+            named_parameters, gradients, strict=True
+        ):
+            if gradient is None:
+                continue
+            detached = gradient.detach()
+            prior = self._cstm_auxiliary_gradients.get(name)
+            self._cstm_auxiliary_gradients[name] = (
+                detached.clone() if prior is None else prior + detached
+            )
+
+    def _cstm_gradient_registry_digest(self) -> str:
+        payload = {
+            "schema_version": 1,
+            "predictor": list(
+                self._cstm_reachable_parameter_names["predictor"]
+            ),
+            "substrate": list(
+                self._cstm_reachable_parameter_names["substrate"]
+            ),
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _cstm_gradient_registry_state(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "predictor": list(
+                self._cstm_reachable_parameter_names["predictor"]
+            ),
+            "substrate": list(
+                self._cstm_reachable_parameter_names["substrate"]
+            ),
+            "digest": self._cstm_gradient_registry_digest(),
+        }
+
+    def _load_cstm_gradient_registry_state(
+        self, value: Mapping[str, object] | None,
+    ) -> None:
+        if value is None:
+            # Older format-16 development checkpoints rediscover the exact
+            # substrate dependency set on their next scheduled CSTM VJP.
+            return
+        try:
+            if int(value["schema_version"]) != 1:
+                raise ValueError("unknown CSTM gradient registry schema")
+            predictor = tuple(str(name) for name in value["predictor"])
+            substrate = tuple(str(name) for name in value["substrate"])
+            if predictor != self._cstm_gradient_candidates["predictor"]:
+                raise ValueError("CSTM predictor registry differs")
+            candidate_set = set(
+                self._cstm_gradient_candidates["substrate"]
+            )
+            if (
+                len(set(substrate)) != len(substrate)
+                or any(name not in candidate_set for name in substrate)
+            ):
+                raise ValueError("CSTM substrate registry differs")
+            self._cstm_reachable_parameter_names = {
+                "predictor": predictor,
+                "substrate": substrate,
+            }
+            if value["digest"] != self._cstm_gradient_registry_digest():
+                raise ValueError("CSTM gradient registry digest differs")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "CSTM checkpoint gradient registry is malformed"
+            ) from error
+        self.runtime["cstm_gradient_registry_substrate_count"] = len(
+            substrate
+        )
+        self.runtime["cstm_gradient_registry_digest"] = (
+            self._cstm_gradient_registry_digest()
+        )
+
+    def _merge_cstm_gradients(self) -> dict[str, float]:
+        """Project conflicts and cap CSTM pressure relative to exact CE."""
+
+        if not self._cstm_auxiliary_gradients:
+            return {
+                "cstm/auxiliary_applied": 0.0,
+                "cstm/auxiliary_gradient_norm_before": 0.0,
+                "cstm/auxiliary_gradient_norm_after": 0.0,
+                "cstm/task_gradient_norm": 0.0,
+                "cstm/conflicting_subsystems": 0.0,
+            }
+        cognition = self.config.cstm_cognitive_gradient_cap
+        report = merge_auxiliary_gradients(
+            self.model,
+            self._cstm_auxiliary_gradients,
+            {
+                "carrier": self.config.cstm_carrier_gradient_cap,
+                "event": cognition,
+                "output_bridge": cognition,
+                "controller": cognition,
+                "workspace_router": cognition,
+                "world_hypothesis": cognition,
+                "memory": cognition,
+                "other_cognition": cognition,
+                "cstm_head": 0.0,
+            },
+            auxiliary_only_caps={
+                "cstm_head": self.config.cstm_head_gradient_cap,
+                # CSTM is an explicit learned auxiliary authority. Cognitive
+                # parameters that are dormant under the current hard event
+                # topology may therefore receive bounded pressure relative to
+                # the *global* exact-CE norm; without this authority, the very
+                # phase-forming modules CSTM is meant to prepare would be
+                # permanently unable to become useful before CE already
+                # traversed them. Carrier parameters remain fail-closed unless
+                # exact CE supplies their direct task path.
+                "event": cognition,
+                "output_bridge": cognition,
+                "controller": cognition,
+                "workspace_router": cognition,
+                "world_hypothesis": cognition,
+                "memory": cognition,
+                "other_cognition": cognition,
+            },
+        )
+        self._cstm_auxiliary_gradients.clear()
+        result = {
+            "cstm/auxiliary_applied": float(report.applied),
+            "cstm/auxiliary_gradient_norm_before": float(
+                report.auxiliary_norm_before.cpu()
+            ),
+            "cstm/auxiliary_gradient_norm_after": float(
+                report.auxiliary_norm_after.cpu()
+            ),
+            "cstm/task_gradient_norm": float(report.task_norm.cpu()),
+            "cstm/conflicting_subsystems": float(
+                len(report.conflicting_subsystems)
+            ),
+        }
+        for subsystem, scale in report.subsystem_scales.items():
+            result[f"cstm/gradient_scale/{subsystem}"] = float(scale.cpu())
+        for subsystem, norm in report.subsystem_auxiliary_norms_before.items():
+            result[
+                f"cstm/auxiliary_gradient_norm_before/{subsystem}"
+            ] = float(norm.cpu())
+        for subsystem, norm in report.subsystem_auxiliary_norms_after.items():
+            result[
+                f"cstm/auxiliary_gradient_norm_after/{subsystem}"
+            ] = float(norm.cpu())
+        return result
+
+    @staticmethod
+    def _is_recoverable_out_of_memory(error: BaseException) -> bool:
+        """Recognize allocator exhaustion without swallowing unrelated errors."""
+
+        out_of_memory = getattr(torch, "OutOfMemoryError", ())
+        if out_of_memory and isinstance(error, out_of_memory):
+            return True
+        if not isinstance(error, RuntimeError):
+            return False
+        message = str(error).lower()
+        return any(fragment in message for fragment in (
+            "out of memory",
+            "mps backend out of memory",
+            "cuda error: out of memory",
+            "cannot allocate memory",
+        ))
+
+    def _clear_transient_device_memory(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif self.device.type == "mps" and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+
+    def _advance_activation_policy_after_oom(self) -> bool:
+        """Move exactly one rung toward safer recomputation and receipt it."""
+
+        current = self.activation_execution_policy.resolved
+        next_policy = {
+            "retain": "selective",
+            "selective": "whole_span",
+            "whole_span": None,
+        }[current]
+        if next_policy is None:
+            return False
+        selective_scales = tuple(
+            int(value)
+            for value in self.runtime.get(
+                "carrier_selective_checkpoint_scales", ()
+            )
+        )
+        if next_policy == "selective" and not selective_scales:
+            # A selective policy without a measured partition census is not a
+            # real safety rung; advance directly to whole-span recomputation.
+            next_policy = "whole_span"
+        self.activation_execution_policy = replace(
+            self.activation_execution_policy,
+            resolved=next_policy,
+            reason=(
+                f"single recoverable pre-optimizer OOM fallback from {current}"
+            ),
+        )
+        self.model.cognitive.carrier.configure_activation_execution(
+            next_policy,
+            selective_scales=(
+                selective_scales if next_policy == "selective" else ()
+            ),
+        )
+        if self.document_batch_planner is not None:
+            self.document_batch_planner.activation_policy = next_policy
+            self.document_batch_planner._group_cache.clear()
+        # The failed allocation may have occurred in a shape-local retained
+        # invocation beneath a selective maximum-shape policy. Disable every
+        # retained subpolicy for the single safe retry.
+        self.activation_retain_physical_token_limit = 0
+        self.runtime["carrier_retain_physical_token_limit"] = 0
+        self.runtime["carrier_shape_conditional_activation"] = False
+        self.runtime["activation_execution_policy"] = (
+            self.activation_execution_policy.to_dict()
+        )
+        self.runtime["activation_execution_policy_digest"] = (
+            self.activation_execution_policy.digest
+        )
+        self.runtime["carrier_activation_checkpointing"] = (
+            next_policy != "retain"
+        )
+        self.runtime["carrier_activation_checkpointing_policy"] = next_policy
+        self._activation_oom_retries += 1
+        self.runtime["activation_oom_retries"] = self._activation_oom_retries
+        self.execution_policy_history.append(
+            self._execution_policy_record(
+                effective_step=self.state.step,
+                reason=(
+                    f"recoverable pre-optimizer OOM: {current} -> "
+                    f"{next_policy}"
+                ),
+            )
+        )
+        return True
+
     def _materialize_prefetch(self) -> None:
         if self._prefetch_future is None:
             return
@@ -1344,14 +3179,30 @@ class MRCRANextTokenTrainer:
         estimated_bytes = (
             local_mask.numel() * weight.shape[0] * latent.element_size()
         )
-        if (
-            device.type in {"cuda", "mps"}
-            and self.config.maximum_fused_loss_bytes > 0
-            and estimated_bytes <= self.config.maximum_fused_loss_bytes
-        ):
+        backend = self._exact_loss_backend
+        if backend in {"cce_kahan_full_c", "cce_exact", "torch_compile"}:
+            return exact_cut_cross_entropy(
+                latent,
+                local_labels,
+                local_lengths,
+                local_mask,
+                weight,
+                bias,
+                implementation=backend,
+            )
+        if backend == "fused":
+            if (
+                self.config.maximum_fused_loss_bytes <= 0
+                or estimated_bytes > self.config.maximum_fused_loss_bytes
+            ):
+                raise RuntimeError(
+                    "configured fused exact loss exceeds its declared workspace budget"
+                )
             return exact_fused_cross_entropy(
                 latent, local_labels, local_lengths, local_mask, weight, bias,
             )
+        if backend != "tiled":
+            raise RuntimeError("trainer selected an unknown exact loss backend")
         return exact_tiled_cross_entropy(
             latent, local_labels, local_lengths, local_mask, weight, bias,
             vocabulary_tile_size=self.config.vocabulary_tile_size,
@@ -1362,8 +3213,25 @@ class MRCRANextTokenTrainer:
         )
 
     def _identity(self) -> dict[str, Any]:
+        return self._partition_identity(self._legacy_identity())
+
+    def _legacy_identity(self) -> dict[str, Any]:
+        """Return the monolithic identity used by formats 3--15.
+
+        Keeping this constructor explicit is important: legacy migration first
+        proves compatibility under the historical contract, then partitions
+        the proven identity into format-16 semantic, optimization, execution,
+        and observation authorities.
+        """
+
         training = asdict(self.config)
-        for key in ("output_dir", "total_tokens", "trackio_enabled", "show_dashboard"):
+        for key in (
+            "output_dir",
+            "total_tokens",
+            "trackio_enabled",
+            "show_dashboard",
+            "allow_cstm_execution_upgrade",
+        ):
             training.pop(key, None)
         source = {
             key: value for key, value in self.train_stream.source.state_dict().items()
@@ -1371,6 +3239,7 @@ class MRCRANextTokenTrainer:
         }
         return {
             "model_config": asdict(self.model.config),
+            "cstm_architecture": asdict(self.model.cstm_predictor.config),
             "parameter_count": self.model.parameter_count,
             "tokenizer": self.tokenizer.identity(),
             "training": training,
@@ -1381,6 +3250,152 @@ class MRCRANextTokenTrainer:
                 if self.config.progress_conditioned_rasl else None
             ),
         }
+
+    def _partition_identity(self, legacy: Mapping[str, Any]) -> dict[str, Any]:
+        """Partition a historical identity without weakening training authority."""
+
+        value = deepcopy(dict(legacy))
+        training = dict(value.pop("training"))
+        model_config = deepcopy(value.pop("model_config"))
+        carrier = model_config.get("carrier")
+        if not isinstance(carrier, dict):
+            raise ValueError("MRCRA model identity is missing its carrier contract")
+        # Recompute/retention is an execution choice. It never changes the
+        # carrier function, parameters, or optimizer state.
+        carrier.pop("activation_checkpointing", None)
+
+        execution_training = {
+            name: training.pop(name)
+            for name in sorted(_EXECUTION_TRAINING_FIELDS)
+            if name in training
+        }
+        observation_training = {
+            name: training.pop(name)
+            for name in sorted(_OBSERVATION_TRAINING_FIELDS)
+            if name in training
+        }
+        semantic = {
+            "model_config": model_config,
+            "cstm_architecture": value.pop("cstm_architecture"),
+            "parameter_count": value.pop("parameter_count"),
+            "tokenizer": value.pop("tokenizer"),
+            "source": value.pop("source"),
+            "evaluation": value.pop("evaluation"),
+            "progress_probe": value.pop("progress_probe"),
+        }
+        if value:
+            raise ValueError(
+                "MRCRA identity contains unpartitioned semantic fields: "
+                + ", ".join(sorted(value))
+            )
+        resolved_execution = {
+            "activation": self.activation_execution_policy.to_dict(),
+            "activation_digest": self.activation_execution_policy.digest,
+            "selective_checkpoint_scales": list(
+                self.runtime["carrier_selective_checkpoint_scales"]
+            ),
+            "retain_physical_token_limit": (
+                self.activation_retain_physical_token_limit
+            ),
+            "shape_conditional_activation": bool(
+                self.runtime["carrier_shape_conditional_activation"]
+            ),
+            "carrier_backend": self.runtime["carrier_execution_backend"],
+            "carrier_compiler_backend": self.runtime[
+                "carrier_compiler_backend"
+            ],
+            "carrier_checkpoint_granularity": self.runtime[
+                "carrier_checkpoint_granularity"
+            ],
+            "compiled_tensor_cores": self.runtime["compiled_tensor_cores"],
+            "exact_loss_backend": self._exact_loss_backend,
+            "loss_device": str(self.loss_device),
+            "loss_tile_checkpointing": self._checkpoint_loss_tiles,
+            "document_bucket_lengths": list(
+                self.runtime["document_bucket_lengths"]
+            ),
+        }
+        equivalence_contract = {
+            "schema_version": 1,
+            "claim": (
+                "execution policies may alter scheduling, recomputation, "
+                "batch padding, device placement, or observation frequency "
+                "but not valid-target order, exact objective weights, model "
+                "state transitions, optimizer updates, or RNG consumption"
+            ),
+            "allowed_sections": ["execution", "observation"],
+        }
+        return {
+            "schema_version": 1,
+            "semantic": semantic,
+            "optimization": {"training": training},
+            "execution": {
+                "training": execution_training,
+                "resolved": resolved_execution,
+                "equivalence_contract": equivalence_contract,
+            },
+            "observation": {"training": observation_training},
+        }
+
+    @staticmethod
+    def _identity_digest(value: Mapping[str, Any]) -> str:
+        encoded = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+    def _execution_policy_record(
+        self,
+        *,
+        effective_step: int,
+        reason: str,
+        old_policy_digest: str | None = None,
+    ) -> dict[str, Any]:
+        execution = self._identity()["execution"]
+        new_policy_digest = self._identity_digest(execution)
+        if old_policy_digest is None:
+            history = getattr(self, "execution_policy_history", ())
+            old_policy_digest = (
+                history[-1]["execution_digest"]
+                if history else new_policy_digest
+            )
+        return {
+            "schema_version": 1,
+            "effective_step": int(effective_step),
+            "reason": str(reason),
+            "old_policy_digest": old_policy_digest,
+            "new_policy_digest": new_policy_digest,
+            "equivalence_receipt_digest": (
+                self._equivalence_receipt_digest(
+                    old_policy_digest,
+                    new_policy_digest,
+                    execution,
+                )
+            ),
+            "execution_digest": new_policy_digest,
+            "execution": execution,
+        }
+
+    @classmethod
+    def _equivalence_receipt_digest(
+        cls,
+        old_policy_digest: str,
+        new_policy_digest: str,
+        execution: Mapping[str, Any],
+    ) -> str:
+        if (
+            len(old_policy_digest) != 64
+            or len(new_policy_digest) != 64
+        ):
+            raise ValueError("execution transition digests are malformed")
+        return cls._identity_digest({
+            "schema_version": 1,
+            "old_policy_digest": old_policy_digest,
+            "new_policy_digest": new_policy_digest,
+            "equivalence_contract": execution.get(
+                "equivalence_contract"
+            ),
+        })
 
     @property
     def evaluation_identity(self) -> dict[str, int | str]:
@@ -1419,6 +3434,10 @@ class MRCRANextTokenTrainer:
         payload: dict[str, Any] = {
             "format_version": MRCRA_TRAINING_FORMAT_VERSION,
             "identity": self._identity(),
+            "execution_policy": self._identity()["execution"],
+            "execution_policy_history": deepcopy(
+                self.execution_policy_history
+            ),
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
@@ -1436,6 +3455,18 @@ class MRCRANextTokenTrainer:
                 None
                 if self.learning_progress is None
                 else self.learning_progress.state_dict()
+            ),
+            "cstm_sampling": (
+                self.cstm_coverage.state_dict()
+                if (
+                    self.cstm_enabled
+                    and self.config.cstm_execution == "sampled"
+                )
+                else None
+            ),
+            "cstm_gradient_registry": (
+                self._cstm_gradient_registry_state()
+                if self.cstm_enabled else None
             ),
             "pc_rasl": (
                 None
@@ -1483,7 +3514,10 @@ class MRCRANextTokenTrainer:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            torch.save(self._checkpoint_payload(), temporary)
+            with temporary.open("wb") as handle:
+                torch.save(self._checkpoint_payload(), handle)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, destination)
         finally:
             if temporary.exists():
@@ -1493,10 +3527,27 @@ class MRCRANextTokenTrainer:
             for obsolete in checkpoints[:-self.config.keep_checkpoints]:
                 obsolete.unlink()
         latest = directory / "latest.json"
-        latest.write_text(
-            json.dumps({"checkpoint": destination.name, "step": self.state.step}, indent=2) + "\n",
-            encoding="utf-8",
+        latest_descriptor, latest_temporary_name = tempfile.mkstemp(
+            prefix="mrcra-latest-", suffix=".tmp", dir=directory
         )
+        try:
+            with os.fdopen(
+                latest_descriptor, "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    {
+                        "checkpoint": destination.name,
+                        "step": self.state.step,
+                    },
+                    handle,
+                    indent=2,
+                )
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(latest_temporary_name, latest)
+        finally:
+            Path(latest_temporary_name).unlink(missing_ok=True)
         return destination
 
     def load_checkpoint(self, path: str | Path) -> None:
@@ -1509,8 +3560,30 @@ class MRCRANextTokenTrainer:
         expected_identity = self._identity()
         saved_identity = deepcopy(payload.get("identity"))
         retiring_pc_rasl = False
-        if isinstance(saved_identity, dict):
+        upgrading_legacy_cstm = False
+        legacy_cstm_execution = None
+        if (
+            saved_format == MRCRA_TRAINING_FORMAT_VERSION
+            and isinstance(saved_identity, dict)
+        ):
             try:
+                retiring_pc_rasl = (
+                    bool(
+                        saved_identity["optimization"]["training"].get(
+                            "progress_conditioned_rasl", False
+                        )
+                    )
+                    and not expected_identity["optimization"]["training"][
+                        "progress_conditioned_rasl"
+                    ]
+                )
+            except (KeyError, TypeError, AttributeError):
+                raise ValueError(
+                    "MRCRA training checkpoint identity is malformed"
+                ) from None
+        elif isinstance(saved_identity, dict):
+            try:
+                legacy_expected_identity = self._legacy_identity()
                 retiring_pc_rasl = (
                     saved_format in LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS
                     and bool(
@@ -1518,7 +3591,7 @@ class MRCRANextTokenTrainer:
                             "progress_conditioned_rasl", False
                         )
                     )
-                    and not expected_identity["training"][
+                    and not legacy_expected_identity["training"][
                         "progress_conditioned_rasl"
                     ]
                 )
@@ -1527,27 +3600,61 @@ class MRCRANextTokenTrainer:
                 # so an absent field inherits the explicit current policy.
                 saved_identity["training"].setdefault(
                     "compile_tensor_cores",
-                    expected_identity["training"]["compile_tensor_cores"],
+                    legacy_expected_identity["training"][
+                        "compile_tensor_cores"
+                    ],
                 )
             except (KeyError, TypeError, AttributeError):
                 raise ValueError("MRCRA training checkpoint identity is malformed") from None
         if saved_format in LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS and isinstance(saved_identity, dict):
+            legacy_expected_identity = self._legacy_identity()
             try:
+                legacy_had_active_cstm = bool(
+                    saved_identity["training"].get("cstm_enabled", False)
+                    and saved_identity["training"].get(
+                        "integrated_cognitive_path", False
+                    )
+                )
+                legacy_cstm_execution = saved_identity["training"].get(
+                    "cstm_execution", "legacy_dense"
+                )
+                if (
+                    legacy_had_active_cstm
+                    and self.config.cstm_execution == "sampled"
+                    and not self.config.allow_cstm_execution_upgrade
+                ):
+                    raise ValueError(
+                        "legacy dense CSTM checkpoint requires "
+                        "cstm_execution='legacy_dense' or explicit "
+                        "allow_cstm_execution_upgrade=True"
+                    )
+                upgrading_legacy_cstm = bool(
+                    legacy_had_active_cstm
+                    and legacy_cstm_execution == "legacy_dense"
+                    and self.config.cstm_execution == "sampled"
+                    and self.config.allow_cstm_execution_upgrade
+                )
+                saved_identity["cstm_architecture"] = legacy_expected_identity[
+                    "cstm_architecture"
+                ]
                 saved_cognitive = saved_identity["model_config"]["cognitive"]
-                current_cognitive = expected_identity["model_config"]["cognitive"]
+                current_cognitive = legacy_expected_identity[
+                    "model_config"
+                ]["cognitive"]
                 saved_identity["model_config"]["carrier"][
                     "activation_checkpointing"
-                ] = expected_identity["model_config"]["carrier"][
+                ] = legacy_expected_identity["model_config"]["carrier"][
                     "activation_checkpointing"
                 ]
                 for name in _V4_COGNITIVE_DEFAULT_FIELDS:
                     saved_cognitive[name] = current_cognitive[name]
                 saved_training = saved_identity["training"]
-                current_training = expected_identity["training"]
+                current_training = legacy_expected_identity["training"]
                 for name in (
                     "evaluation_interval", "evaluation_batches",
                     "require_evaluation", "event_compute_regularization_weight",
                     "checkpoint_tiles", "maximum_retained_loss_bytes",
+                    "exact_loss_backend",
                     "data_prefetch", "phase_transition_telemetry",
                     "phase_transition_ablation",
                     "phase_transition_ablation_batches",
@@ -1570,6 +3677,26 @@ class MRCRANextTokenTrainer:
                     "pc_rasl_carrier_gradient_cap",
                     "pc_rasl_cognitive_gradient_cap",
                     "pc_rasl_controller_gradient_cap",
+                    "cstm_enabled",
+                    "cstm_weight",
+                    "cstm_warmup_tokens",
+                    "cstm_ramp_tokens",
+                    "cstm_carrier_gradient_cap",
+                    "cstm_cognitive_gradient_cap",
+                    "cstm_head_gradient_cap",
+                    "cstm_execution",
+                    "cstm_sampling_duty_cycle",
+                    "cstm_sampling_uniform_mixture",
+                    "cstm_max_substrate_vjps",
+                    "cstm_target_participation_budget",
+                    "cstm_predictor_update_interval",
+                    "cstm_maximum_coverage_gap",
+                    "document_static_batching",
+                    "document_bucket_lengths",
+                    "document_batch_token_budget",
+                    "document_grouping_policy",
+                    "document_plan_cache_capacity",
+                    "trackio_remote_log_interval",
                 ):
                     saved_training[name] = current_training[name]
                 if (
@@ -1586,13 +3713,165 @@ class MRCRANextTokenTrainer:
                 # Pre-v6 checkpoints did not bind retained evaluation data.
                 # Migration attaches the explicitly supplied current retained
                 # set; the digest is subsequently enforced on every resume.
-                saved_identity["evaluation"] = expected_identity["evaluation"]
-                saved_identity["progress_probe"] = expected_identity["progress_probe"]
-                saved_identity["parameter_count"] = expected_identity["parameter_count"]
+                saved_identity["evaluation"] = legacy_expected_identity["evaluation"]
+                saved_identity["progress_probe"] = legacy_expected_identity[
+                    "progress_probe"
+                ]
+                saved_identity["parameter_count"] = legacy_expected_identity[
+                    "parameter_count"
+                ]
             except (KeyError, TypeError):
                 raise ValueError("legacy MRCRA training checkpoint identity is malformed") from None
-        if saved_identity != expected_identity:
+            try:
+                saved_identity = self._partition_identity(saved_identity)
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    "legacy MRCRA training checkpoint identity is malformed"
+                ) from None
+        if not isinstance(saved_identity, dict) or set(saved_identity) != {
+            "schema_version", "semantic", "optimization", "execution",
+            "observation",
+        }:
+            raise ValueError("MRCRA training checkpoint identity is malformed")
+        if (
+            saved_identity["schema_version"] != expected_identity["schema_version"]
+            or saved_identity["semantic"] != expected_identity["semantic"]
+            or saved_identity["optimization"] != expected_identity["optimization"]
+        ):
             raise ValueError("MRCRA checkpoint model, tokenizer, data, or training contract differs")
+        current_execution = expected_identity["execution"]
+        current_execution_digest = self._identity_digest(current_execution)
+        if saved_format == MRCRA_TRAINING_FORMAT_VERSION:
+            saved_execution = saved_identity["execution"]
+            if payload.get("execution_policy") != saved_execution:
+                raise ValueError(
+                    "MRCRA checkpoint execution policy receipt differs from "
+                    "its identity"
+                )
+            saved_history = deepcopy(payload.get("execution_policy_history"))
+            if not isinstance(saved_history, list) or not saved_history:
+                raise ValueError(
+                    "MRCRA checkpoint is missing execution policy history"
+                )
+            previous_step = -1
+            previous_digest = None
+            for record in saved_history:
+                if (
+                    not isinstance(record, dict)
+                    or record.get("schema_version") != 1
+                    or not isinstance(record.get("effective_step"), int)
+                    or record["effective_step"] < previous_step
+                    or record.get("execution_digest")
+                    != self._identity_digest(record.get("execution", {}))
+                ):
+                    raise ValueError(
+                        "MRCRA checkpoint execution policy history is malformed"
+                    )
+                transition_fields = (
+                    "old_policy_digest",
+                    "new_policy_digest",
+                    "equivalence_receipt_digest",
+                )
+                present = tuple(
+                    field in record for field in transition_fields
+                )
+                if any(present):
+                    if (
+                        not all(present)
+                        or record["new_policy_digest"]
+                        != record["execution_digest"]
+                        or (
+                            previous_digest is not None
+                            and record["old_policy_digest"]
+                            != previous_digest
+                        )
+                        or record["equivalence_receipt_digest"]
+                        != self._equivalence_receipt_digest(
+                            record["old_policy_digest"],
+                            record["new_policy_digest"],
+                            record["execution"],
+                        )
+                    ):
+                        raise ValueError(
+                            "MRCRA checkpoint execution transition receipt "
+                            "is malformed"
+                        )
+                previous_step = record["effective_step"]
+                previous_digest = record["execution_digest"]
+            if (
+                saved_history[-1]["execution_digest"]
+                != self._identity_digest(saved_execution)
+            ):
+                raise ValueError(
+                    "MRCRA checkpoint execution policy history does not end "
+                    "at its active execution policy"
+                )
+            self.execution_policy_history = saved_history
+        else:
+            legacy_execution_digest = self._identity_digest(
+                saved_identity["execution"]
+            )
+            self.execution_policy_history = [
+                {
+                    "schema_version": 1,
+                    "effective_step": int(
+                        payload.get("training_state", {}).get("step", 0)
+                    ),
+                    "reason": (
+                        f"migrated legacy format-{saved_format} execution "
+                        "contract"
+                    ),
+                    "old_policy_digest": legacy_execution_digest,
+                    "new_policy_digest": legacy_execution_digest,
+                    "equivalence_receipt_digest": (
+                        self._equivalence_receipt_digest(
+                            legacy_execution_digest,
+                            legacy_execution_digest,
+                            saved_identity["execution"],
+                        )
+                    ),
+                    "execution_digest": legacy_execution_digest,
+                    "execution": saved_identity["execution"],
+                }
+            ]
+            if upgrading_legacy_cstm:
+                # Sampling is an explicitly authorized, one-way estimator
+                # migration rather than an implicit normalization.  Record
+                # both optimization authorities even when the execution-only
+                # digest is otherwise unchanged.
+                self.execution_policy_history.append({
+                    **self._execution_policy_record(
+                        effective_step=int(
+                            payload.get("training_state", {}).get("step", 0)
+                        ),
+                        reason=(
+                            f"explicit format-{saved_format} CSTM estimator "
+                            "upgrade from legacy_dense to sampled"
+                        ),
+                    ),
+                    "cstm_execution_transition": {
+                        "from": legacy_cstm_execution,
+                        "to": self.config.cstm_execution,
+                    },
+                    "optimization_digest_after": self._identity_digest(
+                        expected_identity["optimization"]
+                    ),
+                })
+        if (
+            self.execution_policy_history[-1]["execution_digest"]
+            != current_execution_digest
+        ):
+            self.execution_policy_history.append(
+                self._execution_policy_record(
+                    effective_step=int(
+                        payload.get("training_state", {}).get("step", 0)
+                    ),
+                    reason=(
+                        "resume-time execution-policy change accepted under "
+                        "format-16 equivalence contract"
+                    ),
+                )
+            )
         saved_model = payload["model"]
         if saved_format in LEGACY_MRCRA_TRAINING_FORMAT_VERSIONS:
             current_model = self.model.state_dict()
@@ -1605,6 +3884,9 @@ class MRCRANextTokenTrainer:
             )
             for name, current in current_model.items():
                 if name not in saved_model:
+                    if name.startswith("cstm_predictor."):
+                        migrated_model[name] = current
+                        continue
                     raise ValueError(f"legacy MRCRA checkpoint is missing model tensor {name}")
                 saved = saved_model[name]
                 if saved.shape == current.shape:
@@ -1690,6 +3972,37 @@ class MRCRANextTokenTrainer:
         ):
             training_state.setdefault(name, default)
         self.state = MRCRATrainingState(**training_state)
+        cstm_sampling_state = payload.get("cstm_sampling")
+        expects_sampled_cstm = (
+            self.cstm_enabled and self.config.cstm_execution == "sampled"
+        )
+        if saved_format == MRCRA_TRAINING_FORMAT_VERSION:
+            if expects_sampled_cstm:
+                if cstm_sampling_state is None:
+                    raise ValueError(
+                        "sampled CSTM checkpoint is missing coverage state"
+                    )
+                self.cstm_coverage = CSTMCoverageState.from_state_dict(
+                    cstm_sampling_state
+                )
+            elif cstm_sampling_state is not None:
+                raise ValueError(
+                    "checkpoint contains sampled CSTM state but sampled "
+                    "execution is disabled"
+                )
+        else:
+            # A legacy-dense resume has no sampled schedule. An explicitly
+            # authorized one-way upgrade begins deterministic coverage from
+            # the restored optimizer step.
+            self.cstm_coverage = CSTMCoverageState()
+        if self.cstm_enabled:
+            self._load_cstm_gradient_registry_state(
+                payload.get("cstm_gradient_registry")
+            )
+        elif payload.get("cstm_gradient_registry") is not None:
+            raise ValueError(
+                "checkpoint contains a CSTM gradient registry while CSTM is disabled"
+            )
         if retiring_pc_rasl:
             self.state.last_progress_observation_step = 0
             self.state.last_progress_pressure = 0.0
@@ -1903,20 +4216,42 @@ class MRCRANextTokenTrainer:
 
     @staticmethod
     def _integrated_state_energy(state, target_rms: float) -> tuple[Tensor, Tensor]:
+        penalties, maximum = MRCRANextTokenTrainer._integrated_state_energy_rows(
+            state, target_rms
+        )
+        return penalties.mean(), maximum
+
+    @staticmethod
+    def _integrated_state_energy_rows(
+        state, target_rms: float,
+    ) -> tuple[Tensor, Tensor]:
         dense = tuple(
-            resonator.value.float().square().mean()
+            resonator.value.float().square().flatten(1).mean(1)
             for block in state.carrier.blocks
             for resonator in block.resonators
         )
+        cognitive_carriers = state.cognitive.carrier
         cognitive = tuple(
-            resonator.value.float().square().mean()
-            for carrier in state.cognitive.carrier
-            for block in carrier.blocks
-            for resonator in block.resonators
+            torch.cat(
+                tuple(
+                    carrier.blocks[block_index]
+                    .resonators[resonator_index]
+                    .value.float()
+                    .square()
+                    .flatten(1)
+                    .mean(1)
+                    for carrier in cognitive_carriers
+                ),
+                0,
+            )
+            for block_index in range(len(cognitive_carriers[0].blocks))
+            for resonator_index in range(
+                len(cognitive_carriers[0].blocks[block_index].resonators)
+            )
         )
-        energies = torch.stack(dense + cognitive)
+        energies = torch.stack(dense + cognitive, 1)
         rms = energies.clamp_min(0).sqrt()
-        penalty = (energies - target_rms**2).clamp_min(0).mean()
+        penalty = (energies - target_rms**2).clamp_min(0).mean(1)
         return penalty, rms.max()
 
     def _run_integrated_context(
@@ -1944,6 +4279,19 @@ class MRCRANextTokenTrainer:
         active_nodes_total = 0.0
         active_nodes_max = 0.0
         feedback_rms_max = 0.0
+        cstm_objective_weight = self._cstm_objective_weight()
+        cstm_context_weight = (
+            self._cstm_context_weight(batch)
+            if cstm_objective_weight > 0
+            else 0.0
+        )
+        cstm_loss_numerator = 0.0
+        cstm_weighted_rows = 0.0
+        cstm_valid_rows = 0
+        cstm_coefficient_targets = 0
+        cstm_token_participations = 0
+        cstm_scale_rows = [0] * self.model.config.carrier.scales
+        cstm_horizon_rows: dict[int, int] = {}
         training_state = None
         ledger: ProvenanceLedger | None = None
         last_state = None
@@ -1955,7 +4303,10 @@ class MRCRANextTokenTrainer:
         group_penalties: list[Tensor] = []
         group_state_maxima: list[Tensor] = []
         group_event_activations: list[Tensor] = []
+        group_cstm_sums: dict[int, Tensor] = {}
+        group_cstm_weights: dict[int, Tensor] = {}
         group_tokens = 0
+        document_start = 0
         proposal_logit_rows: list[Tensor] = []
         end_logit_rows: list[Tensor] = []
         processed_tokens = 0
@@ -1964,10 +4315,15 @@ class MRCRANextTokenTrainer:
         model_forward_seconds = 0.0
         loss_forward_seconds = 0.0
         backward_seconds = 0.0
+        primary_backward_seconds = 0.0
+        cstm_substrate_backward_seconds = 0.0
 
         def flush_group(*, final: bool) -> None:
             nonlocal nll_sum, byte_count, state_rms_max, group_tokens
             nonlocal loss_forward_seconds, backward_seconds
+            nonlocal primary_backward_seconds
+            nonlocal cstm_substrate_backward_seconds
+            nonlocal cstm_loss_numerator, cstm_weighted_rows
             if not group_latents:
                 return
             loss_started = perf_counter()
@@ -1996,15 +4352,43 @@ class MRCRANextTokenTrainer:
                         )
                     )
                 scaled = loss / gradient_divisor
+                active_cstm_scales = tuple(
+                    scale
+                    for scale, weight in group_cstm_weights.items()
+                    if float(weight.detach()) > 0
+                )
+                cstm_group_loss = (
+                    torch.stack([
+                        group_cstm_sums[scale]
+                        for scale in active_cstm_scales
+                    ]).sum()
+                    / max(cstm_context_weight, 1.0)
+                    if active_cstm_scales
+                    else loss * 0
+                )
             loss_forward_seconds += perf_counter() - loss_started
             if not bool(torch.isfinite(scaled)):
                 raise FloatingPointError("MRCRA integrated language loss became non-finite")
-            backward_started = perf_counter()
+            if active_cstm_scales and cstm_objective_weight > 0:
+                cstm_started = perf_counter()
+                self._accumulate_cstm_gradients(
+                    cstm_group_loss,
+                    objective_weight=cstm_objective_weight,
+                    gradient_divisor=gradient_divisor,
+                )
+                cstm_substrate_backward_seconds += (
+                    perf_counter() - cstm_started
+                )
+            primary_started = perf_counter()
             if self.scaler is None:
                 scaled.backward()
             else:
                 self.scaler.scale(scaled).backward()
-            backward_seconds += perf_counter() - backward_started
+            primary_backward_seconds += perf_counter() - primary_started
+            backward_seconds = (
+                primary_backward_seconds
+                + cstm_substrate_backward_seconds
+            )
             nll_sum += float(statistics.nll_sum.detach().cpu())
             byte_count += statistics.byte_count
             if group_state_maxima:
@@ -2012,6 +4396,17 @@ class MRCRANextTokenTrainer:
                     state_rms_max,
                     float(torch.stack(group_state_maxima).max().detach().cpu()),
                 )
+            if active_cstm_scales:
+                local_sum = sum(
+                    float(group_cstm_sums[scale].detach().cpu())
+                    for scale in active_cstm_scales
+                )
+                local_weight = sum(
+                    float(group_cstm_weights[scale].detach().cpu())
+                    for scale in active_cstm_scales
+                )
+                cstm_loss_numerator += local_sum
+                cstm_weighted_rows += local_weight
             group_latents.clear()
             group_labels.clear()
             group_byte_lengths.clear()
@@ -2019,12 +4414,15 @@ class MRCRANextTokenTrainer:
             group_penalties.clear()
             group_state_maxima.clear()
             group_event_activations.clear()
+            group_cstm_sums.clear()
+            group_cstm_weights.clear()
             group_tokens = 0
 
         for span_index, (start, end, reset) in enumerate(spans):
             if reset:
                 training_state = None
                 ledger = ProvenanceLedger()
+                document_start = start
             if group_tokens and group_tokens + (end - start) > self.config.tbptt_length:
                 flush_group(final=False)
             if ledger is None:
@@ -2050,6 +4448,13 @@ class MRCRANextTokenTrainer:
                 state_penalty, state_max = self._integrated_state_energy(
                     output.state, self.config.state_target_rms,
                 )
+                cstm_predictions = (
+                    self.model.predict_causal_spectral_targets(
+                        output,
+                        extra_horizon_offset=self.state.step,
+                    )
+                    if cstm_objective_weight > 0 else ()
+                )
             model_forward_seconds += perf_counter() - forward_started
             group_latents.append(output.output_latent)
             group_labels.append(batch.labels[:, start:end])
@@ -2058,6 +4463,53 @@ class MRCRANextTokenTrainer:
             group_penalties.append(state_penalty)
             group_state_maxima.append(state_max)
             group_event_activations.append(output.event_activation_mean)
+            for prediction in cstm_predictions:
+                source_positions = (
+                    prediction.source_positions + document_start
+                )
+                targets = build_causal_spectral_targets(
+                    batch.labels,
+                    batch.loss_mask,
+                    batch.segment_ids,
+                    batch.target_segment_ids,
+                    self.model.cstm_predictor.token_codes,
+                    source_positions,
+                    support=prediction.support,
+                    horizons=prediction.horizons,
+                )
+                report: CSTMLoss = self.model.cstm_predictor.loss(
+                    prediction.values,
+                    targets,
+                    scale=prediction.scale,
+                    update_statistics=self.model.training,
+                )
+                if report.valid_rows:
+                    group_cstm_sums[prediction.scale] = (
+                        group_cstm_sums.get(
+                            prediction.scale,
+                            report.standardized_huber_sum * 0,
+                        )
+                        + report.standardized_huber_sum
+                    )
+                    group_cstm_weights[prediction.scale] = (
+                        group_cstm_weights.get(
+                            prediction.scale,
+                            report.weighted_rows * 0,
+                        )
+                        + report.weighted_rows
+                    )
+                cstm_valid_rows += report.valid_rows
+                cstm_coefficient_targets += report.coefficient_targets
+                cstm_token_participations += report.token_participations
+                cstm_scale_rows[prediction.scale] += report.valid_rows
+                for horizon, count in zip(
+                    prediction.horizons,
+                    report.per_horizon_rows,
+                    strict=True,
+                ):
+                    cstm_horizon_rows[horizon] = (
+                        cstm_horizon_rows.get(horizon, 0) + count
+                    )
             group_tokens += end - start
             processed_tokens = end
             cognitive_cycles += int(output.cognitive_cycles.sum().detach().cpu())
@@ -2155,10 +4607,70 @@ class MRCRANextTokenTrainer:
             "train/valid_targets": float(total_valid),
             "train/utf8_bytes": float(byte_count),
             "training/integrated_cognitive_path": 1.0,
+            "cstm/enabled": float(self.cstm_enabled),
+            "cstm/objective_weight": cstm_objective_weight,
+            "cstm/standardized_huber": (
+                cstm_loss_numerator / max(1.0, cstm_weighted_rows)
+            ),
+            "cstm/standardized_huber_sum": cstm_loss_numerator,
+            "cstm/estimated_dense_standardized_huber": (
+                cstm_loss_numerator
+                / max(1.0, cstm_context_weight)
+            ),
+            "cstm/estimated_dense_numerator": cstm_loss_numerator,
+            "cstm/context_valid_weight": cstm_context_weight,
+            "cstm/weighted_prediction_rows": cstm_weighted_rows,
+            "cstm/spectral_target_views": float(cstm_valid_rows),
+            "cstm/coefficient_targets": float(cstm_coefficient_targets),
+            "cstm/raw_token_view_equivalents": float(
+                cstm_token_participations
+            ),
+            "cstm/supervision_relations_per_primary_target": (
+                cstm_token_participations / max(1, total_valid)
+            ),
+            "cstm/sampling_active": 0.0,
+            "cstm/sampling_obligations": 0.0,
+            "cstm/sampling_inclusion_probability": 1.0,
+            "cstm/sampling_inverse_probability": 1.0,
+            "cstm/predictor_backward_seconds": 0.0,
+            "cstm/substrate_backward_seconds": (
+                cstm_substrate_backward_seconds
+            ),
             "performance/model_forward_seconds": model_forward_seconds,
+            "performance/primary_forward_seconds": model_forward_seconds,
             "performance/loss_forward_seconds": loss_forward_seconds,
             "performance/backward_seconds": backward_seconds,
+            "performance/primary_backward_seconds": (
+                primary_backward_seconds
+            ),
+            "performance/carrier_custom_affine_adjoint": 1.0,
+            "performance/carrier_custom_simplex_adjoint": 1.0,
+            "performance/carrier_whole_span_checkpoint": float(
+                self.model.cognitive.carrier._last_composite_receipt
+                is not None
+            ),
+            "softmax/training/exact_full_vocabulary": 1.0,
+            "softmax/training/external_cce_available": float(
+                self.runtime["cut_cross_entropy_available"]
+            ),
+            "softmax/training/compiled_cce_fits_workspace": float(
+                self.runtime["compiled_cce_fits_workspace"]
+            ),
+            "softmax/training/estimated_full_logits_mib": (
+                self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
+            ),
+            "softmax/training/backend_id": float({
+                "tiled": 0,
+                "fused": 1,
+                "torch_compile": 2,
+                "cce_kahan_full_c": 3,
+                "cce_exact": 4,
+            }[self._exact_loss_backend]),
         }
+        for scale, rows in enumerate(cstm_scale_rows):
+            metrics[f"cstm/scale/{scale}/valid_rows"] = float(rows)
+        for horizon, rows in sorted(cstm_horizon_rows.items()):
+            metrics[f"cstm/horizon/{horizon}/valid_rows"] = float(rows)
         if self.config.phase_transition_telemetry:
             if not proposal_logit_rows or not end_logit_rows:
                 raise RuntimeError("integrated path omitted event phase logits")
@@ -2174,6 +4686,1087 @@ class MRCRANextTokenTrainer:
             ))
         return metrics
 
+    def _run_document_major_context(
+        self, batch: PackedBatch, *, gradient_divisor: int,
+    ) -> dict[str, float]:
+        """Execute independent documents as stable, static-shaped row cohorts.
+
+        The planner is the sole authority for regrouping.  Its bijection
+        receipt proves that every original language target appears exactly
+        once.  Recurrent state and provenance are local to one cohort, rows
+        never change identity between spans, and every padded token/event is
+        explicitly masked.  Gradients are truncated only after one complete
+        static TBPTT span, which makes this both the semantic replacement for
+        the former document-at-a-time loop and the coarse unit used by the
+        optimized execution backends.
+        """
+
+        planner = self.document_batch_planner
+        if planner is None:
+            raise RuntimeError("document-major execution requires a configured planner")
+        batch = batch.to(self.device, non_blocking=self.device.type == "cuda")
+        planner_started = perf_counter()
+        plan = planner.plan(batch)
+        planner_seconds = perf_counter() - planner_started
+        total_valid = plan.original_valid_targets
+        if total_valid <= 0 or not plan.receipt.passed:
+            raise RuntimeError("document-major plan omitted exact target authority")
+
+        head = self.model.cognitive.carrier.output_head
+        physical_invocations = plan.physical_invocations
+        logical_spans = sum(
+            len(sequence.spans) for sequence in plan.sequences
+        )
+        if physical_invocations <= 0:
+            raise RuntimeError("document-major plan contains no physical invocation")
+        cstm_objective_weight = self._cstm_objective_weight()
+        cstm_sampling = (
+            self._cstm_document_sampling_decision(plan)
+            if (
+                cstm_objective_weight > 0
+                and self.config.cstm_execution == "sampled"
+            )
+            else None
+        )
+        cstm_predictor_sampling = (
+            self._cstm_document_sampling_decision(
+                plan, duty_probability=1.0,
+            )
+            if (
+                cstm_sampling is not None
+                and self.state.step
+                % self.config.cstm_predictor_update_interval
+                == 0
+            )
+            else None
+        )
+        cstm_context_weight = (
+            cstm_sampling.dense_weight
+            if cstm_sampling is not None
+            else self._cstm_context_weight(batch)
+            if cstm_objective_weight > 0
+            else 0.0
+        )
+        predictor_statistics_weight = 1.0
+        if (
+            cstm_predictor_sampling is not None
+            and cstm_predictor_sampling.active
+            and cstm_predictor_sampling.obligation is not None
+        ):
+            predictor_statistics_weight = (
+                cstm_predictor_sampling.obligation.dense_weight
+                / (
+                    cstm_predictor_sampling.dense_weight
+                    * cstm_predictor_sampling.conditional_probability
+                )
+            )
+
+        nll_sum = 0.0
+        byte_count = 0
+        state_rms_max = 0.0
+        cognitive_cycles = 0
+        event_count = 0
+        event_activation_weighted = 0.0
+        valid_event_rows = 0
+        event_opened = 0
+        event_finalized = 0
+        event_emitted = 0
+        event_quota_rejected = 0
+        event_open_after = 0
+        active_nodes_weighted = 0.0
+        active_nodes_max = 0.0
+        feedback_rms_max = 0.0
+        cstm_loss_numerator = 0.0
+        cstm_weighted_rows = 0.0
+        cstm_valid_rows = 0
+        cstm_coefficient_targets = 0
+        cstm_token_participations = 0
+        cstm_scale_rows = [0] * self.model.config.carrier.scales
+        cstm_horizon_rows: dict[int, int] = {}
+        cstm_estimated_dense_numerator = 0.0
+        cstm_estimated_target_views = 0.0
+        cstm_estimated_token_participations = 0.0
+        cstm_row_inclusion_probability_min = 1.0
+        cstm_row_inverse_probability_max = 1.0
+        cstm_substrate_vjp_count = 0
+        proposal_logit_rows: list[Tensor] = []
+        end_logit_rows: list[Tensor] = []
+        last_state = None
+        last_ledger = None
+        processed_tokens = 0
+        processed_physical_tokens = 0
+        next_progress = self.config.progress_interval_tokens
+        started = perf_counter()
+        model_forward_seconds = 0.0
+        loss_forward_seconds = 0.0
+        backward_seconds = 0.0
+        cstm_predictor_backward_seconds = 0.0
+        cstm_substrate_backward_seconds = 0.0
+        invocation_index = 0
+        activation_invocations = {
+            "retain": 0,
+            "selective": 0,
+            "whole_span": 0,
+        }
+
+        for cohort in plan.cohorts:
+            authority = cohort.target_authority()
+            training_state = None
+            ledger = ProvenanceLedger()
+            for physical in cohort.spans:
+                invocation_index += 1
+                physical_tokens = int(physical.input_ids.numel())
+                invocation_activation_policy = (
+                    "retain"
+                    if (
+                        self.activation_retain_physical_token_limit > 0
+                        and physical_tokens
+                        <= self.activation_retain_physical_token_limit
+                    )
+                    else self.activation_execution_policy.resolved
+                )
+                activation_invocations[invocation_activation_policy] += 1
+                invocation_selective_scales = (
+                    tuple(
+                        self.runtime[
+                            "carrier_selective_checkpoint_scales"
+                        ]
+                    )
+                    if invocation_activation_policy == "selective"
+                    else ()
+                )
+                self.model.cognitive.carrier.configure_activation_execution(
+                    invocation_activation_policy,
+                    selective_scales=invocation_selective_scales,
+                )
+                if physical.reset_state != (training_state is None):
+                    raise RuntimeError(
+                        "document-major cohort violated its declared state-reset boundary"
+                    )
+                token_segments = physical.segment_ids[:, None].expand(
+                    -1, physical.padded_length
+                ).masked_fill(~physical.token_mask, -1)
+                forward_started = perf_counter()
+                with self._autocast():
+                    packet, ledger = self.model.prepare_external_input(
+                        physical.input_ids,
+                        attention_mask=physical.token_mask,
+                        segment_ids=token_segments,
+                        boundary_classes=physical.boundary_classes,
+                        source_uris=physical.source_uris,
+                        ledger=ledger,
+                        continuing=training_state is not None,
+                        timestamp_offset=physical.context_starts,
+                    )
+                    output = self.model.cognitive.forward_integrated_training(
+                        packet,
+                        ledger,
+                        state=training_state,
+                        cognitive_stride=self.config.cognitive_stride,
+                        cognitive_tbptt_events=self.config.cognitive_tbptt_events,
+                    )
+                    if not torch.equal(output.event_mask, physical.event_mask):
+                        raise RuntimeError(
+                            "cognitive execution event mask differs from static plan authority"
+                        )
+                    state_penalty_rows, state_max = (
+                        self._integrated_state_energy_rows(
+                        output.state, self.config.state_target_rms,
+                        )
+                    )
+                    selected_substrate_scale = (
+                        cstm_sampling.obligation.scale
+                        if (
+                            cstm_sampling is not None
+                            and cstm_sampling.active
+                            and cstm_sampling.obligation is not None
+                            and cstm_sampling.obligation.invocation
+                            == invocation_index
+                        )
+                        else None
+                    )
+                    selected_predictor_scale = (
+                        cstm_predictor_sampling.obligation.scale
+                        if (
+                            cstm_predictor_sampling is not None
+                            and cstm_predictor_sampling.active
+                            and cstm_predictor_sampling.obligation is not None
+                            and cstm_predictor_sampling.obligation.invocation
+                            == invocation_index
+                        )
+                        else None
+                    )
+                    substrate_predictions = (
+                        self.model.predict_causal_spectral_targets(
+                            output,
+                            extra_horizon_offset=self.state.step,
+                            selected_scales=(
+                                None
+                                if cstm_sampling is None
+                                else ()
+                                if selected_substrate_scale is None
+                                else (selected_substrate_scale,)
+                            ),
+                            target_participation_budget=(
+                                self.config.cstm_target_participation_budget
+                                if cstm_sampling is not None else None
+                            ),
+                            row_sampling_digest=(
+                                None
+                                if cstm_sampling is None
+                                else cstm_sampling.counter_digest
+                            ),
+                            row_sampling_stream=0,
+                        )
+                        if (
+                            cstm_objective_weight > 0
+                            and (
+                                cstm_sampling is None
+                                or selected_substrate_scale is not None
+                            )
+                        )
+                        else ()
+                    )
+                    predictor_predictions = (
+                        self.model.predict_causal_spectral_targets(
+                            output,
+                            extra_horizon_offset=self.state.step,
+                            selected_scales=(selected_predictor_scale,),
+                            detach_substrate=True,
+                            target_participation_budget=(
+                                self.config.cstm_target_participation_budget
+                            ),
+                            row_sampling_digest=(
+                                cstm_predictor_sampling.counter_digest
+                                if cstm_predictor_sampling is not None
+                                else None
+                            ),
+                            row_sampling_stream=10_000,
+                        )
+                        if selected_predictor_scale is not None else ()
+                    )
+                model_forward_seconds += perf_counter() - forward_started
+
+                loss_started = perf_counter()
+                with self._autocast():
+                    statistics = self._language_statistics(
+                        output.output_latent,
+                        physical.labels,
+                        physical.target_byte_lengths,
+                        physical.loss_mask,
+                        head,
+                    )
+                    loss = statistics.nll_sum / total_valid
+                    loss = loss + self.config.state_regularization_weight * (
+                        state_penalty_rows.sum().to(loss.device)
+                        / logical_spans
+                    )
+                    event_probability = torch.sigmoid(
+                        output.event_proposal_logits
+                    ) * (
+                        0.5
+                        + 0.5 * torch.sigmoid(output.event_end_logits)
+                    )
+                    event_rows = (
+                        event_probability
+                        * output.event_mask.to(event_probability.dtype)
+                    ).sum(1) / output.event_mask.sum(1).clamp_min(1)
+                    loss = loss + self.config.event_compute_regularization_weight * (
+                        event_rows.sum().to(loss.device) / logical_spans
+                    )
+                    if (
+                        invocation_index == physical_invocations
+                        and self.schedule.weight(ObjectiveFamily.SPECTRAL_SUBSTRATE)
+                    ):
+                        loss = loss + self.config.spectral_regularization_weight * (
+                            spectral_activation_regularization(
+                                self._spectral_modules
+                            ).to(loss.device)
+                        )
+
+                    substrate_sums: dict[int, Tensor] = {}
+                    substrate_weights: dict[int, Tensor] = {}
+                    predictor_sums: dict[int, Tensor] = {}
+                    predictor_weights: dict[int, Tensor] = {}
+
+                    def evaluate_predictions(
+                        predictions,
+                        sums: dict[int, Tensor],
+                        weights: dict[int, Tensor],
+                        *,
+                        update_statistics: bool,
+                        account_targets: bool,
+                        statistics_importance_weight: float = 1.0,
+                        obligation_inverse_probability: float = 1.0,
+                    ) -> None:
+                        nonlocal cstm_valid_rows
+                        nonlocal cstm_coefficient_targets
+                        nonlocal cstm_token_participations
+                        nonlocal cstm_estimated_target_views
+                        nonlocal cstm_estimated_token_participations
+                        nonlocal cstm_row_inclusion_probability_min
+                        nonlocal cstm_row_inverse_probability_max
+                        for prediction in predictions:
+                            targets = build_causal_spectral_targets(
+                                authority.labels,
+                                authority.loss_mask,
+                                authority.segment_ids,
+                                authority.target_segment_ids,
+                                self.model.cstm_predictor.token_codes,
+                                prediction.source_positions,
+                                support=prediction.support,
+                                horizons=prediction.horizons,
+                            )
+                            report: CSTMLoss = self.model.cstm_predictor.loss(
+                                prediction.values,
+                                targets,
+                                scale=prediction.scale,
+                                update_statistics=(
+                                    self.model.training
+                                    and update_statistics
+                                ),
+                                statistics_importance_weight=(
+                                    statistics_importance_weight
+                                    / prediction.row_inclusion_probability
+                                ),
+                            )
+                            row_inverse = (
+                                1.0 / prediction.row_inclusion_probability
+                            )
+                            cstm_row_inclusion_probability_min = min(
+                                cstm_row_inclusion_probability_min,
+                                prediction.row_inclusion_probability,
+                            )
+                            cstm_row_inverse_probability_max = max(
+                                cstm_row_inverse_probability_max,
+                                row_inverse,
+                            )
+                            if report.valid_rows:
+                                sums[prediction.scale] = (
+                                    sums.get(
+                                        prediction.scale,
+                                        report.standardized_huber_sum * 0,
+                                    )
+                                    + report.standardized_huber_sum
+                                    * row_inverse
+                                )
+                                weights[prediction.scale] = (
+                                    weights.get(
+                                        prediction.scale,
+                                        report.weighted_rows * 0,
+                                    )
+                                    + report.weighted_rows * row_inverse
+                                )
+                            if account_targets:
+                                cstm_valid_rows += report.valid_rows
+                                cstm_coefficient_targets += (
+                                    report.coefficient_targets
+                                )
+                                cstm_token_participations += (
+                                    report.token_participations
+                                )
+                                cstm_estimated_target_views += (
+                                    report.valid_rows
+                                    * row_inverse
+                                    * obligation_inverse_probability
+                                )
+                                cstm_estimated_token_participations += (
+                                    report.token_participations
+                                    * row_inverse
+                                    * obligation_inverse_probability
+                                )
+                                cstm_scale_rows[prediction.scale] += (
+                                    report.valid_rows
+                                )
+                                for horizon, count in zip(
+                                    prediction.horizons,
+                                    report.per_horizon_rows,
+                                    strict=True,
+                                ):
+                                    cstm_horizon_rows[horizon] = (
+                                        cstm_horizon_rows.get(horizon, 0)
+                                        + count
+                                    )
+
+                    if cstm_sampling is None:
+                        evaluate_predictions(
+                            substrate_predictions,
+                            substrate_sums,
+                            substrate_weights,
+                            update_statistics=True,
+                            account_targets=True,
+                            statistics_importance_weight=1.0,
+                            obligation_inverse_probability=1.0,
+                        )
+                    else:
+                        if cstm_predictor_sampling is not None:
+                            evaluate_predictions(
+                                predictor_predictions,
+                                predictor_sums,
+                                predictor_weights,
+                                update_statistics=True,
+                                account_targets=True,
+                                statistics_importance_weight=(
+                                    predictor_statistics_weight
+                                ),
+                                obligation_inverse_probability=(
+                                    cstm_predictor_sampling.inverse_probability
+                                ),
+                            )
+                        evaluate_predictions(
+                            substrate_predictions,
+                            substrate_sums,
+                            substrate_weights,
+                            update_statistics=False,
+                            account_targets=(
+                                cstm_predictor_sampling is None
+                            ),
+                            obligation_inverse_probability=(
+                                cstm_sampling.inverse_probability
+                            ),
+                        )
+                    active_substrate_scales = tuple(
+                        scale
+                        for scale, weight in substrate_weights.items()
+                        if float(weight.detach()) > 0
+                    )
+                    active_predictor_scales = tuple(
+                        scale
+                        for scale, weight in predictor_weights.items()
+                        if float(weight.detach()) > 0
+                    )
+                    substrate_denominator = (
+                        max(
+                            cstm_context_weight
+                            * cstm_sampling.inclusion_probability,
+                            1e-30,
+                        )
+                        if cstm_sampling is not None and cstm_sampling.active
+                        else max(cstm_context_weight, 1.0)
+                    )
+                    substrate_loss = (
+                        torch.stack(
+                            [
+                                substrate_sums[scale]
+                                for scale in active_substrate_scales
+                            ]
+                        ).sum()
+                        / substrate_denominator
+                        if active_substrate_scales
+                        else loss * 0
+                    )
+                    predictor_loss = (
+                        torch.stack(
+                            [
+                                predictor_sums[scale]
+                                for scale in active_predictor_scales
+                            ]
+                        ).sum()
+                        / max(
+                            cstm_context_weight
+                            * (
+                                cstm_predictor_sampling.inclusion_probability
+                                if cstm_predictor_sampling is not None
+                                else 1.0
+                            ),
+                            1e-30,
+                        )
+                        if active_predictor_scales
+                        else loss * 0
+                    )
+                    scaled = loss / gradient_divisor
+                loss_forward_seconds += perf_counter() - loss_started
+                if not bool(torch.isfinite(scaled)):
+                    raise FloatingPointError(
+                        "MRCRA document-major language loss became non-finite"
+                    )
+
+                backward_started = perf_counter()
+                if active_predictor_scales and cstm_objective_weight > 0:
+                    predictor_backward_started = perf_counter()
+                    self._accumulate_cstm_gradients(
+                        predictor_loss,
+                        objective_weight=cstm_objective_weight,
+                        gradient_divisor=gradient_divisor,
+                        authority="predictor",
+                    )
+                    cstm_predictor_backward_seconds += (
+                        perf_counter() - predictor_backward_started
+                    )
+                if active_substrate_scales and cstm_objective_weight > 0:
+                    substrate_backward_started = perf_counter()
+                    self._accumulate_cstm_gradients(
+                        substrate_loss,
+                        objective_weight=cstm_objective_weight,
+                        gradient_divisor=gradient_divisor,
+                        authority=(
+                            "all"
+                            if cstm_sampling is None else "substrate"
+                        ),
+                    )
+                    cstm_substrate_backward_seconds += (
+                        perf_counter() - substrate_backward_started
+                    )
+                    if cstm_sampling is not None:
+                        cstm_substrate_vjp_count += 1
+                if self.scaler is None:
+                    scaled.backward()
+                else:
+                    self.scaler.scale(scaled).backward()
+                backward_seconds += perf_counter() - backward_started
+                # Keep the resolved maximum-shape policy as the public module
+                # state between invocations. Checkpoint/resume and OOM fallback
+                # serialize this authority; shape-local retention is a bounded
+                # optimization beneath it.
+                self.model.cognitive.carrier.configure_activation_execution(
+                    self.activation_execution_policy.resolved,
+                    selective_scales=tuple(
+                        self.runtime[
+                            "carrier_selective_checkpoint_scales"
+                        ]
+                    )
+                    if self.activation_execution_policy.resolved == "selective"
+                    else (),
+                )
+
+                nll_sum += float(statistics.nll_sum.detach().cpu())
+                byte_count += statistics.byte_count
+                state_rms_max = max(
+                    state_rms_max, float(state_max.detach().cpu())
+                )
+                use_predictor_metrics = bool(active_predictor_scales)
+                metric_scales = (
+                    active_predictor_scales
+                    if use_predictor_metrics else active_substrate_scales
+                )
+                metric_sums = (
+                    predictor_sums
+                    if use_predictor_metrics else substrate_sums
+                )
+                metric_weights = (
+                    predictor_weights
+                    if use_predictor_metrics else substrate_weights
+                )
+                metric_inverse_probability = (
+                    cstm_predictor_sampling.inverse_probability
+                    if (
+                        use_predictor_metrics
+                        and cstm_predictor_sampling is not None
+                    )
+                    else cstm_sampling.inverse_probability
+                    if cstm_sampling is not None
+                    else 1.0
+                )
+                if metric_scales:
+                    local_cstm_sum = sum(
+                        float(metric_sums[scale].detach().cpu())
+                        for scale in metric_scales
+                    )
+                    cstm_loss_numerator += local_cstm_sum
+                    cstm_estimated_dense_numerator += (
+                        local_cstm_sum
+                        * (
+                            metric_inverse_probability
+                        )
+                    )
+                    cstm_weighted_rows += sum(
+                        float(metric_weights[scale].detach().cpu())
+                        for scale in metric_scales
+                    )
+
+                local_events = int(output.event_mask.sum().detach().cpu())
+                valid_event_rows += local_events
+                cognitive_cycles += int(
+                    output.cognitive_cycles.sum().detach().cpu()
+                )
+                event_count += int(output.event_counts.sum().detach().cpu())
+                event_activation_weighted += (
+                    float(output.event_activation_mean.detach().cpu())
+                    * local_events
+                )
+                if local_events:
+                    proposal_logit_rows.append(
+                        output.event_proposal_logits[
+                            output.event_mask
+                        ].detach()
+                    )
+                    end_logit_rows.append(
+                        output.event_end_logits[output.event_mask].detach()
+                    )
+                event_opened += int(output.event_opened.sum().detach().cpu())
+                event_finalized += int(
+                    output.event_finalized.sum().detach().cpu()
+                )
+                event_emitted += int(output.event_emitted.sum().detach().cpu())
+                event_quota_rejected += int(
+                    output.event_quota_rejected.sum().detach().cpu()
+                )
+                if bool(physical.final_rows.all()):
+                    event_open_after += int(
+                        output.event_open_after[:, -1].sum().detach().cpu()
+                    )
+                active_nodes_weighted += (
+                    float(output.active_nodes_mean.detach().cpu())
+                    * local_events
+                )
+                active_nodes_max = max(
+                    active_nodes_max,
+                    float(output.active_nodes_max.detach().cpu()),
+                )
+                feedback_rms_max = max(
+                    feedback_rms_max,
+                    float(output.feedback_rms.detach().cpu()),
+                )
+                if (
+                    self.config.phase_transition_telemetry
+                    and self.state.first_hard_event_step == 0
+                    and self._pending_first_hard_event_trace is None
+                    and output.first_hard_event is not None
+                ):
+                    row = output.first_hard_event.batch_index
+                    if not 0 <= row < physical.batch_size:
+                        raise RuntimeError(
+                            "hard-event trace names a row outside its cohort"
+                        )
+                    self._pending_first_hard_event_trace = replace(
+                        output.first_hard_event,
+                        anchor_index=(
+                            int(physical.context_starts[row])
+                            + output.first_hard_event.anchor_index
+                        ),
+                        batch_index=int(physical.document_orders[row]),
+                    )
+
+                processed_tokens += physical.valid_tokens
+                processed_physical_tokens += physical.token_mask.numel()
+                training_state = output.state.detach()
+                last_state, last_ledger = training_state, ledger
+                final = invocation_index == physical_invocations
+                if processed_tokens >= next_progress or final:
+                    _synchronize(self.device)
+                    elapsed = perf_counter() - started
+                    print(
+                        f"update={self.state.step + 1} "
+                        f"document_tokens={processed_tokens}/"
+                        f"{plan.valid_document_tokens} "
+                        f"physical_tokens={processed_physical_tokens}/"
+                        f"{plan.physical_tokens} "
+                        f"elapsed={elapsed:.1f}s "
+                        f"tok/s={processed_tokens / max(elapsed, 1e-9):.1f} "
+                        f"cognitive_cycles={cognitive_cycles}",
+                        flush=True,
+                    )
+                    while next_progress <= processed_tokens:
+                        next_progress += self.config.progress_interval_tokens
+
+        if nll_sum <= 0 or byte_count <= 0:
+            raise RuntimeError("document-major execution produced no language authority")
+        if cstm_substrate_vjp_count > self.config.cstm_max_substrate_vjps:
+            raise RuntimeError(
+                "CSTM substrate VJP count exceeded its checkpointed hard bound"
+            )
+        self._last_runtime = None if last_state is None else last_state.cognitive
+        self._last_ledger = last_ledger
+        self._last_continuity_keys = None
+        cognitive_parameters = tuple(
+            parameter
+            for name, parameter in self.model.cognitive.named_parameters()
+            if not name.startswith("carrier.")
+        )
+        cognitive_gradients = tuple(
+            parameter.grad
+            for parameter in cognitive_parameters
+            if parameter.grad is not None
+        )
+        cognitive_gradient_norm = (
+            torch.stack(
+                tuple(
+                    gradient.float().square().sum()
+                    for gradient in cognitive_gradients
+                )
+            ).sum().sqrt()
+            if cognitive_gradients
+            else torch.tensor(0.0)
+        )
+        coverage_gap = 0
+        if cstm_predictor_sampling is not None:
+            predictor_obligation = cstm_predictor_sampling.obligation
+            predictor_horizons: tuple[int, ...] = ()
+            if predictor_obligation is not None:
+                configured_horizons = (
+                    self.model.cstm_predictor.config.horizon_blocks
+                )
+                extras = configured_horizons[1:]
+                predictor_horizons = (
+                    (1,)
+                    if not extras
+                    else (
+                        1,
+                        extras[
+                            (
+                                self.state.step
+                                + predictor_obligation.scale
+                            )
+                            % len(extras)
+                        ],
+                    )
+                )
+            self.cstm_coverage.record_predictor(
+                cstm_predictor_sampling,
+                optimizer_step=self.state.step,
+                horizons=tuple(
+                    horizon
+                    for horizon in predictor_horizons
+                    if cstm_horizon_rows.get(horizon, 0) > 0
+                ),
+            )
+            if cstm_sampling is None:
+                raise RuntimeError(
+                    "predictor sampling exists without substrate schedule"
+                )
+            self.cstm_coverage.declare_required(
+                (
+                    *(
+                        f"scale:{scale}"
+                        for scale in cstm_predictor_sampling.eligible_scales
+                    ),
+                    *(
+                        f"horizon:{horizon}"
+                        for horizon, rows in cstm_horizon_rows.items()
+                        if rows > 0
+                    ),
+                )
+            )
+        if cstm_sampling is not None:
+            self.cstm_coverage.record_substrate(cstm_sampling)
+            self.cstm_coverage.declare_required(
+                tuple(
+                    f"scale:{scale}"
+                    for scale in cstm_sampling.eligible_scales
+                )
+            )
+        if cstm_sampling is not None or cstm_predictor_sampling is not None:
+            coverage_gap = self.cstm_coverage.maximum_gap(
+                optimizer_step=self.state.step,
+            )
+            if coverage_gap > self.config.cstm_maximum_coverage_gap:
+                raise RuntimeError(
+                    "sampled CSTM coverage exceeded its declared maximum "
+                    f"gap ({coverage_gap} > "
+                    f"{self.config.cstm_maximum_coverage_gap})"
+                )
+        predictor_inverse = (
+            1.0
+            if cstm_predictor_sampling is None
+            else cstm_predictor_sampling.inverse_probability
+        )
+        auxiliary_seconds = (
+            cstm_predictor_backward_seconds
+            + cstm_substrate_backward_seconds
+        )
+        primary_backward_seconds = max(
+            0.0,
+            backward_seconds - auxiliary_seconds,
+        )
+        measured_kernel_seconds = (
+            model_forward_seconds + loss_forward_seconds + backward_seconds
+        )
+        actual_execution_seconds = perf_counter() - started
+        unique_shapes = len({
+            (span.batch_size, span.padded_length)
+            for cohort in plan.cohorts
+            for span in cohort.spans
+        })
+        predicted_seconds = (
+            plan.cost_receipt.selected_estimated_cost
+            if planner.cost_model.calibration_kind.startswith("measured_")
+            else 0.0
+        )
+        metrics = {
+            "train/nll_sum": nll_sum,
+            "train/cross_entropy_nats_per_token": nll_sum / total_valid,
+            "train/effective_cross_entropy_nats_per_byte": (
+                nll_sum / max(1, byte_count)
+            ),
+            "train/bits_per_byte": nll_sum / max(1, byte_count) / log(2),
+            "train/valid_targets": float(total_valid),
+            "train/utf8_bytes": float(byte_count),
+            "training/integrated_cognitive_path": 1.0,
+            "training/document_major_static_batches": 1.0,
+            "document_batching/documents": float(len(plan.sequences)),
+            "document_batching/cohorts": float(len(plan.cohorts)),
+            "document_batching/physical_invocations": float(
+                physical_invocations
+            ),
+            "document_batching/logical_spans": float(logical_spans),
+            "document_batching/unique_shapes": float(unique_shapes),
+            "document_batching/receipt_unique_shapes": float(
+                plan.cost_receipt.unique_static_shapes
+            ),
+            "document_batching/physical_tokens": float(plan.physical_tokens),
+            "document_batching/valid_tokens": float(
+                plan.valid_document_tokens
+            ),
+            "document_batching/padding_efficiency": plan.padding_efficiency,
+            "document_batching/target_bijection": 1.0,
+            "execution/activation_invocations_retain": float(
+                activation_invocations["retain"]
+            ),
+            "execution/activation_invocations_selective": float(
+                activation_invocations["selective"]
+            ),
+            "execution/activation_invocations_whole_span": float(
+                activation_invocations["whole_span"]
+            ),
+            "document_batching/estimated_cost": (
+                plan.cost_receipt.selected_estimated_cost
+            ),
+            "document_batching/exact_signature_estimated_cost": (
+                plan.cost_receipt.exact_signature_estimated_cost
+            ),
+            "document_batching/estimated_savings_fraction": (
+                plan.cost_receipt.estimated_savings_fraction
+            ),
+            "document_batching/exact_signature_invocations": float(
+                plan.cost_receipt.exact_signature_invocations
+            ),
+            "document_batching/plan_cache_hit": float(
+                plan.cost_receipt.cache_hit
+            ),
+            "document_batching/rejected_memory_candidates": float(
+                plan.cost_receipt.rejected_memory_candidates
+            ),
+            "document_batching/predicted_peak_memory_bytes": float(
+                plan.cost_receipt.predicted_peak_memory_bytes
+            ),
+            "document_batching/shape_compile_cost": (
+                plan.cost_receipt.shape_compile_cost
+            ),
+            "document_batching/planner_seconds": planner_seconds,
+            "document_batching/actual_seconds": actual_execution_seconds,
+            "document_batching/predicted_seconds": predicted_seconds,
+            "document_batching/cost_prediction_error": (
+                0.0
+                if predicted_seconds <= 0
+                else (
+                    actual_execution_seconds - predicted_seconds
+                )
+                / predicted_seconds
+            ),
+            "architecture/state_rms_max": state_rms_max,
+            "architecture/cognitive_feedback_rms_max": feedback_rms_max,
+            "architecture/cognitive_cycles": float(cognitive_cycles),
+            "architecture/events": float(event_count),
+            "architecture/event_opened": float(event_opened),
+            "architecture/event_finalized": float(event_finalized),
+            "architecture/event_emitted": float(event_emitted),
+            "architecture/event_quota_rejected": float(
+                event_quota_rejected
+            ),
+            "architecture/event_open_after": float(event_open_after),
+            "architecture/event_activation_mean": (
+                event_activation_weighted / max(1, valid_event_rows)
+            ),
+            "architecture/active_nodes_mean": (
+                active_nodes_weighted / max(1, valid_event_rows)
+            ),
+            "architecture/active_nodes_max": active_nodes_max,
+            "architecture/node_capacity_utilization_max": (
+                active_nodes_max
+                / self.model.config.cognitive.active_event_capacity
+            ),
+            "optimization/cognitive_gradient_norm": float(
+                cognitive_gradient_norm.detach().cpu()
+            ),
+            "optimization/cognitive_gradient_tensor_fraction": (
+                len(cognitive_gradients) / max(1, len(cognitive_parameters))
+            ),
+            "cstm/enabled": float(self.cstm_enabled),
+            "cstm/objective_weight": cstm_objective_weight,
+            "cstm/standardized_huber": (
+                cstm_loss_numerator / max(1.0, cstm_weighted_rows)
+            ),
+            "cstm/standardized_huber_sum": cstm_loss_numerator,
+            "cstm/estimated_dense_standardized_huber": (
+                cstm_estimated_dense_numerator
+                / max(1.0, cstm_context_weight)
+            ),
+            "cstm/estimated_dense_numerator": (
+                cstm_estimated_dense_numerator
+            ),
+            "cstm/context_valid_weight": cstm_context_weight,
+            "cstm/weighted_prediction_rows": cstm_weighted_rows,
+            "cstm/spectral_target_views": float(cstm_valid_rows),
+            "cstm/coefficient_targets": float(cstm_coefficient_targets),
+            "cstm/raw_token_view_equivalents": float(
+                cstm_token_participations
+            ),
+            "cstm/supervision_relations_per_primary_target": (
+                cstm_token_participations / max(1, total_valid)
+            ),
+            "cstm/sampling_active": float(
+                cstm_sampling is not None and cstm_sampling.active
+            ),
+            "cstm/sampling_obligations": float(
+                0
+                if cstm_sampling is None
+                else cstm_sampling.obligation_count
+            ),
+            "cstm/sampling_inclusion_probability": (
+                1.0
+                if cstm_sampling is None
+                else cstm_sampling.inclusion_probability
+            ),
+            "cstm/sampling_inverse_probability": (
+                1.0
+                if cstm_sampling is None
+                else cstm_sampling.inverse_probability
+            ),
+            "cstm/predictor_update": float(
+                cstm_predictor_sampling is not None
+                and cstm_predictor_sampling.active
+            ),
+            "cstm/substrate_update": float(
+                cstm_sampling is not None and cstm_sampling.active
+            ),
+            "cstm/substrate_duty_probability": (
+                1.0
+                if cstm_sampling is None
+                else cstm_sampling.duty_probability
+            ),
+            "cstm/inclusion_probability_min": (
+                1.0
+                if cstm_sampling is None or not cstm_sampling.active
+                else min(
+                    cstm_sampling.inclusion_probability,
+                    (
+                        cstm_predictor_sampling.inclusion_probability
+                        if cstm_predictor_sampling is not None
+                        else 1.0
+                    ),
+                )
+            ),
+            "cstm/inclusion_weight_max": (
+                1.0
+                if cstm_sampling is None or not cstm_sampling.active
+                else max(
+                    cstm_sampling.inverse_probability,
+                    predictor_inverse,
+                    cstm_row_inverse_probability_max,
+                )
+            ),
+            "cstm/row_inclusion_probability_min": (
+                cstm_row_inclusion_probability_min
+            ),
+            "cstm/row_inclusion_weight_max": (
+                cstm_row_inverse_probability_max
+            ),
+            "cstm/actual_target_views": float(cstm_valid_rows),
+            "cstm/estimated_dense_target_views": (
+                cstm_estimated_target_views
+            ),
+            "cstm/actual_token_participations": float(
+                cstm_token_participations
+            ),
+            "cstm/estimated_dense_token_participations": (
+                cstm_estimated_token_participations
+            ),
+            "cstm/target_participation_budget": float(
+                self.config.cstm_target_participation_budget
+            ),
+            "cstm/max_substrate_vjps": float(
+                self.config.cstm_max_substrate_vjps
+            ),
+            "cstm/predictor_update_interval": float(
+                self.config.cstm_predictor_update_interval
+            ),
+            "cstm/coverage_gap_max": float(coverage_gap),
+            "cstm/predictor_updates_total": float(
+                self.cstm_coverage.predictor_updates
+            ),
+            "cstm/substrate_updates_total": float(
+                self.cstm_coverage.substrate_updates
+            ),
+            "cstm/selected_invocation": float(
+                -1
+                if cstm_sampling is None
+                or cstm_sampling.obligation is None
+                else cstm_sampling.obligation.invocation
+            ),
+            "cstm/selected_scale": float(
+                -1
+                if cstm_sampling is None
+                or cstm_sampling.obligation is None
+                else cstm_sampling.obligation.scale
+            ),
+            "cstm/substrate_vjp_count": float(
+                cstm_substrate_vjp_count
+            ),
+            "cstm/predictor_backward_seconds": (
+                cstm_predictor_backward_seconds
+            ),
+            "cstm/substrate_backward_seconds": (
+                cstm_substrate_backward_seconds
+            ),
+            "cstm/auxiliary_time_fraction": (
+                auxiliary_seconds / max(measured_kernel_seconds, 1e-30)
+            ),
+            "performance/model_forward_seconds": model_forward_seconds,
+            "performance/primary_forward_seconds": model_forward_seconds,
+            "performance/loss_forward_seconds": loss_forward_seconds,
+            "performance/backward_seconds": backward_seconds,
+            "performance/primary_backward_seconds": (
+                primary_backward_seconds
+            ),
+            "performance/carrier_custom_affine_adjoint": 1.0,
+            "performance/carrier_custom_simplex_adjoint": 1.0,
+            "performance/carrier_whole_span_checkpoint": float(
+                self.model.cognitive.carrier._last_composite_receipt
+                is not None
+            ),
+            "softmax/training/exact_full_vocabulary": 1.0,
+            "softmax/training/external_cce_available": float(
+                self.runtime["cut_cross_entropy_available"]
+            ),
+            "softmax/training/compiled_cce_fits_workspace": float(
+                self.runtime["compiled_cce_fits_workspace"]
+            ),
+            "softmax/training/estimated_full_logits_mib": (
+                self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
+            ),
+            "softmax/training/backend_id": float(
+                {
+                    "tiled": 0,
+                    "fused": 1,
+                    "torch_compile": 2,
+                    "cce_kahan_full_c": 3,
+                    "cce_exact": 4,
+                }[self._exact_loss_backend]
+            ),
+        }
+        for scale, rows in enumerate(cstm_scale_rows):
+            metrics[f"cstm/scale/{scale}/valid_rows"] = float(rows)
+        for horizon, rows in sorted(cstm_horizon_rows.items()):
+            metrics[f"cstm/horizon/{horizon}/valid_rows"] = float(rows)
+        if self.config.phase_transition_telemetry:
+            if not proposal_logit_rows or not end_logit_rows:
+                raise RuntimeError("document-major path omitted event phase logits")
+            proposal_logits, end_logits = _concatenate_event_phase_logits(
+                proposal_logit_rows, end_logit_rows,
+            )
+            self._phase_update_proposal_logits.append(proposal_logits.cpu())
+            self._phase_update_end_logits.append(end_logits.cpu())
+            metrics.update(
+                event_phase_metrics(
+                    proposal_logits,
+                    end_logits,
+                    proposal_threshold_logit=(
+                        self.model.cognitive.event_extractor.proposal_logit
+                    ),
+                )
+            )
+        return metrics
+
     def _run_context(
         self, batch: PackedBatch, *, gradient_divisor: int | None = None,
     ) -> dict[str, float]:
@@ -2184,6 +5777,10 @@ class MRCRANextTokenTrainer:
         if gradient_divisor <= 0:
             raise ValueError("gradient divisor must be positive")
         if self.integrated_cognitive_path:
+            if self.document_batch_planner is not None:
+                return self._run_document_major_context(
+                    batch, gradient_divisor=gradient_divisor,
+                )
             return self._run_integrated_context(
                 batch, gradient_divisor=gradient_divisor,
             )
@@ -2304,6 +5901,23 @@ class MRCRANextTokenTrainer:
             "architecture/state_rms_max": state_rms_max,
             "train/valid_targets": float(total_valid),
             "train/utf8_bytes": float(byte_count),
+            "softmax/training/exact_full_vocabulary": 1.0,
+            "softmax/training/external_cce_available": float(
+                self.runtime["cut_cross_entropy_available"]
+            ),
+            "softmax/training/compiled_cce_fits_workspace": float(
+                self.runtime["compiled_cce_fits_workspace"]
+            ),
+            "softmax/training/estimated_full_logits_mib": (
+                self.runtime["estimated_fused_loss_bytes"] / (1 << 20)
+            ),
+            "softmax/training/backend_id": float({
+                "tiled": 0,
+                "fused": 1,
+                "torch_compile": 2,
+                "cce_kahan_full_c": 3,
+                "cce_exact": 4,
+            }[self._exact_loss_backend]),
         }
         metrics.update(cognitive_metrics(output.cognitive, ledger))
         metrics.update(auxiliary_metrics)
@@ -2644,7 +6258,7 @@ class MRCRANextTokenTrainer:
         destination = Path(self.config.output_dir) / "evaluation_metrics.jsonl"
         destination.parent.mkdir(parents=True, exist_ok=True)
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "step": self.state.step,
             "tokens_seen": self.state.tokens_seen,
             "evaluation_identity": self.evaluation_identity,
@@ -2832,6 +6446,7 @@ class MRCRANextTokenTrainer:
                 "end_logit": self.model.cognitive.event_extractor.end_logit,
             },
             "trigger": {
+                "document_order": trace.batch_index,
                 "anchor_index": trace.anchor_index,
                 "timestamp": self._trace_number(trace.timestamp),
                 "proposal_logit": self._trace_number(trace.proposal_logit),
@@ -2920,15 +6535,30 @@ class MRCRANextTokenTrainer:
         self._pending_first_hard_event_trace = None
         return checkpoint
 
-    def train(self, *, maximum_steps: int | None = None) -> MRCRATrainingState:
+    def train(
+        self,
+        *,
+        maximum_steps: int | None = None,
+        step_observer: Callable[
+            [MRCRATrainingState, Mapping[str, float]], None
+        ]
+        | None = None,
+    ) -> MRCRATrainingState:
         if maximum_steps is not None and maximum_steps <= 0:
             raise ValueError("maximum_steps must be positive")
         continuing = self._resumed or self.state.step > 0
         if not continuing:
             torch.manual_seed(self.config.seed)
-        reporter = (
-            TrackioReporter(self.config, self._identity(), resume=continuing)
-            if self.config.trackio_enabled else _NullReporter()
+        reporter = _NonAuthoritativeReporter(
+            (
+                TrackioReporter(
+                    self.config,
+                    self._identity(),
+                    resume=continuing,
+                )
+                if self.config.trackio_enabled else _NullReporter()
+            ),
+            self.config.output_dir,
         )
         started = perf_counter()
         completed_this_call = 0
@@ -2940,6 +6570,7 @@ class MRCRANextTokenTrainer:
                 self.model.train()
                 step_started = perf_counter()
                 self.optimizer.zero_grad(set_to_none=True)
+                self._cstm_auxiliary_gradients.clear()
                 pc_rasl_seconds = 0.0
                 if self.pc_rasl is not None:
                     pc_rasl_started = perf_counter()
@@ -2961,6 +6592,7 @@ class MRCRANextTokenTrainer:
                     self.config.gradient_accumulation_steps,
                     ceil((self.config.total_tokens - self.state.tokens_seen) / self.config.context_length),
                 )
+                batches_for_update: list[PackedBatch] = []
                 for _ in range(contexts_this_update):
                     remaining = self.config.total_tokens - self.state.tokens_seen - tokens_this_update
                     if remaining <= 0:
@@ -2998,12 +6630,120 @@ class MRCRANextTokenTrainer:
                             f"valid targets); starting {path_name}.",
                             flush=True,
                         )
-                    local = self._run_context(batch, gradient_divisor=contexts_this_update)
-                    if self.pc_rasl is not None:
-                        behavior_batch = batch
+                    batches_for_update.append(batch)
                     tokens_this_update += batch.token_count
-                    for name, value in local.items():
-                        aggregated[name] = aggregated.get(name, 0.0) + value
+
+                # Fetch once, then execute the immutable packed batches. This
+                # makes a pre-optimizer OOM retry causal: the data stream is
+                # never advanced twice and every accumulated context can be
+                # replayed under the next safer activation policy.
+                tokens_this_update = 0
+
+                def execute_update_batches() -> None:
+                    nonlocal tokens_this_update, behavior_batch
+                    aggregated.clear()
+                    tokens_this_update = 0
+                    behavior_batch = None
+                    for local_batch in batches_for_update:
+                        local = self._run_context(
+                            local_batch,
+                            gradient_divisor=contexts_this_update,
+                        )
+                        if self.pc_rasl is not None:
+                            behavior_batch = local_batch
+                        tokens_this_update += local_batch.token_count
+                        for name, value in local.items():
+                            aggregated[name] = (
+                                aggregated.get(name, 0.0) + value
+                            )
+
+                # Only the ordinary CE/CSTM path is retryable. PC-RASL may
+                # already have mutated its independent critic optimizer before
+                # this point, so an OOM in that experimental mode must abort.
+                retryable = (
+                    self.pc_rasl is None
+                    and self.activation_execution_policy.resolved
+                    != "whole_span"
+                )
+                buffer_snapshot = (
+                    {
+                        name: value.detach().clone()
+                        for name, value in self.model.named_buffers()
+                        if name.startswith(
+                            (
+                                "cstm_predictor.target_second_moment",
+                                "cstm_predictor.target_rms_initialized",
+                            )
+                        )
+                    }
+                    if retryable else {}
+                )
+                cpu_rng_snapshot = (
+                    torch.random.get_rng_state().clone()
+                    if retryable else None
+                )
+                accelerator_rng_snapshot = None
+                if retryable and self.device.type == "cuda":
+                    accelerator_rng_snapshot = torch.cuda.get_rng_state(
+                        self.device
+                    ).clone()
+                elif (
+                    retryable
+                    and self.device.type == "mps"
+                    and hasattr(torch.mps, "get_rng_state")
+                ):
+                    accelerator_rng_snapshot = (
+                        torch.mps.get_rng_state().clone()
+                    )
+                coverage_snapshot = (
+                    self.cstm_coverage.state_dict() if retryable else None
+                )
+                last_runtime_snapshot = self._last_runtime
+                last_ledger_snapshot = self._last_ledger
+                continuity_snapshot = self._last_continuity_keys
+                try:
+                    execute_update_batches()
+                except BaseException as error:
+                    if (
+                        not retryable
+                        or not self._is_recoverable_out_of_memory(error)
+                        or not self._advance_activation_policy_after_oom()
+                    ):
+                        raise
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self._cstm_auxiliary_gradients.clear()
+                    self._phase_update_proposal_logits.clear()
+                    self._phase_update_end_logits.clear()
+                    named_buffers = dict(self.model.named_buffers())
+                    if not set(buffer_snapshot).issubset(named_buffers):
+                        raise RuntimeError(
+                            "mutable model buffer topology changed during OOM recovery"
+                        ) from error
+                    with torch.no_grad():
+                        for name, saved in buffer_snapshot.items():
+                            named_buffers[name].copy_(saved)
+                    if cpu_rng_snapshot is None or coverage_snapshot is None:
+                        raise RuntimeError(
+                            "OOM recovery snapshot was incomplete"
+                        ) from error
+                    torch.random.set_rng_state(cpu_rng_snapshot)
+                    if accelerator_rng_snapshot is not None:
+                        if self.device.type == "cuda":
+                            torch.cuda.set_rng_state(
+                                accelerator_rng_snapshot, self.device
+                            )
+                        elif self.device.type == "mps":
+                            torch.mps.set_rng_state(
+                                accelerator_rng_snapshot
+                            )
+                    self.cstm_coverage = CSTMCoverageState.from_state_dict(
+                        coverage_snapshot
+                    )
+                    self._last_runtime = last_runtime_snapshot
+                    self._last_ledger = last_ledger_snapshot
+                    self._last_continuity_keys = continuity_snapshot
+                    self._clear_transient_device_memory()
+                    execute_update_batches()
                 if pc_rasl_capture_due and behavior_batch is not None:
                     capture_started = perf_counter()
                     pc_rasl_captured = self._capture_pc_rasl_trajectory(
@@ -3015,6 +6755,14 @@ class MRCRANextTokenTrainer:
                     _synchronize(self.loss_device)
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
+                cstm_merge_started = perf_counter()
+                cstm_gradient_metrics = (
+                    self._merge_cstm_gradients()
+                    if self.cstm_enabled else {}
+                )
+                cstm_gradient_merge_seconds = (
+                    perf_counter() - cstm_merge_started
+                )
                 pc_rasl_gradient_metrics = (
                     self._merge_pc_rasl_gradients()
                     if self.pc_rasl is not None else {}
@@ -3051,8 +6799,12 @@ class MRCRANextTokenTrainer:
                 metrics = {name: value / divisor for name, value in aggregated.items()}
                 for phase_name in (
                     "performance/model_forward_seconds",
+                    "performance/primary_forward_seconds",
                     "performance/loss_forward_seconds",
                     "performance/backward_seconds",
+                    "performance/primary_backward_seconds",
+                    "cstm/predictor_backward_seconds",
+                    "cstm/substrate_backward_seconds",
                 ):
                     metrics[phase_name] = aggregated.get(phase_name, 0.0)
                 # Likelihood metrics and counters are additive, not averages of
@@ -3067,6 +6819,36 @@ class MRCRANextTokenTrainer:
                     "train/valid_targets": float(valid),
                     "train/utf8_bytes": float(byte_count),
                 })
+                cstm_weighted_rows = aggregated.get(
+                    "cstm/weighted_prediction_rows", 0.0
+                )
+                for name in (
+                    "cstm/standardized_huber_sum",
+                    "cstm/estimated_dense_numerator",
+                    "cstm/context_valid_weight",
+                    "cstm/weighted_prediction_rows",
+                    "cstm/spectral_target_views",
+                    "cstm/coefficient_targets",
+                    "cstm/raw_token_view_equivalents",
+                ):
+                    if name in aggregated:
+                        metrics[name] = aggregated[name]
+                if cstm_weighted_rows:
+                    metrics["cstm/standardized_huber"] = (
+                        aggregated.get("cstm/standardized_huber_sum", 0.0)
+                        / cstm_weighted_rows
+                    )
+                if aggregated.get("cstm/context_valid_weight", 0.0):
+                    metrics["cstm/estimated_dense_standardized_huber"] = (
+                        aggregated.get(
+                            "cstm/estimated_dense_numerator", 0.0
+                        )
+                        / aggregated["cstm/context_valid_weight"]
+                    )
+                metrics["cstm/supervision_relations_per_primary_target"] = (
+                    aggregated.get("cstm/raw_token_view_equivalents", 0.0)
+                    / max(1, valid)
+                )
                 metrics.update({
                     "progress/step": float(self.state.step),
                     "progress/tokens_seen": float(self.state.tokens_seen),
@@ -3076,12 +6858,15 @@ class MRCRANextTokenTrainer:
                         self.config.cognitive_stride
                     ),
                     "training/carrier_activation_checkpointing": float(
-                        self.model.config.carrier.activation_checkpointing
+                        self.activation_execution_policy.resolved != "retain"
                     ),
-                    "training/cpu_threads": float(self.config.cpu_threads),
+                    "training/cpu_threads": float(
+                        self.runtime["cpu_threads_resolved"]
+                    ),
                     "performance/step_seconds": elapsed,
                     "performance/tokens_per_second": tokens_this_update / max(elapsed, 1e-9),
                     "performance/data_seconds": data_seconds,
+                    "performance/data_wait_seconds": data_seconds,
                     "performance/gradient_reduction_seconds": gradient_seconds,
                     "performance/optimizer_seconds": optimizer_seconds,
                     "performance/phase_timing_synchronous": float(
@@ -3092,6 +6877,82 @@ class MRCRANextTokenTrainer:
                     "optimization/gradient_norm_after_clip": float(gradient.total_after_clip.cpu()),
                     "optimization/gradient_clip_coefficient": float(gradient.clip_coefficient.cpu()),
                 })
+                metrics["cstm/gradient_merge_seconds"] = (
+                    cstm_gradient_merge_seconds
+                )
+                compilation = (
+                    self.model.cognitive.carrier.compilation_receipt()
+                )
+                selected_activation_measurement = next(
+                    (
+                        candidate
+                        for candidate in (
+                            self.activation_execution_policy.candidates
+                        )
+                        if candidate.policy
+                        == self.activation_execution_policy.resolved
+                    ),
+                    None,
+                )
+                metrics.update({
+                    "execution/policy_schema_version": float(
+                        self.activation_execution_policy.schema_version
+                    ),
+                    "execution/activation_requested": float({
+                        "auto": 0,
+                        "retain": 1,
+                        "selective": 2,
+                        "whole_span": 3,
+                    }[self.activation_execution_policy.requested]),
+                    "execution/activation_resolved": float({
+                        "retain": 1,
+                        "selective": 2,
+                        "whole_span": 3,
+                    }[self.activation_execution_policy.resolved]),
+                    "execution/activation_peak_bytes": float(
+                        0
+                        if selected_activation_measurement is None
+                        else (
+                            selected_activation_measurement
+                            .reserve_peak_bytes
+                        )
+                    ),
+                    "execution/activation_available_bytes": float(
+                        self.activation_execution_policy.memory.available_bytes
+                    ),
+                    "execution/activation_reserve_bytes": float(
+                        self.activation_execution_policy.required_reserve_bytes
+                    ),
+                    "execution/compiler_requested": float(
+                        -1
+                        if self.config.compile_tensor_cores is None
+                        else self.config.compile_tensor_cores
+                    ),
+                    "execution/compiler_resolved": float(
+                        self.runtime["compiled_tensor_cores"]
+                    ),
+                    "execution/compiler_backend": float({
+                        "none": 0,
+                        "aot_eager": 1,
+                        "inductor": 2,
+                    }[self.runtime["carrier_compiler_backend"]]),
+                    "execution/compiled_shape_count": compilation[
+                        "compiled_shape_count"
+                    ],
+                    "execution/compile_seconds": compilation[
+                        "compile_seconds"
+                    ],
+                    "execution/fallback_count": compilation[
+                        "fallback_count"
+                    ],
+                    "execution/graph_break_count": compilation[
+                        "graph_break_count"
+                    ],
+                    "execution/activation_oom_retries": float(
+                        self._activation_oom_retries
+                    ),
+                })
+                metrics.update(cstm_gradient_metrics)
                 if self.pc_rasl is not None:
                     metrics.update({
                         "pc_rasl/configured_captures_per_observation": float(
@@ -3146,7 +7007,38 @@ class MRCRANextTokenTrainer:
                 metrics["performance/unattributed_step_seconds"] = max(
                     0.0, elapsed - attributed
                 )
-                metrics.update(_memory_metrics(self.device))
+                metrics.update({
+                    "performance/training_tokens_per_second": (
+                        tokens_this_update / max(elapsed, 1e-9)
+                    ),
+                    "performance/wall_clock_tokens_per_second": (
+                        tokens_this_update / max(elapsed, 1e-9)
+                    ),
+                    "performance/wall_clock_step_seconds": elapsed,
+                    "performance/evaluation_seconds": 0.0,
+                    "performance/checkpoint_seconds": 0.0,
+                    "performance/snapshot_seconds": 0.0,
+                })
+                memory_metrics = _memory_metrics(self.device)
+                metrics.update(memory_metrics)
+                metrics["data/prefetch_queue_depth"] = float(
+                    int(self._prefetch_future is not None)
+                    + int(self._prefetched_batch is not None)
+                )
+                metrics["data/prefetch_worker_shared_process_rss_bytes"] = (
+                    memory_metrics.get(
+                        "system/process_rss_gib",
+                        memory_metrics.get(
+                            "system/process_peak_rss_gib", 0.0
+                        ),
+                    )
+                    * (1 << 30)
+                    if self._prefetch_executor is not None
+                    else 0.0
+                )
+                metrics["observation/failure_count"] = float(
+                    reporter.failure_count
+                )
                 progress_observed = False
                 if (
                     self.learning_progress is not None
@@ -3178,29 +7070,44 @@ class MRCRANextTokenTrainer:
                 )
                 if not all(isfinite(value) for value in metrics.values()):
                     raise FloatingPointError("MRCRA metrics became non-finite")
+                self.last_step_metrics = dict(metrics)
                 transition_pending = (
                     self._pending_first_hard_event_trace is not None
                     and self.state.first_hard_event_step == 0
                 )
-                if (
+                should_log = (
                     self.state.step % self.config.log_interval == 0
                     or progress_observed
                     or low_clip_warning
                     or transition_pending
-                ):
+                )
+                if should_log:
                     reporter.log(metrics, step=self.state.step)
                 if low_clip_warning:
                     self._alert_low_clip_pressure(reporter)
+                exceptional_started = perf_counter()
                 transition_checkpoint = self._record_first_hard_event(
                     reporter, metrics, gradient,
                 )
+                if transition_checkpoint is not None:
+                    metrics["performance/checkpoint_seconds"] += (
+                        perf_counter() - exceptional_started
+                    )
                 if transition_checkpoint is not None and self.config.trackio_enabled:
+                    snapshot_started = perf_counter()
                     self._publish_cognitive_snapshot(reporter)
+                    metrics["performance/snapshot_seconds"] += (
+                        perf_counter() - snapshot_started
+                    )
                 if (
                     self.config.evaluation_interval
                     and self.state.step % self.config.evaluation_interval == 0
                 ):
+                    evaluation_started = perf_counter()
                     evaluation_metrics = self.evaluate()
+                    metrics["performance/evaluation_seconds"] += (
+                        perf_counter() - evaluation_started
+                    )
                     if self.learning_progress is not None:
                         guard_ce = evaluation_metrics[
                             "eval/cross_entropy_nats_per_token"
@@ -3226,18 +7133,57 @@ class MRCRANextTokenTrainer:
                     reporter.log(evaluation_metrics, step=self.state.step)
                 if (
                     self.config.trackio_enabled
+                    and self.state.step % self.config.checkpoint_interval == 0
                     and _diagnostic_snapshot_due(
                         self.state.step, self.config.spectral_snapshot_interval,
                         self._last_snapshot_attempt_step,
                     )
                 ):
+                    snapshot_started = perf_counter()
                     self._publish_cognitive_snapshot(reporter)
+                    metrics["performance/snapshot_seconds"] += (
+                        perf_counter() - snapshot_started
+                    )
                 if self.state.step % self.config.checkpoint_interval == 0:
+                    checkpoint_started = perf_counter()
                     path = self.save_checkpoint()
+                    metrics["performance/checkpoint_seconds"] += (
+                        perf_counter() - checkpoint_started
+                    )
                     reporter.alert(
                         "MRCRA checkpoint saved", path.name,
                         level="info", step=self.state.step,
                     )
+                wall_clock_elapsed = perf_counter() - step_started
+                metrics["performance/wall_clock_step_seconds"] = (
+                    wall_clock_elapsed
+                )
+                metrics["performance/wall_clock_tokens_per_second"] = (
+                    tokens_this_update / max(wall_clock_elapsed, 1e-9)
+                )
+                metrics["observation/failure_count"] = float(
+                    reporter.failure_count
+                )
+                self.last_step_metrics = dict(metrics)
+                if (
+                    should_log
+                    and wall_clock_elapsed > elapsed + 1e-9
+                    and any(
+                        metrics[name] > 0
+                        for name in (
+                            "performance/evaluation_seconds",
+                            "performance/checkpoint_seconds",
+                            "performance/snapshot_seconds",
+                        )
+                    )
+                ):
+                    # Same-step replacement updates the dashboard with the
+                    # complete periodic-cost receipt. The append-only local
+                    # mirror intentionally retains both the pre-periodic and
+                    # final rows for exact wall-clock reconstruction.
+                    reporter.log(metrics, step=self.state.step)
+                if step_observer is not None:
+                    step_observer(self.state, metrics)
             self.state.elapsed_seconds += perf_counter() - started
             failed = False
             return self.state

@@ -1,5 +1,5 @@
 {
-  "artifact": "canonical MRCRA serious-actor parameter audit",
+  "artifact": "canonical MRCRA actor parameter audit",
   "configuration": {
     "actor_parameter_maximum": 125000000,
     "actor_parameter_minimum": 110000000,
@@ -116,7 +116,8 @@
     "minimum": 110000000,
     "passed": true
   },
-  "parameter_count": 115925944,
+  "model_profile": "mrcra_120m_serious",
+  "parameter_count": 115931878,
   "parameter_count_by_subsystem": {
     "cognitive.abstraction_applicability": 788999,
     "cognitive.carrier": 93733942,
@@ -150,6 +151,7 @@
     "cognitive.viability_forecaster": 112,
     "cognitive.workspace_graph": 814016,
     "cognitive.world_model": 937273,
+    "cstm_predictor": 5934,
     "token_embedding": 12865792
   },
   "parameter_tensors_by_subsystem": {
@@ -185,17 +187,18 @@
     "cognitive.viability_forecaster": 4,
     "cognitive.workspace_graph": 60,
     "cognitive.world_model": 30,
+    "cstm_predictor": 8,
     "token_embedding": 1
   },
   "static_storage_gib": {
-    "bf16_or_fp16_parameters_if_materialized": 0.21592889726161957,
-    "fp32_parameters": 0.43185779452323914,
-    "fp32_parameters_gradients_and_adam_moments": 1.7274311780929565
+    "bf16_or_fp16_parameters_if_materialized": 0.2159399501979351,
+    "fp32_parameters": 0.4318799003958702,
+    "fp32_parameters_gradients_and_adam_moments": 1.7275196015834808
   },
   "storage_scope": "Static tensor storage only; excludes activations, CUDA allocator reserve, checkpoint recomputation workspaces, and cognitive runtime state.",
   "tied_token_and_output_weights": true,
   "torch_version": "2.13.0",
-  "trainable_parameter_count": 115925944,
-  "unique_parameter_tensors": 2994,
+  "trainable_parameter_count": 115931878,
+  "unique_parameter_tensors": 3002,
   "vocabulary_size": 50257
 }

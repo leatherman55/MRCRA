@@ -127,10 +127,32 @@ def source_hashes() -> dict[str, str]:
         ROOT / "outputs" / "mrcra_integrated_acceptance.json",
         ROOT / "outputs" / "mrcra_performance_acceptance.json",
         ROOT / "outputs" / "pc_rasl_empirical_acceptance.json",
+        ROOT / "outputs" / "cstm_empirical_acceptance.json",
+        ROOT / "outputs" / "carrier_execution_empirical_acceptance.json",
+        ROOT / "outputs" / "vocabulary_router_empirical_acceptance.json",
+        ROOT / "outputs" / "mrcra_training_execution_acceptance.json",
+        ROOT / "outputs" / "mrcra_training_execution_acceptance.md",
+        ROOT / "outputs" / "mrcra_training_execution_baseline.json",
+        ROOT / "outputs" / "mrcra_training_execution_acceptance_quick.json",
+        ROOT / "outputs" / "mrcra_training_execution_acceptance_quick.md",
+        ROOT / "outputs" / "mrcra_training_execution_baseline_quick.json",
+        ROOT / "outputs" / "mrcra_device_parity_acceptance.json",
+        ROOT / "outputs" / "mrcra_trackio_overhead_acceptance.json",
+        ROOT / "outputs" / "mrcra_resource_soak_acceptance.json",
+        ROOT / "outputs" / "mrcra_resource_soak_acceptance_quick.json",
+        ROOT / "outputs" / "mrcra_learning_nonregression_procedure.json",
+        ROOT / "outputs" / "mrcra_learning_nonregression_procedure_runs.json",
+        ROOT / "outputs" / "mrcra_learning_nonregression_procedure_quick.json",
+        ROOT / "outputs" / "mrcra_learning_nonregression_procedure_quick_runs.json",
+        ROOT / "outputs" / "mrcra_training_execution_completion_validation.json",
+        ROOT / "outputs" / "mrcra_training_execution_repair_implementation_plan.md",
+        ROOT / "outputs" / "mrcra_training_execution_repair_implementation_report.md",
         ROOT / "outputs" / "mrcra_1p3m_parameter_report.json",
         ROOT / "outputs" / "mrcra_8p4m_parameter_report.json",
         ROOT / "outputs" / "mrcra_120m_parameter_report.json",
         ROOT / "outputs" / "mrcra_1p3m_design_report.md",
+        ROOT / "outputs" / "cstm_implementation_report.md",
+        ROOT / "outputs" / "carrier_execution_optimization_report.md",
     ))
     return {
         str(path.relative_to(ROOT)): sha256(path.read_bytes()).hexdigest()
@@ -163,6 +185,82 @@ def main() -> int:
         run(
             "pc-rasl-acceptance",
             [sys.executable, "scripts/run_pc_rasl_acceptance.py"],
+        ),
+        run(
+            "cstm-acceptance",
+            [sys.executable, "scripts/run_cstm_acceptance.py"],
+        ),
+        run(
+            "carrier-execution-acceptance",
+            [sys.executable, "scripts/run_carrier_execution_acceptance.py"],
+        ),
+        run(
+            "vocabulary-router-acceptance",
+            [
+                sys.executable,
+                "scripts/run_vocabulary_router_acceptance.py",
+                "--production-scale",
+            ],
+        ),
+        run(
+            "training-execution-acceptance",
+            [
+                sys.executable,
+                "scripts/benchmark_mrcra_training_execution.py",
+                "--profile",
+                "quick",
+                "--steps",
+                "3",
+            ],
+        ),
+        run(
+            "available-device-parity",
+            [
+                sys.executable,
+                "scripts/run_mrcra_device_parity.py",
+            ],
+        ),
+        run(
+            "trackio-overhead-acceptance",
+            [
+                sys.executable,
+                "scripts/benchmark_trackio_overhead.py",
+                "--steps",
+                "100",
+            ],
+        ),
+        run(
+            "resource-soak-acceptance",
+            [
+                sys.executable,
+                "scripts/run_mrcra_resource_soak.py",
+                "--profile",
+                "quick",
+                "--steps",
+                "100",
+            ],
+        ),
+        run(
+            "learning-nonregression-procedure",
+            [
+                sys.executable,
+                "scripts/run_mrcra_learning_nonregression.py",
+                "--profile",
+                "quick",
+                "--steps",
+                "3",
+                "--total-tokens",
+                "3072",
+                "--cstm-sampling-duty-cycle",
+                "1.0",
+            ],
+        ),
+        run(
+            "retained-training-execution-completion",
+            [
+                sys.executable,
+                "scripts/validate_mrcra_training_execution_completion.py",
+            ],
         ),
     ]
     payload = {

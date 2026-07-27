@@ -6,6 +6,7 @@
     getRunArtifacts,
   } from "../lib/api.js";
   import {
+    createSingleFlightPoller,
     getAppPollIntervalMs,
     isRateLimitCooldownActive,
     isTabHidden,
@@ -24,6 +25,7 @@
   let error = $state("");
   let loadedKey = $state("");
   let requestId = 0;
+  const runEvidencePoll = createSingleFlightPoller();
 
   function runKey(run) {
     return run?.id ?? run?.name ?? "";
@@ -101,7 +103,9 @@
   onMount(() => {
     const timer = setInterval(() => {
       if (!realtimeEnabled || isTabHidden() || isRateLimitCooldownActive()) return;
-      loadEvidence({ quiet: true });
+      runEvidencePoll(() => loadEvidence({ quiet: true })).catch((cause) => {
+        console.error("Failed to poll spectral evidence:", cause);
+      });
     }, getAppPollIntervalMs());
     return () => clearInterval(timer);
   });

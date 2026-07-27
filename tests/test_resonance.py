@@ -11,6 +11,7 @@ from mrrn.resonance import (
     associative_affine_scan,
     effective_horizon_steps,
     half_life_steps,
+    masked_associative_affine_scan,
     uniform_state_bound,
 )
 
@@ -68,6 +69,156 @@ def test_parallel_affine_scan_matches_direct_native_complex_recurrence():
         current = c.to_native(transition[:, index]) * current + c.to_native(drive[:, index])
         reference.append(current)
     torch.testing.assert_close(c.to_native(actual), torch.stack(reference, 1), atol=1e-12, rtol=1e-12)
+
+
+@pytest.mark.parametrize("length", [1, 2, 3, 7, 16, 31])
+def test_custom_affine_scan_adjoint_matches_composite_forward_and_every_gradient(
+    length,
+):
+    """The production scan boundary must be a mathematical, not approximate, fuse."""
+
+    torch.manual_seed(901 + length)
+    shape = (2, length, 2, 3, 2)
+    transition = torch.randn(shape, dtype=torch.float64) * 0.12
+    transition[..., 0] += 0.78
+    drive = torch.randn(shape, dtype=torch.float64) * 0.08
+    initial = torch.randn((2, 2, 3, 2), dtype=torch.float64) * 0.1
+    cotangent = torch.randn(shape, dtype=torch.float64)
+
+    reference_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (transition, drive, initial)
+    )
+    custom_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (transition, drive, initial)
+    )
+    reference = associative_affine_scan(
+        *reference_inputs, implementation="composite"
+    )
+    custom = associative_affine_scan(
+        *custom_inputs, implementation="custom_adjoint"
+    )
+    reference_gradients = torch.autograd.grad(
+        reference, reference_inputs, cotangent
+    )
+    custom_gradients = torch.autograd.grad(custom, custom_inputs, cotangent)
+
+    torch.testing.assert_close(custom, reference, atol=1e-12, rtol=1e-12)
+    for actual, expected in zip(
+        custom_gradients, reference_gradients, strict=True
+    ):
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+def test_custom_affine_scan_passes_double_precision_finite_difference_gradcheck():
+    torch.manual_seed(939)
+    transition = (
+        torch.randn(1, 5, 2, 2, dtype=torch.float64) * 0.1
+    )
+    transition[..., 0] += 0.8
+    drive = torch.randn_like(transition) * 0.05
+    initial = torch.randn(1, 2, 2, dtype=torch.float64) * 0.1
+    inputs = tuple(
+        value.requires_grad_(True) for value in (transition, drive, initial)
+    )
+    assert torch.autograd.gradcheck(
+        lambda *values: associative_affine_scan(
+            *values, implementation="custom_adjoint"
+        ),
+        inputs,
+        eps=1e-6,
+        atol=2e-5,
+        rtol=2e-4,
+    )
+
+
+def test_custom_affine_scan_empirically_reduces_saved_autograd_materialization():
+    """Audit the concrete tensors retained for backward, not just node names."""
+
+    torch.manual_seed(941)
+    transition = torch.randn(
+        2, 64, 2, 4, 2, dtype=torch.float32, requires_grad=True
+    )
+    transition = transition * 0.05
+    transition[..., 0] = transition[..., 0] + 0.9
+    transition.retain_grad()
+    drive = torch.randn_like(transition, requires_grad=True)
+    initial = torch.randn(
+        2, 2, 4, 2, dtype=torch.float32, requires_grad=True
+    )
+
+    def retained(implementation):
+        tensors = []
+
+        def pack(value):
+            tensors.append((value.numel(), value.element_size()))
+            return value
+
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda value: value):
+            output = associative_affine_scan(
+                transition,
+                drive,
+                initial,
+                implementation=implementation,
+            )
+        return len(tensors), sum(count * size for count, size in tensors), output
+
+    composite_count, composite_bytes, reference = retained("composite")
+    custom_count, custom_bytes, actual = retained("custom_adjoint")
+    torch.testing.assert_close(actual, reference)
+    assert custom_count == 3
+    assert custom_count < composite_count
+    assert custom_bytes < composite_bytes
+
+
+def test_mask_fused_custom_adjoint_matches_composite_with_padding_and_interior_gaps():
+    torch.manual_seed(947)
+    shape = (3, 11, 2, 3, 2)
+    transition = torch.randn(shape, dtype=torch.float64) * 0.08
+    transition[..., 0] += 0.85
+    drive = torch.randn(shape, dtype=torch.float64) * 0.04
+    initial = torch.randn(3, 2, 3, 2, dtype=torch.float64)
+    mask = torch.tensor(
+        [
+            [True] * 8 + [False] * 3,
+            [True, False, True, True, False, True, True, True, False, False, False],
+            [False] * 11,
+        ]
+    )
+    cotangent = torch.randn(shape, dtype=torch.float64)
+    reference_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (transition, drive, initial)
+    )
+    custom_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (transition, drive, initial)
+    )
+    reference = masked_associative_affine_scan(
+        *reference_inputs, mask, implementation="composite"
+    )
+    actual = masked_associative_affine_scan(
+        *custom_inputs, mask, implementation="custom_adjoint"
+    )
+    reference_gradients = torch.autograd.grad(
+        reference, reference_inputs, cotangent
+    )
+    actual_gradients = torch.autograd.grad(
+        actual, custom_inputs, cotangent
+    )
+    torch.testing.assert_close(actual, reference, atol=1e-12, rtol=1e-12)
+    for actual_gradient, reference_gradient in zip(
+        actual_gradients, reference_gradients, strict=True
+    ):
+        torch.testing.assert_close(
+            actual_gradient,
+            reference_gradient,
+            atol=2e-12,
+            rtol=2e-12,
+        )
+    assert torch.count_nonzero(actual_gradients[0][~mask]) == 0
+    assert torch.count_nonzero(actual_gradients[1][~mask]) == 0
 
 
 def test_exponential_trapezoid_scalar_step_matches_high_precision_continuous_integration():

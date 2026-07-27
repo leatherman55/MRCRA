@@ -68,7 +68,7 @@
           "threshold": 0.0
         }
       ],
-      "duration_seconds": 0.03324450000945944,
+      "duration_seconds": 0.03328554198378697,
       "metrics": {
         "accelerating_pressure": 0.6183185906875217,
         "gaming_debt": 0.8435239459450128,
@@ -122,15 +122,15 @@
           "threshold": 1.0
         }
       ],
-      "duration_seconds": 1.298813417000929,
+      "duration_seconds": 1.2708339579985477,
       "metrics": {
         "candidate_count": 5.0,
-        "controller_gradient_norm": 0.0730082738247599,
+        "controller_gradient_norm": 0.37260902613864477,
         "critic_actor_gradient_leaks": 0.0,
-        "critic_loss_ratio": 0.5101236220081136,
+        "critic_loss_ratio": 0.5747507194735167,
         "internal_value_head_gradient": 1.0,
         "progress_head_gradient": 1.0,
-        "signed_behavior_probability_margin": 0.4599989652633667
+        "signed_behavior_probability_margin": 0.6244788765907288
       },
       "name": "critic and internal cognitive credit",
       "passed": true
@@ -163,7 +163,7 @@
           "threshold": 0.0
         }
       ],
-      "duration_seconds": 0.000939125005970709,
+      "duration_seconds": 0.00041162496199831367,
       "metrics": {
         "carrier_mutation": 0.0,
         "conflict_detected": 1.0,

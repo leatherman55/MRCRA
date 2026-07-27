@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import asdict
 import json
 import os
@@ -274,7 +273,9 @@ def attach_training_evidence(
 ) -> dict[str, Any]:
     """Attach available latest-run telemetry without mutating caller data."""
 
-    result = deepcopy(evidence)
+    # Only top-level observer fields are added.  Avoid duplicating the complete
+    # cognitive/spectral tensor projection in memory before JSON serialization.
+    result = dict(evidence)
     training = []
     if baseline_metrics is not None:
         baseline = _try_series(Path(baseline_metrics), "baseline")

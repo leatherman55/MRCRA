@@ -7,6 +7,7 @@ from math import log, pi
 
 import torch
 from torch import Tensor, nn
+from torch.autograd.function import once_differentiable
 from torch.nn import functional as F
 
 from . import complex_ops as c
@@ -61,46 +62,255 @@ def uniform_state_bound(transition_bound: float, drive_bound: float, initial_mag
     return initial_magnitude + drive_bound / (1 - transition_bound)
 
 
-def associative_affine_scan(transition: Tensor, drive: Tensor, initial: Tensor) -> Tensor:
-    """Work-efficient inclusive prefix of diagonal complex affine transforms."""
+def _affine_prefix_tree(a: Tensor, b: Tensor) -> tuple[Tensor, Tensor]:
+    """Pure O(T)-work/O(log T)-depth prefix used by forward and adjoint."""
+
+    length = a.shape[1]
+    if length <= 1:
+        return a, b
+    pairs = length // 2
+    even_a, odd_a = a[:, : 2 * pairs : 2], a[:, 1 : 2 * pairs : 2]
+    even_b, odd_b = b[:, : 2 * pairs : 2], b[:, 1 : 2 * pairs : 2]
+    pair_a = c.multiply(odd_a, even_a)
+    pair_b = odd_b + c.multiply(odd_a, even_b)
+    scanned_a, scanned_b = _affine_prefix_tree(pair_a, pair_b)
+    if pairs > 1:
+        remaining_a = c.multiply(even_a[:, 1:], scanned_a[:, :-1])
+        remaining_b = (
+            even_b[:, 1:] + c.multiply(even_a[:, 1:], scanned_b[:, :-1])
+        )
+        prefix_even_a = torch.cat((even_a[:, :1], remaining_a), 1)
+        prefix_even_b = torch.cat((even_b[:, :1], remaining_b), 1)
+    else:
+        prefix_even_a, prefix_even_b = even_a, even_b
+    prefix_a = torch.stack((prefix_even_a, scanned_a), 2).flatten(1, 2)
+    prefix_b = torch.stack((prefix_even_b, scanned_b), 2).flatten(1, 2)
+    if length % 2:
+        tail_a = c.multiply(a[:, -1:], scanned_a[:, -1:])
+        tail_b = b[:, -1:] + c.multiply(a[:, -1:], scanned_b[:, -1:])
+        prefix_a = torch.cat((prefix_a, tail_a), 1)
+        prefix_b = torch.cat((prefix_b, tail_b), 1)
+    return prefix_a, prefix_b
+
+
+def _associative_affine_scan_composite(
+    transition: Tensor, drive: Tensor, initial: Tensor
+) -> Tensor:
+    """Differentiable reference composite retained for compilation and audit."""
+
+    prefix_a, prefix_b = _affine_prefix_tree(transition, drive)
+    return c.multiply(prefix_a, initial.unsqueeze(1)) + prefix_b
+
+
+class _ComplexAffineScanAdjoint(torch.autograd.Function):
+    """Memory-bounded exact first-order adjoint for a diagonal complex scan.
+
+    The recursive prefix implementation is ideal for parallel forward
+    execution but, when exposed directly to autograd, it retains every
+    intermediate pair, slice, stack, and concatenation.  This custom boundary
+    retains only the transition, initial state, and output states.  Backward
+    computes all state cotangents with one reverse associative scan and then
+    forms the transition/drive gradients pointwise.
+    """
+
+    @staticmethod
+    def forward(ctx, transition: Tensor, drive: Tensor, initial: Tensor) -> Tensor:
+        states = _associative_affine_scan_composite(
+            transition, drive, initial
+        )
+        ctx.save_for_backward(transition, initial, states)
+        return states
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_states: Tensor):
+        transition, initial, states = ctx.saved_tensors
+        length = transition.shape[1]
+        if length == 0:
+            return (
+                torch.zeros_like(transition),
+                torch.zeros_like(transition),
+                torch.zeros_like(initial),
+            )
+
+        # For y_t = a_t y_{t-1} + b_t, the cotangent recurrence is
+        # q_t = g_t + conj(a_{t+1}) q_{t+1}.  Reverse time converts it into the
+        # same inclusive affine-prefix primitive used by forward.
+        reverse_transition = torch.empty_like(transition)
+        reverse_transition[:, 0] = 0
+        reverse_transition[:, 0, ..., 0] = 1
+        if length > 1:
+            reverse_transition[:, 1:] = c.conjugate(
+                transition[:, 1:].flip(1)
+            )
+        zero = torch.zeros_like(initial)
+        reverse_cotangent = _associative_affine_scan_composite(
+            reverse_transition,
+            grad_states.flip(1),
+            zero,
+        )
+        cotangent = reverse_cotangent.flip(1)
+        previous = torch.cat((initial.unsqueeze(1), states[:, :-1]), 1)
+        grad_transition = c.multiply(cotangent, c.conjugate(previous))
+        grad_drive = cotangent
+        grad_initial = c.multiply(
+            c.conjugate(transition[:, 0]), cotangent[:, 0]
+        )
+        return grad_transition, grad_drive, grad_initial
+
+
+def _masked_scan_composite(
+    transition: Tensor,
+    drive: Tensor,
+    initial: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    active = mask.view(*mask.shape, *([1] * (transition.ndim - 2)))
+    identity = torch.zeros_like(transition)
+    identity[..., 0] = 1
+    return _associative_affine_scan_composite(
+        torch.where(active, transition, identity),
+        torch.where(active, drive, torch.zeros_like(drive)),
+        initial,
+    )
+
+
+class _MaskedComplexAffineScanAdjoint(torch.autograd.Function):
+    """Mask-aware scan/adjoint that keeps identity padding out of autograd."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        transition: Tensor,
+        drive: Tensor,
+        initial: Tensor,
+        mask: Tensor,
+    ) -> Tensor:
+        states = _masked_scan_composite(transition, drive, initial, mask)
+        ctx.save_for_backward(transition, initial, states, mask)
+        return states
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_states: Tensor):
+        transition, initial, states, mask = ctx.saved_tensors
+        length = transition.shape[1]
+        if length == 0:
+            return (
+                torch.zeros_like(transition),
+                torch.zeros_like(transition),
+                torch.zeros_like(initial),
+                None,
+            )
+        active = mask.view(*mask.shape, *([1] * (transition.ndim - 2)))
+        adjoint_transition = c.conjugate(transition)
+        identity = torch.zeros_like(adjoint_transition)
+        identity[..., 0] = 1
+        adjoint_transition = torch.where(
+            active, adjoint_transition, identity
+        )
+        reverse_transition = torch.empty_like(transition)
+        reverse_transition[:, 0] = 0
+        reverse_transition[:, 0, ..., 0] = 1
+        if length > 1:
+            reverse_transition[:, 1:] = adjoint_transition[:, 1:].flip(1)
+        cotangent = _associative_affine_scan_composite(
+            reverse_transition,
+            grad_states.flip(1),
+            torch.zeros_like(initial),
+        ).flip(1)
+        previous = torch.cat((initial.unsqueeze(1), states[:, :-1]), 1)
+        grad_transition = (
+            c.multiply(cotangent, c.conjugate(previous)) * active
+        )
+        grad_drive = cotangent * active
+        grad_initial = c.multiply(
+            adjoint_transition[:, 0], cotangent[:, 0]
+        )
+        return grad_transition, grad_drive, grad_initial, None
+
+
+def associative_affine_scan(
+    transition: Tensor,
+    drive: Tensor,
+    initial: Tensor,
+    *,
+    implementation: str = "auto",
+) -> Tensor:
+    """Work-efficient inclusive prefix of diagonal complex affine transforms.
+
+    ``auto`` uses a custom first-order adjoint during eager training and the
+    pure composite under inference or graph compilation.  ``composite`` is the
+    transparent reference path used for numerical and compiler validation;
+    ``custom_adjoint`` explicitly requests the bounded saved-tensor path.
+    """
 
     if transition.shape != drive.shape or transition.ndim < 3:
-        raise ValueError("transition and drive must share a batched time/complex shape")
+        raise ValueError(
+            "transition and drive must share a batched time/complex shape"
+        )
     c.validate(transition)
     if initial.shape != transition.shape[:1] + transition.shape[2:]:
         raise ValueError("initial state shape does not match scan state shape")
-    def prefix(a: Tensor, b: Tensor) -> tuple[Tensor, Tensor]:
-        # Use the same work-efficient tree in training and inference.  The old
-        # no-grad Hillis--Steele branch performed O(T log T) compositions and
-        # used a different floating-point association order from training.
-        # This tree performs O(T) compositions with O(log T) dependency depth.
-        length = a.shape[1]
-        if length <= 1:
-            return a, b
-        pairs = length // 2
-        even_a, odd_a = a[:, : 2 * pairs : 2], a[:, 1 : 2 * pairs : 2]
-        even_b, odd_b = b[:, : 2 * pairs : 2], b[:, 1 : 2 * pairs : 2]
-        pair_a = c.multiply(odd_a, even_a)
-        pair_b = odd_b + c.multiply(odd_a, even_b)
-        scanned_a, scanned_b = prefix(pair_a, pair_b)
-        if pairs > 1:
-            remaining_a = c.multiply(even_a[:, 1:], scanned_a[:, :-1])
-            remaining_b = even_b[:, 1:] + c.multiply(even_a[:, 1:], scanned_b[:, :-1])
-            prefix_even_a = torch.cat((even_a[:, :1], remaining_a), 1)
-            prefix_even_b = torch.cat((even_b[:, :1], remaining_b), 1)
-        else:
-            prefix_even_a, prefix_even_b = even_a, even_b
-        prefix_a = torch.stack((prefix_even_a, scanned_a), 2).flatten(1, 2)
-        prefix_b = torch.stack((prefix_even_b, scanned_b), 2).flatten(1, 2)
-        if length % 2:
-            tail_a = c.multiply(a[:, -1:], scanned_a[:, -1:])
-            tail_b = b[:, -1:] + c.multiply(a[:, -1:], scanned_b[:, -1:])
-            prefix_a = torch.cat((prefix_a, tail_a), 1)
-            prefix_b = torch.cat((prefix_b, tail_b), 1)
-        return prefix_a, prefix_b
+    if implementation not in {"auto", "composite", "custom_adjoint"}:
+        raise ValueError("unknown affine scan implementation")
+    custom = implementation == "custom_adjoint" or (
+        implementation == "auto"
+        and torch.is_grad_enabled()
+        and not torch.compiler.is_compiling()
+        and (
+            transition.requires_grad
+            or drive.requires_grad
+            or initial.requires_grad
+        )
+    )
+    if custom:
+        return _ComplexAffineScanAdjoint.apply(transition, drive, initial)
+    return _associative_affine_scan_composite(transition, drive, initial)
 
-    prefix_a, prefix_b = prefix(transition, drive)
-    return c.multiply(prefix_a, initial.unsqueeze(1)) + prefix_b
+
+def masked_associative_affine_scan(
+    transition: Tensor,
+    drive: Tensor,
+    initial: Tensor,
+    mask: Tensor,
+    *,
+    implementation: str = "auto",
+) -> Tensor:
+    """Apply a complex affine scan while invalid positions are exact identity.
+
+    The custom path does not expose the full identity-transition and
+    zero-drive tensors to autograd, which is particularly important for
+    document-major static batches with right padding.
+    """
+
+    if (
+        transition.shape != drive.shape
+        or transition.ndim < 3
+        or mask.shape != transition.shape[:2]
+        or mask.dtype != torch.bool
+    ):
+        raise ValueError("masked scan tensors have incompatible shapes or dtypes")
+    c.validate(transition)
+    if initial.shape != transition.shape[:1] + transition.shape[2:]:
+        raise ValueError("masked scan initial state has incompatible shape")
+    if implementation not in {"auto", "composite", "custom_adjoint"}:
+        raise ValueError("unknown masked affine scan implementation")
+    custom = implementation == "custom_adjoint" or (
+        implementation == "auto"
+        and torch.is_grad_enabled()
+        and not torch.compiler.is_compiling()
+        and (
+            transition.requires_grad
+            or drive.requires_grad
+            or initial.requires_grad
+        )
+    )
+    if custom:
+        return _MaskedComplexAffineScanAdjoint.apply(
+            transition, drive, initial, mask
+        )
+    return _masked_scan_composite(transition, drive, initial, mask)
 
 
 class ComplexResonator(nn.Module):
@@ -319,12 +529,12 @@ class ComplexResonator(nn.Module):
         if state.value.shape != expected or state.previous_drive.shape != expected:
             raise ValueError(f"state tensors must have shape {expected}")
         parameters = self.parameterize(u, state.previous_drive, mask, sample_interval=sample_interval)
-        active = mask.view(*mask.shape, 1, 1, 1, 1)
-        identity = torch.zeros_like(parameters.transition)
-        identity[..., 0] = 1
-        transition = torch.where(active, parameters.transition, identity)
-        drive = torch.where(active, parameters.affine_drive, torch.zeros_like(parameters.affine_drive))
-        states = associative_affine_scan(transition, drive, state.value)
+        states = masked_associative_affine_scan(
+            parameters.transition,
+            parameters.affine_drive,
+            state.value,
+            mask,
+        )
         output = self._readout(u, states, parameters.readout, mask)
         current = states[:, -1] if u.shape[1] else state.value
         return output, ResonatorState(current, parameters.final_drive, state.steps + u.shape[1]), parameters

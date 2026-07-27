@@ -9,7 +9,7 @@ the many small spectral operations that dominate eager execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import log, pi, sqrt
+from math import ceil, log, pi, sqrt
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +17,11 @@ import numpy as np
 import torch
 
 from .config import MRRNConfig
+from .vocabulary_router import (
+    VocabularyRouterConfig,
+    VocabularyRouterIndex,
+    VocabularyRoutingMetrics,
+)
 
 if TYPE_CHECKING:
     from mlx import core as mx
@@ -193,6 +198,84 @@ def _safe_softmax(scores, axis: int):
     return weights / mx.maximum(mx.sum(weights, axis=axis, keepdims=True), np.finfo(np.float32).tiny)
 
 
+def mlx_exact_tiled_cross_entropy(
+    output_latent,
+    output_weight,
+    labels,
+    output_bias=None,
+    *,
+    mask=None,
+    vocabulary_tile_size: int = 2048,
+    reduction: str = "mean",
+):
+    """Exact, full-vocabulary, memory-bounded linear cross entropy in MLX.
+
+    This is the native Metal counterpart of the PyTorch tiled authority path.
+    It never constructs a token-by-complete-vocabulary logit tensor. Instead it
+    combines each vocabulary tile's log partition with ``logaddexp`` and
+    computes target logits directly from the selected classifier rows. Tiling
+    changes execution and peak temporary storage, not the trained distribution.
+
+    Partition arithmetic is promoted to float32. MLX autodiff consequently
+    returns full-vocabulary gradients for the latents, every classifier row,
+    and the optional bias. Masking is algebraic so the graph stays shape-static
+    and compilable on Metal.
+    """
+
+    mx = _mlx()
+    if output_latent.ndim < 2:
+        raise ValueError("output latents must have at least token and feature axes")
+    if output_weight.ndim != 2:
+        raise ValueError("output weight must be a vocabulary-by-feature matrix")
+    if output_weight.shape[1] != output_latent.shape[-1]:
+        raise ValueError("output weight is incompatible with output latents")
+    if tuple(labels.shape) != tuple(output_latent.shape[:-1]):
+        raise ValueError("labels must match every non-feature latent axis")
+    if output_bias is not None and tuple(output_bias.shape) != (output_weight.shape[0],):
+        raise ValueError("output bias is incompatible with output weight")
+    if mask is not None and tuple(mask.shape) != tuple(labels.shape):
+        raise ValueError("mask must match labels")
+    if vocabulary_tile_size <= 0:
+        raise ValueError("vocabulary_tile_size must be positive")
+    if reduction not in {"none", "sum", "mean"}:
+        raise ValueError("reduction must be none, sum, or mean")
+
+    token_count = int(np.prod(labels.shape))
+    hidden = output_latent.reshape((token_count, output_latent.shape[-1])).astype(
+        mx.float32
+    )
+    flat_labels = labels.reshape((token_count,)).astype(mx.int32)
+    valid = (
+        mx.ones((token_count,), dtype=mx.bool_)
+        if mask is None
+        else mask.reshape((token_count,)).astype(mx.bool_)
+    )
+    safe_labels = mx.where(valid, flat_labels, mx.zeros_like(flat_labels))
+    weight = output_weight.astype(mx.float32)
+    selected_weight = mx.take(weight, safe_labels, axis=0)
+    target = mx.sum(hidden * selected_weight, axis=-1)
+    if output_bias is not None:
+        bias = output_bias.astype(mx.float32)
+        target = target + mx.take(bias, safe_labels, axis=0)
+    else:
+        bias = None
+
+    partition = mx.full((token_count,), -mx.inf, dtype=mx.float32)
+    for start in range(0, output_weight.shape[0], vocabulary_tile_size):
+        stop = min(start + vocabulary_tile_size, output_weight.shape[0])
+        logits = hidden @ mx.swapaxes(weight[start:stop], -1, -2)
+        if bias is not None:
+            logits = logits + bias[start:stop]
+        partition = mx.logaddexp(partition, mx.logsumexp(logits, axis=-1))
+    nll = (partition - target) * valid.astype(mx.float32)
+    if reduction == "none":
+        return nll.reshape(labels.shape)
+    total = mx.sum(nll)
+    if reduction == "sum":
+        return total
+    return total / mx.maximum(mx.sum(valid), mx.array(1, dtype=mx.uint32))
+
+
 @dataclass(slots=True)
 class MLXMRRNStreamState:
     """Fixed-shape Metal-resident state for constant-memory recurrent decode."""
@@ -213,10 +296,369 @@ class MLXTransformerStreamState:
     capacity: int
 
 
+@dataclass(frozen=True, slots=True)
+class MLXRoutedVocabularyCandidates:
+    """Metal-resident exact top-k threshold set plus its CPU audit receipt."""
+
+    token_ids: Any
+    logits: Any
+    mask: Any
+    vocabulary_size: int
+    metrics: VocabularyRoutingMetrics
+
+    def to_dense(self):
+        mx = _mlx()
+        dense = mx.full(
+            (self.logits.shape[0], self.vocabulary_size),
+            -mx.inf,
+            dtype=self.logits.dtype,
+        )
+        for row in range(self.logits.shape[0]):
+            mx.eval(self.mask[row])
+            positions = mx.array(
+                np.flatnonzero(np.array(self.mask[row])).astype(np.int32)
+            )
+            ids = mx.take(self.token_ids[row], positions)
+            values = mx.take(self.logits[row], positions)
+            dense = dense.at[row, ids].maximum(values)
+        return dense
+
+
+class MLXCertifiedBalancedVocabularyRouter:
+    """MLX implementation of bound evaluation and exact token refinement."""
+
+    def __init__(self, index: VocabularyRouterIndex, weight, bias) -> None:
+        mx = _mlx()
+        if tuple(weight.shape) != index.signature.weight_shape:
+            raise ValueError("MLX classifier weight does not match the router index")
+        if tuple(bias.shape) != index.signature.bias_shape:
+            raise ValueError("MLX classifier bias does not match the router index")
+        self.index = index
+        self.config = index.config
+        self.weight = weight
+        self.bias = bias
+        self.weight_float = weight.astype(mx.float32)
+        self.bias_float = bias.astype(mx.float32)
+        self.token_ids_cpu = index.token_ids.numpy()
+        self.token_mask_cpu = index.token_mask.numpy()
+        self.centroids = mx.array(index.centroids.numpy())
+        self.radii = mx.array(index.radii.numpy())
+        self.maximum_bias = mx.array(index.maximum_bias.numpy())
+        self.centroid_l1 = mx.array(index.centroid_l1.numpy())
+        self.token_l1 = mx.array(index.token_l1.numpy())
+        self._adaptive_queries = 0
+        self._adaptive_fallbacks = 0
+        self._adaptively_disabled = False
+        mx.eval(
+            self.centroids,
+            self.radii,
+            self.maximum_bias,
+            self.centroid_l1,
+            self.token_l1,
+            self.weight_float,
+            self.bias_float,
+        )
+
+    def _round_sizes(self) -> tuple[int, ...]:
+        maximum = min(
+            self.index.cluster_count,
+            self.config.maximum_refinement_clusters,
+        )
+        sizes: list[int] = []
+        current = min(maximum, self.config.initial_refinement_clusters)
+        while current < maximum:
+            sizes.append(current)
+            current = min(
+                maximum,
+                max(current + 1, ceil(current * self.config.refinement_growth)),
+            )
+        sizes.append(maximum)
+        return tuple(dict.fromkeys(sizes))
+
+    def _gamma(self) -> float:
+        epsilon = np.finfo(np.float32).eps
+        product = self.index.model_dimension * epsilon
+        if product >= 1:
+            raise RuntimeError("MLX router numerical error bound is undefined")
+        return product / (1 - product)
+
+    @staticmethod
+    def _adjust_repetition(
+        logits, ids, seen_token_ids, seen_token_mask, penalty: float
+    ):
+        if penalty == 1:
+            return logits
+        mx = _mlx()
+        if seen_token_mask is not None:
+            selected = mx.take(seen_token_mask, ids)
+        elif seen_token_ids is not None and seen_token_ids.size:
+            selected = mx.any(ids[:, None] == seen_token_ids[None], axis=1)
+        else:
+            return logits
+        penalized = mx.where(logits < 0, logits * penalty, logits / penalty)
+        return mx.where(selected, penalized, logits)
+
+    def _dense_row(
+        self, query, top_k: int, seen_token_ids, seen_token_mask, penalty: float
+    ):
+        mx = _mlx()
+        logits = query @ mx.swapaxes(self.weight_float, -1, -2)
+        logits = logits[0] + self.bias_float
+        ids = mx.arange(self.index.vocabulary_size)
+        logits = self._adjust_repetition(
+            logits, ids, seen_token_ids, seen_token_mask, penalty
+        )
+        threshold = mx.topk(logits, k=top_k)[-1]
+        eligible = logits >= threshold
+        mx.eval(eligible)
+        positions = mx.array(np.flatnonzero(np.array(eligible)).astype(np.int32))
+        ids, logits = mx.take(ids, positions), mx.take(logits, positions)
+        order = mx.argsort(-logits)
+        return ids[order], logits[order]
+
+    def exact_top_k(
+        self,
+        hidden,
+        top_k: int,
+        *,
+        seen_token_ids=None,
+        seen_token_mask=None,
+        repetition_penalty: float = 1.0,
+    ) -> MLXRoutedVocabularyCandidates:
+        mx = _mlx()
+        hidden = _array(hidden) if isinstance(hidden, torch.Tensor) else hidden
+        if hidden.ndim == 1:
+            hidden = hidden[None]
+        if hidden.ndim != 2 or hidden.shape[1] != self.index.model_dimension:
+            raise ValueError("MLX router hidden states have an invalid shape")
+        if not 0 < top_k <= self.index.vocabulary_size:
+            raise ValueError("MLX router top_k lies outside the vocabulary")
+        if repetition_penalty < 1:
+            raise ValueError("MLX repetition_penalty must be at least one")
+        if seen_token_ids is not None and seen_token_mask is not None:
+            raise ValueError(
+                "supply MLX seen_token_ids or seen_token_mask, not both"
+            )
+        if seen_token_ids is not None:
+            seen_token_ids = (
+                _array(seen_token_ids)
+                if isinstance(seen_token_ids, torch.Tensor)
+                else seen_token_ids
+            )
+            if seen_token_ids.ndim != 1:
+                raise ValueError("MLX seen token identifiers must be one-dimensional")
+            mx.eval(seen_token_ids)
+            seen_numpy = np.array(seen_token_ids)
+            if seen_numpy.size and (
+                seen_numpy.min() < 0
+                or seen_numpy.max() >= self.index.vocabulary_size
+            ):
+                raise ValueError("MLX seen token identifiers fall outside the vocabulary")
+        if seen_token_mask is not None:
+            seen_token_mask = (
+                _array(seen_token_mask)
+                if isinstance(seen_token_mask, torch.Tensor)
+                else seen_token_mask
+            )
+            if (
+                seen_token_mask.ndim != 1
+                or seen_token_mask.shape[0] != self.index.vocabulary_size
+                or seen_token_mask.dtype != mx.bool_
+            ):
+                raise ValueError(
+                    "MLX seen_token_mask must be a boolean vocabulary mask"
+                )
+
+        mx.eval(hidden)
+        if not bool(np.isfinite(np.array(hidden)).all()):
+            raise ValueError("MLX router hidden states must be finite")
+        started = perf_counter()
+        gamma = self._gamma()
+        tolerance = self.config.certificate_absolute_tolerance
+        output_ids, output_logits = [], []
+        certified_queries = fallback_queries = 0
+        clusters_refined = token_evaluations = rounds = 0
+        minimum_margin = float("inf")
+
+        for row in range(hidden.shape[0]):
+            query = hidden[row : row + 1].astype(mx.float32)
+            if self._adaptively_disabled:
+                ids, logits = self._dense_row(
+                    query, top_k, seen_token_ids, seen_token_mask,
+                    repetition_penalty,
+                )
+                output_ids.append(ids)
+                output_logits.append(logits)
+                fallback_queries += 1
+                token_evaluations += self.index.vocabulary_size
+                continue
+            query_norm = mx.linalg.norm(query)
+            query_infinity = mx.max(mx.abs(query))
+            radial = query_norm * self.radii
+            upper = (
+                (query @ mx.swapaxes(self.centroids, -1, -2))[0]
+                + radial
+                + self.maximum_bias
+                + gamma * query_infinity * self.centroid_l1
+                + 4 * np.finfo(np.float32).eps * mx.abs(radial)
+                + tolerance
+            )
+            maximum_refinement = self._round_sizes()[-1]
+            order_count = min(
+                self.index.cluster_count,
+                maximum_refinement
+                + (maximum_refinement < self.index.cluster_count),
+            )
+            if order_count < self.index.cluster_count:
+                order = mx.argpartition(
+                    -upper, kth=order_count - 1
+                )[:order_count]
+                order = mx.take(
+                    order,
+                    mx.argsort(-mx.take(upper, order)),
+                )
+            else:
+                order = mx.argsort(-upper)
+            mx.eval(upper, order)
+            order_numpy = np.array(order)
+            evaluated_ids, evaluated_logits = [], []
+            previous = 0
+            certified = False
+            threshold = None
+            for target_count in self._round_sizes():
+                rounds += 1
+                selected = order_numpy[previous:target_count]
+                ids_numpy = self.token_ids_cpu[selected][
+                    self.token_mask_cpu[selected]
+                ]
+                ids = mx.array(ids_numpy.astype(np.int32))
+                if ids.size:
+                    rows_weight = mx.take(self.weight_float, ids, axis=0)
+                    logits = mx.sum(rows_weight * query, axis=-1)
+                    logits = logits + mx.take(self.bias_float, ids)
+                    logits = self._adjust_repetition(
+                        logits, ids, seen_token_ids, seen_token_mask,
+                        repetition_penalty,
+                    )
+                    evaluated_ids.append(ids)
+                    evaluated_logits.append(logits)
+                    token_evaluations += ids.size
+                previous = target_count
+                clusters_refined += len(selected)
+                complete_ids = mx.concatenate(evaluated_ids)
+                complete_logits = mx.concatenate(evaluated_logits)
+                if complete_logits.size < top_k:
+                    continue
+                selected_positions = mx.argsort(-complete_logits)[:top_k]
+                selected_values = mx.take(complete_logits, selected_positions)
+                selected_ids = mx.take(complete_ids, selected_positions)
+                selected_error = (
+                    gamma
+                    * query_infinity
+                    * mx.take(self.token_l1, selected_ids)
+                    + tolerance
+                )
+                if repetition_penalty > 1:
+                    selected_error = selected_error * repetition_penalty
+                kth_lower = mx.min(selected_values - selected_error)
+                remaining_upper = (
+                    upper[order[target_count]]
+                    if target_count < self.index.cluster_count
+                    else mx.array(-mx.inf)
+                )
+                margin_value = kth_lower - remaining_upper
+                mx.eval(margin_value)
+                margin = float(np.array(margin_value))
+                minimum_margin = min(minimum_margin, margin)
+                if margin > 0:
+                    threshold = mx.min(selected_values)
+                    certified = True
+                    break
+            if certified:
+                eligible = complete_logits >= threshold
+                mx.eval(eligible)
+                positions = mx.array(
+                    np.flatnonzero(np.array(eligible)).astype(np.int32)
+                )
+                ids = mx.take(complete_ids, positions)
+                logits = mx.take(complete_logits, positions)
+                sorting = mx.argsort(-logits)
+                output_ids.append(ids[sorting])
+                output_logits.append(logits[sorting])
+                certified_queries += 1
+            else:
+                ids, logits = self._dense_row(
+                    query, top_k, seen_token_ids, seen_token_mask,
+                    repetition_penalty,
+                )
+                output_ids.append(ids)
+                output_logits.append(logits)
+                fallback_queries += 1
+                token_evaluations += self.index.vocabulary_size
+
+        maximum = max(value.size for value in output_ids)
+        padded_ids, padded_logits, padded_masks = [], [], []
+        for ids, logits in zip(output_ids, output_logits, strict=True):
+            padding = maximum - ids.size
+            padded_ids.append(mx.pad(ids, (0, padding), constant_values=-1)[None])
+            padded_logits.append(
+                mx.pad(logits, (0, padding), constant_values=-mx.inf)[None]
+            )
+            padded_masks.append(
+                mx.concatenate((
+                    mx.ones((ids.size,), dtype=mx.bool_),
+                    mx.zeros((padding,), dtype=mx.bool_),
+                ))[None]
+            )
+        token_ids = mx.concatenate(padded_ids)
+        logits = mx.concatenate(padded_logits)
+        mask = mx.concatenate(padded_masks)
+        mx.eval(token_ids, logits, mask)
+        metrics = VocabularyRoutingMetrics(
+            hidden.shape[0],
+            certified_queries,
+            fallback_queries,
+            0,
+            self.index.cluster_count * hidden.shape[0],
+            clusters_refined,
+            token_evaluations,
+            max(
+                0,
+                hidden.shape[0] * self.index.vocabulary_size - token_evaluations,
+            ),
+            rounds,
+            perf_counter() - started,
+            0.0 if minimum_margin == float("inf") else minimum_margin,
+        )
+        if not self._adaptively_disabled:
+            self._adaptive_queries += hidden.shape[0]
+            self._adaptive_fallbacks += fallback_queries
+            if (
+                self._adaptive_queries >= self.config.adaptive_fallback_window
+                and self._adaptive_fallbacks / self._adaptive_queries
+                > self.config.maximum_adaptive_fallback_fraction
+            ):
+                self._adaptively_disabled = True
+        return MLXRoutedVocabularyCandidates(
+            token_ids,
+            logits,
+            mask,
+            self.index.vocabulary_size,
+            metrics,
+        )
+
+
 class MLXMRRN:
     """Exact-weight MLX executor for causal sequence-mode MRRN inference/training."""
 
-    def __init__(self, model: "MRRN", *, compile: bool = True, training: bool = False) -> None:
+    def __init__(
+        self,
+        model: "MRRN",
+        *,
+        compile: bool = True,
+        training: bool = False,
+        vocabulary_router_config: VocabularyRouterConfig | None = None,
+    ) -> None:
         mx = _mlx()
         if not model.config.causal:
             raise ValueError("the optimized MLX executor currently requires a causal MRRN")
@@ -237,7 +679,136 @@ class MLXMRRN:
             if compile and training else None
         )
         self._compile_streaming = compile
-        self._stream_functions: dict[int, Any] = {}
+        self._stream_functions: dict[tuple[int, bool], Any] = {}
+        self._compile_linear_cross_entropy = compile
+        self._linear_cross_entropy_functions: dict[tuple[int, str], Any] = {}
+        self._linear_cross_entropy_gradient_functions: dict[int, Any] = {}
+        self.vocabulary_router: MLXCertifiedBalancedVocabularyRouter | None = None
+        if vocabulary_router_config is None and not training:
+            vocabulary_router_config = VocabularyRouterConfig()
+        if vocabulary_router_config is not None and vocabulary_router_config.enabled:
+            if training:
+                raise ValueError("MLX vocabulary routing is inference-only")
+            if model.output_head.bias is None:
+                raise ValueError("MLX vocabulary routing requires an explicit output bias")
+            if (
+                model.config.resolved_output_dim
+                >= vocabulary_router_config.minimum_vocabulary_size
+                and model.config.model_dim
+                >= vocabulary_router_config.minimum_model_dimension
+            ):
+                index = VocabularyRouterIndex.build(
+                    model.output_head.weight,
+                    model.output_head.bias,
+                    vocabulary_router_config,
+                )
+                self.vocabulary_router = MLXCertifiedBalancedVocabularyRouter(
+                    index,
+                    self.parameters["output_head.weight"],
+                    self.parameters["output_head.bias"],
+                )
+
+    def linear_cross_entropy(
+        self,
+        output_latent,
+        labels,
+        *,
+        mask=None,
+        vocabulary_tile_size: int = 2048,
+        reduction: str = "mean",
+        evaluate: bool = True,
+    ):
+        """Apply the imported classifier through exact native MLX tiled CCE."""
+
+        mx = _mlx()
+        output_latent = (
+            _array(output_latent)
+            if isinstance(output_latent, torch.Tensor)
+            else output_latent
+        )
+        labels = _array(labels) if isinstance(labels, torch.Tensor) else labels
+        if mask is None:
+            mask = mx.ones(labels.shape, dtype=mx.bool_)
+        elif isinstance(mask, torch.Tensor):
+            mask = _array(mask)
+        key = (vocabulary_tile_size, reduction)
+        function = self._linear_cross_entropy_functions.get(key)
+        if function is None:
+            function = lambda parameters, hidden, targets, valid: (
+                mlx_exact_tiled_cross_entropy(
+                    hidden,
+                    parameters["output_head.weight"],
+                    targets,
+                    parameters.get("output_head.bias"),
+                    mask=valid,
+                    vocabulary_tile_size=vocabulary_tile_size,
+                    reduction=reduction,
+                )
+            )
+            if self._compile_linear_cross_entropy:
+                function = mx.compile(function)
+            self._linear_cross_entropy_functions[key] = function
+        result = function(self.parameters, output_latent, labels, mask)
+        if evaluate:
+            mx.eval(result)
+        return result
+
+    def linear_cross_entropy_and_grad(
+        self,
+        output_latent,
+        labels,
+        *,
+        mask=None,
+        vocabulary_tile_size: int = 2048,
+    ):
+        """Return exact CCE plus latent, classifier, and bias gradients.
+
+        The compiled function is cached by tile width. It differentiates the
+        full vocabulary objective without constructing the full logit matrix
+        and is suitable for integrating the MLX carrier with an external
+        optimizer or cognitive training loop.
+        """
+
+        mx = _mlx()
+        output_latent = (
+            _array(output_latent)
+            if isinstance(output_latent, torch.Tensor)
+            else output_latent
+        )
+        labels = _array(labels) if isinstance(labels, torch.Tensor) else labels
+        if mask is None:
+            mask = mx.ones(labels.shape, dtype=mx.bool_)
+        elif isinstance(mask, torch.Tensor):
+            mask = _array(mask)
+        function = self._linear_cross_entropy_gradient_functions.get(
+            vocabulary_tile_size
+        )
+        if function is None:
+            def objective(hidden, weight, bias, targets, valid):
+                return mlx_exact_tiled_cross_entropy(
+                    hidden,
+                    weight,
+                    targets,
+                    bias,
+                    mask=valid,
+                    vocabulary_tile_size=vocabulary_tile_size,
+                )
+
+            function = mx.value_and_grad(objective, argnums=(0, 1, 2))
+            if self._compile_linear_cross_entropy:
+                function = mx.compile(function)
+            self._linear_cross_entropy_gradient_functions[
+                vocabulary_tile_size
+            ] = function
+        value, gradients = function(
+            output_latent,
+            self.parameters["output_head.weight"],
+            self.parameters["output_head.bias"],
+            labels,
+            mask,
+        )
+        mx.eval(value, gradients)
+        return value, gradients
 
     def _pack_inference_weights(self) -> None:
         for block in range(self.config.layers):
@@ -599,7 +1170,9 @@ class MLXMRRN:
             })
         return outputs, next_state
 
-    def _stream_step_impl(self, state, x, mask, phase: int):
+    def _stream_step_impl(
+        self, state, x, mask, phase: int, project_output: bool
+    ):
         mx = _mlx()
         aged_state = dict(state)
         for block in range(self.config.layers):
@@ -643,12 +1216,17 @@ class MLXMRRN:
                 f"synthesis_adapters.{scale}",
             )
             latent = latent + gains[scale] * contribution * next_state[f"latest.mask.{scale}"][:, None]
-        prediction = _linear(self.parameters, self.buffers, latent, "output_head") * mask[:, None]
-        return prediction, next_state
+        prediction = (
+            _linear(self.parameters, self.buffers, latent, "output_head")
+            * mask[:, None]
+            if project_output
+            else mx.zeros((latent.shape[0], 0), dtype=latent.dtype)
+        )
+        return prediction, latent, next_state
 
-    def stream_step(self, x, state: MLXMRRNStreamState, mask=None):
-        """Advance one token with constant-size state and a phase-specialized graph."""
-
+    def _execute_stream_step(
+        self, x, state: MLXMRRNStreamState, mask, *, project_output: bool
+    ):
         mx = _mlx()
         x = _array(x) if isinstance(x, torch.Tensor) else x
         if x.ndim == 3 and x.shape[1] == 1:
@@ -661,17 +1239,38 @@ class MLXMRRN:
             mask = _array(mask)
         cycle = 2 ** (self.config.scales - 1)
         phase = state.position % cycle
-        function = self._stream_functions.get(phase)
+        cache_key = (phase, project_output)
+        function = self._stream_functions.get(cache_key)
         if function is None:
             function = lambda tensors, value, valid: self._stream_step_impl(
-                tensors, value, valid, phase
+                tensors, value, valid, phase, project_output
             )
             if self._compile_streaming:
                 function = mx.compile(function, inputs=[self.parameters, self.buffers])
-            self._stream_functions[phase] = function
-        prediction, tensors = function(state.tensors, x, mask)
-        mx.eval(prediction, tensors)
-        return prediction, MLXMRRNStreamState(tensors, state.position + 1, state.batch)
+            self._stream_functions[cache_key] = function
+        prediction, latent, tensors = function(state.tensors, x, mask)
+        mx.eval(prediction, latent, tensors)
+        return (
+            prediction,
+            latent,
+            MLXMRRNStreamState(tensors, state.position + 1, state.batch),
+        )
+
+    def stream_step(self, x, state: MLXMRRNStreamState, mask=None):
+        """Advance one token and execute the dense output projection."""
+
+        prediction, _, state = self._execute_stream_step(
+            x, state, mask, project_output=True
+        )
+        return prediction, state
+
+    def stream_latent_step(self, x, state: MLXMRRNStreamState, mask=None):
+        """Advance one token without executing the vocabulary projection."""
+
+        _, latent, state = self._execute_stream_step(
+            x, state, mask, project_output=False
+        )
+        return latent, state
 
     def decode(self, x, state: MLXMRRNStreamState | None = None):
         """Decode a complete sequence through the exact recurrent path."""
@@ -686,6 +1285,41 @@ class MLXMRRN:
         return mx.concatenate(outputs, axis=1) if outputs else mx.zeros(
             (x.shape[0], 0, self.config.resolved_output_dim), dtype=x.dtype
         ), state
+
+    def decode_latents(self, x, state: MLXMRRNStreamState | None = None):
+        """Decode a sequence without any dense output-head execution."""
+
+        mx = _mlx()
+        x = _array(x) if isinstance(x, torch.Tensor) else x
+        state = self.initial_stream_state(x.shape[0]) if state is None else state
+        outputs = []
+        for position in range(x.shape[1]):
+            latent, state = self.stream_latent_step(x[:, position], state)
+            outputs.append(latent[:, None])
+        return mx.concatenate(outputs, axis=1) if outputs else mx.zeros(
+            (x.shape[0], 0, self.config.model_dim), dtype=x.dtype
+        ), state
+
+    def routed_top_k(
+        self,
+        latent,
+        top_k: int,
+        *,
+        seen_token_ids=None,
+        seen_token_mask=None,
+        repetition_penalty: float = 1.0,
+    ) -> MLXRoutedVocabularyCandidates:
+        if self.vocabulary_router is None:
+            raise RuntimeError(
+                "construct MLXMRRN with a vocabulary_router_config before routed decoding"
+            )
+        return self.vocabulary_router.exact_top_k(
+            latent,
+            top_k,
+            seen_token_ids=seen_token_ids,
+            seen_token_mask=seen_token_mask,
+            repetition_penalty=repetition_penalty,
+        )
 
     def benchmark_decode(self, *, repeats: int = 32, warmup_cycles: int = 1) -> dict[str, float]:
         """Measure phase-averaged recurrent latency after bounded caches are warm."""

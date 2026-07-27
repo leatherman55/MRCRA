@@ -4,7 +4,7 @@
 The prior 4.695M sequence-only MRRN trainer remains available solely through
 the explicit ``--legacy-mrrn`` compatibility switch.  A normal invocation is
 delegated to :mod:`train_mrcra_fineweb`, ensuring that the familiar command can
-never silently bypass the cognitive runtime, retained evaluation, or format-12
+never silently bypass the cognitive runtime, retained evaluation, or format-16
 checkpoint contract.
 """
 
@@ -128,7 +128,24 @@ def parser() -> argparse.ArgumentParser:
         help="Trackio run name; defaults to a name containing the exact token budget.",
     )
     result.add_argument("--trackio-space-id")
-    result.add_argument("--dashboard", action=argparse.BooleanOptionalAction, default=True)
+    result.add_argument(
+        "--trackio-remote-log-interval",
+        type=int,
+        default=4,
+        help=(
+            "Send one coalesced scalar row to remote Trackio every N steps; "
+            "the local JSONL mirror retains every row."
+        ),
+    )
+    result.add_argument(
+        "--dashboard",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Launch the local Trackio web UI inside the training process "
+            "(default: disabled; logging remains enabled)."
+        ),
+    )
     result.add_argument(
         "--spectral-dashboard", action=argparse.BooleanOptionalAction, default=True,
         help="Publish the four spectral instruments in Trackio's Spectral Network tab.",
@@ -181,6 +198,9 @@ def legacy_main() -> None:
             keep_checkpoints=2, generation_tokens=4, device="cpu",
             trackio_project=args.trackio_project,
             run_name=args.run_name or "mrrn-stability-smoke",
+            trackio_remote_log_interval=(
+                args.trackio_remote_log_interval
+            ),
             show_dashboard=False, spectral_dashboard=args.spectral_dashboard,
             spectral_snapshot_interval=2, spectral_snapshot_tokens=16, seed=args.seed,
         )
@@ -228,6 +248,9 @@ def legacy_main() -> None:
                 or f"mrrn-4p7m-fineweb-stable-{args.total_tokens}-tokens"
             ),
             trackio_space_id=args.trackio_space_id,
+            trackio_remote_log_interval=(
+                args.trackio_remote_log_interval
+            ),
             show_dashboard=args.dashboard,
             spectral_dashboard=args.spectral_dashboard,
             spectral_snapshot_interval=args.spectral_snapshot_interval,

@@ -1,0 +1,242 @@
+{
+  "claim_boundary": "Pass proves the specified tiny 1K integrated training, custom composite, activation recomputation, CSTM reachability, exact resume, and row-isolation contracts on every locally available backend. Unavailable backends are untested, never passed.",
+  "format_version": 1,
+  "passed": true,
+  "results": [
+    {
+      "criteria": [
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "finite_1k_integrated_forward_backward",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 7.152557373046875e-07,
+          "name": "optimized_affine_scan_parity",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "optimized_simplex_parity",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "retain_checkpoint_ce_error",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "retain_checkpoint_gradient_absolute_error",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "sampled_cstm_carrier_reachability",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "sampled_cstm_cognition_reachability",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "checkpoint_resume_parameter_error",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "checkpoint_resume_counter_exactness",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "checkpoint_resume_schedule_exactness",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "cross_row_forward_gradient_leakage",
+          "passed": true,
+          "threshold": 2e-05
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "padding_gradient_leakage",
+          "passed": true,
+          "threshold": 2e-05
+        }
+      ],
+      "device": "cpu",
+      "error": null,
+      "passed": true,
+      "status": "tested",
+      "telemetry": {
+        "checkpoint_cross_entropy_nats_per_token": 5.54926726727014,
+        "checkpoint_model_state_digest": "14d91e02da2ce324462d1d2c09f74e1cf01e05b7327d52b63b5fe644fdedbf74",
+        "checkpoint_runtime": {
+          "activation": "whole_span",
+          "carrier_backend": "portable_custom_composites",
+          "checkpoint_granularity": "whole_carrier_span"
+        },
+        "cstm_auxiliary_parameter_count": 216,
+        "cstm_substrate_vjps": 1.0,
+        "gradient_relative_error": 0.0,
+        "retain_cross_entropy_nats_per_token": 5.54926726727014,
+        "retain_model_state_digest": "14d91e02da2ce324462d1d2c09f74e1cf01e05b7327d52b63b5fe644fdedbf74",
+        "retain_runtime": {
+          "activation": "retain",
+          "carrier_backend": "portable_custom_composites",
+          "checkpoint_granularity": "none"
+        }
+      },
+      "torch_device_name": "DEFAULT"
+    },
+    {
+      "criteria": [
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "finite_1k_integrated_forward_backward",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 5.960464477539062e-07,
+          "name": "optimized_affine_scan_parity",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "optimized_simplex_parity",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "retain_checkpoint_ce_error",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "maximum",
+          "measurement": 2.3283064365386963e-10,
+          "name": "retain_checkpoint_gradient_absolute_error",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "sampled_cstm_carrier_reachability",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "sampled_cstm_cognition_reachability",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 9.313225746154785e-10,
+          "name": "checkpoint_resume_parameter_error",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "checkpoint_resume_counter_exactness",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "minimum",
+          "measurement": 1.0,
+          "name": "checkpoint_resume_schedule_exactness",
+          "passed": true,
+          "threshold": 1.0
+        },
+        {
+          "direction": "maximum",
+          "measurement": 5.960464477539063e-08,
+          "name": "cross_row_forward_gradient_leakage",
+          "passed": true,
+          "threshold": 0.002
+        },
+        {
+          "direction": "maximum",
+          "measurement": 0.0,
+          "name": "padding_gradient_leakage",
+          "passed": true,
+          "threshold": 0.002
+        }
+      ],
+      "device": "mps",
+      "error": null,
+      "passed": true,
+      "status": "tested",
+      "telemetry": {
+        "checkpoint_cross_entropy_nats_per_token": 5.549267506389263,
+        "checkpoint_model_state_digest": "769930e343fe4f71b6aaba13b151212d167eabae4cf0a0511cab4efe24cd7d6b",
+        "checkpoint_runtime": {
+          "activation": "whole_span",
+          "carrier_backend": "portable_custom_composites",
+          "checkpoint_granularity": "whole_carrier_span"
+        },
+        "cstm_auxiliary_parameter_count": 216,
+        "cstm_substrate_vjps": 1.0,
+        "gradient_relative_error": 2.6401900754535745e-07,
+        "retain_cross_entropy_nats_per_token": 5.549267506389263,
+        "retain_model_state_digest": "769930e343fe4f71b6aaba13b151212d167eabae4cf0a0511cab4efe24cd7d6b",
+        "retain_runtime": {
+          "activation": "retain",
+          "carrier_backend": "portable_custom_composites",
+          "checkpoint_granularity": "none"
+        }
+      },
+      "torch_device_name": "Apple Metal Performance Shaders"
+    },
+    {
+      "criteria": [],
+      "device": "cuda",
+      "error": null,
+      "passed": null,
+      "status": "untested_unavailable",
+      "telemetry": {},
+      "torch_device_name": "unavailable"
+    }
+  ],
+  "suite": "mrcra_integrated_available_device_parity",
+  "torch_version": "2.13.0"
+}

@@ -30,7 +30,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--context-length", type=int, default=32_768)
     parser.add_argument("--execution-chunk-size", type=int, default=256)
     parser.add_argument("--tbptt-length", type=int, default=4_096)
-    parser.add_argument("--vocabulary-tile-size", type=int, default=2_048)
+    parser.add_argument("--vocabulary-tile-size", type=int, default=4_096)
     parser.add_argument(
         "--compile-tensor-cores", action=argparse.BooleanOptionalAction,
         default=None,

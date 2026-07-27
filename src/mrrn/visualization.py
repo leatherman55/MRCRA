@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from .lm_training import TextTokenizer
 
 
+MAX_TRAINING_SERIES_SAMPLES = 512
+
+
 def _finite(value: Any) -> float | None:
     """Return a finite float or ``None`` for absent/non-finite telemetry."""
 
@@ -67,7 +70,69 @@ def _observed_rms(
     return round(result, digits)
 
 
-def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
+def _evenly_spaced_indices(indices: list[int], count: int) -> list[int]:
+    """Select deterministic endpoints and uniform interior observations."""
+
+    if count >= len(indices):
+        return indices
+    if count <= 0:
+        return []
+    if count == 1:
+        return [indices[-1]]
+    last = len(indices) - 1
+    return [indices[(slot * last) // (count - 1)] for slot in range(count)]
+
+
+def _bounded_training_samples(
+    samples: list[dict[str, float | int | None]],
+    *,
+    maximum_samples: int,
+) -> list[dict[str, float | int | None]]:
+    """Bound observer memory while retaining endpoints and rare causal receipts."""
+
+    if maximum_samples < 2:
+        raise ValueError("maximum training-series samples must be at least two")
+    if len(samples) <= maximum_samples:
+        return samples
+
+    priority_fields = (
+        "ablation_full_ce",
+        "ablation_soft_ce",
+        "ablation_off_ce",
+        "hard_ce_gain",
+        "soft_ce_gain",
+        "pc_guard_ce",
+        "pc_guard_best_ce",
+    )
+    priority = {0, len(samples) - 1}
+    for index, sample in enumerate(samples):
+        if any(sample.get(name) is not None for name in priority_fields):
+            priority.add(index)
+        if any(
+            float(sample.get(name) or 0.0) > 0.0
+            for name in ("event_opened", "event_finalized", "event_emitted")
+        ):
+            priority.add(index)
+
+    ordered_priority = sorted(priority)
+    if len(ordered_priority) >= maximum_samples:
+        retained = _evenly_spaced_indices(ordered_priority, maximum_samples)
+    else:
+        remaining = [
+            index for index in range(len(samples)) if index not in priority
+        ]
+        retained = ordered_priority + _evenly_spaced_indices(
+            remaining, maximum_samples - len(ordered_priority)
+        )
+    return [samples[index] for index in sorted(set(retained))]
+
+
+def load_training_series(
+    path: str | Path,
+    *,
+    label: str,
+    maximum_samples: int = MAX_TRAINING_SERIES_SAMPLES,
+) -> dict[str, Any]:
     """Read the metric records that contain an optimization step.
 
     Trackio alert/evaluation records may share a step with the training row.
@@ -76,8 +141,12 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
     ``gradient_norm_after_clip`` field.
     """
 
+    if maximum_samples < 2:
+        raise ValueError("maximum training-series samples must be at least two")
     samples: list[dict[str, float | int | None]] = []
-    evaluation_rows: list[tuple[int, int, dict[str, float | None]]] = []
+    pending_evaluations: dict[int, dict[str, float | None]] = {}
+    last_optimizer_step: int | None = None
+    total_samples = 0
     with Path(path).open(encoding="utf-8") as handle:
         for line_index, line in enumerate(handle):
             if not line.strip():
@@ -91,7 +160,7 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
                 any(name.startswith("eval/phase_ablation/") for name in metrics)
                 or "pc_rasl/guard_ce_nats_per_token" in metrics
             ):
-                evaluation_rows.append((line_index, step, {
+                evaluation = {
                     "ablation_full_ce": _finite(metrics.get("eval/phase_ablation/full_ce_nats_per_token")),
                     "ablation_soft_ce": _finite(metrics.get("eval/phase_ablation/soft_only_ce_nats_per_token")),
                     "ablation_off_ce": _finite(metrics.get("eval/phase_ablation/cognition_off_ce_nats_per_token")),
@@ -100,12 +169,32 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
                     "pc_guard_ce": _finite(metrics.get("pc_rasl/guard_ce_nats_per_token")),
                     "pc_guard_best_ce": _finite(metrics.get("pc_rasl/guard_best_ce_nats_per_token")),
                     "pc_guard_allows_positive": _finite(metrics.get("pc_rasl/guard_allows_positive_pressure")),
-                }))
+                }
+                retained = {
+                    name: value for name, value in evaluation.items()
+                    if value is not None
+                }
+                matched = False
+                for sample in reversed(samples):
+                    if int(sample["step"]) == step:
+                        sample.update(retained)
+                        matched = True
+                        break
+                if not matched:
+                    pending_evaluations.setdefault(step, {}).update(retained)
+                    while len(pending_evaluations) > maximum_samples:
+                        pending_evaluations.pop(next(iter(pending_evaluations)))
             pre = metrics.get("optimization/gradient_norm_before_clip")
             if pre is None:
                 continue
-            samples.append(
-                {
+            if last_optimizer_step is not None and step <= last_optimizer_step:
+                # An append-only file can contain several resumed/fresh runs.
+                # Drop the previous run immediately rather than retaining it
+                # until the complete file has been materialized.
+                samples.clear()
+                pending_evaluations.clear()
+                total_samples = 0
+            sample: dict[str, float | int | None] = {
                     "step": step,
                     "_line": line_index,
                     "tokens": int(metrics.get("progress/tokens_seen", 0)),
@@ -184,28 +273,32 @@ def load_training_series(path: str | Path, *, label: str) -> dict[str, Any]:
                     "pc_replay_storage_bytes": _finite(metrics.get("pc_rasl/replay_storage_bytes")),
                     "pc_behavior_evidence_bound": _finite(metrics.get("pc_rasl/behavior_evidence_bound")),
                 }
-            )
+            sample.update(pending_evaluations.pop(step, {}))
+            samples.append(sample)
+            total_samples += 1
+            last_optimizer_step = step
+            # Keep peak observer memory below two retained windows even when a
+            # run spans millions of optimizer updates.  Repeated compaction
+            # intentionally provides more resolution near the live frontier.
+            if len(samples) > 2 * maximum_samples:
+                samples = _bounded_training_samples(
+                    samples, maximum_samples=maximum_samples,
+                )
     if not samples:
         raise ValueError(f"{path} contains no optimizer-step telemetry")
-    # Training logs are intentionally append-only.  A fresh run in the same
-    # output directory is visible as a step reset, so visualize the latest
-    # monotonic run rather than drawing a false line backward through time.
-    latest_start = 0
-    for index in range(1, len(samples)):
-        if samples[index]["step"] <= samples[index - 1]["step"]:
-            latest_start = index
-    samples = samples[latest_start:]
-    latest_line = int(samples[0]["_line"])
-    evaluation_by_step: dict[int, dict[str, float | None]] = {}
-    for line_index, step, values in evaluation_rows:
-        if line_index < latest_line:
-            continue
-        retained = {name: value for name, value in values.items() if value is not None}
-        evaluation_by_step.setdefault(step, {}).update(retained)
     for sample in samples:
-        sample.update(evaluation_by_step.get(int(sample["step"]), {}))
         sample.pop("_line")
-    return {"label": label, "source": str(Path(path)), "samples": samples}
+    samples = _bounded_training_samples(
+        samples, maximum_samples=maximum_samples,
+    )
+    return {
+        "label": label,
+        "source": str(Path(path)),
+        "samples": samples,
+        "sample_count_total": total_samples,
+        "sample_count_retained": len(samples),
+        "downsampled": len(samples) < total_samples,
+    }
 
 
 def _round_list(values: Tensor, digits: int = 6) -> list[float]:

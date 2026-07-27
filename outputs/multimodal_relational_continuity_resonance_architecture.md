@@ -6,7 +6,7 @@
 **Status:** normative architecture plus implemented production baseline and bounded learned-behavior acceptance; serious-scale capability remains empirical  
 **Date:** 22 July 2026  
 **Target:** a bounded, causal, multimodal cognitive architecture built on the MRRN continuity substrate  
-**Serious actor scale:** exactly 115,925,944 trainable parameters with the GPT-2 vocabulary, inside the declared 110M–125M 120M-class envelope  
+**Serious actor scale:** exactly 115,931,878 trainable parameters with the GPT-2 vocabulary and default CSTM head, inside the declared 110M–125M 120M-class envelope  
 **Maximum designed sequence span:** 32,768 finest-scale positions per training example or prefill; recurrent generation may continue beyond that span with bounded neural state
 
 ---
@@ -1623,14 +1623,15 @@ Spectral radius below one is a useful local linear diagnostic, not a global safe
 
 ### 22.1 Parameter budget
 
-The canonical GPT-2-vocabulary actor constructs exactly 115,925,944 unique trainable parameters. This deliberately remains inside the declared 110M–125M envelope rather than adding inert capacity to reach a cosmetic round number:
+The canonical GPT-2-vocabulary actor constructs exactly 115,931,878 unique trainable parameters, including the default shared CSTM predictor. This deliberately remains inside the declared 110M–125M envelope rather than adding inert capacity to reach a cosmetic round number:
 
 | Allocation | Exact constructed count |
 |---|---:|
 | tied token/input-output embedding, 50,257 × 256 | 12,865,792 |
 | six-scale MRRN carrier excluding the tied embedding | 93,733,942 |
 | event, typed graph/workspace, multimodal/knowledge/symbol memory, reconstruction, abstraction, invariants, uncertainty, world, provenance, metacognition, viability, internal controller, and external-action modules | 9,326,210 |
-| **inference actor total** | **115,925,944** |
+| shared Causal Spectral Target Multiplexing predictor | 5,934 |
+| **inference actor total** | **115,931,878** |
 | online RASL critic, training only | at most about 5% of actor, additional |
 
 The constructor-side budget assertion fails outside 110,000,000–125,000,000 parameters. `scripts/report_mrcra_parameters.py` reconstructs the model and writes the exact module breakdown and static-storage estimates to `outputs/mrcra_120m_parameter_report.json`. EMA copies and target critics count toward training memory even though they are not additional inference-actor parameters.
@@ -1975,7 +1976,7 @@ Local bounded evidence is recorded by `delayed_functional_surprise`: FSCE and be
 
 ### Gate M: 32K and CUDA
 
-On the RTX A4500, report peak allocated/reserved memory, tokens/s, update time, prefill, decode, checkpoint overhead, graph event rate, memory query rate, and numerical failures for the exact 115,925,944-parameter configuration. Test 2K-trained evaluation at 8K, 16K, and 32K and distinguish compressed-state retention from exact retrieval.
+On the RTX A4500, report peak allocated/reserved memory, tokens/s, update time, prefill, decode, checkpoint overhead, graph event rate, memory query rate, and numerical failures for the exact 115,931,878-parameter configuration. Test 2K-trained evaluation at 8K, 16K, and 32K and distinguish compressed-state retention from exact retrieval.
 
 This hardware-characterization gate is optional tooling and is excluded from the present acceptance scope by project direction. Automatic CUDA selection and the benchmark harness remain available, but no physical CUDA result is required or claimed.
 
@@ -2128,7 +2129,7 @@ The repository's current evidence is numerical, component-level, and end-to-end 
   compilation;
 - RASL gradient firewalls, exact candidate probabilities, target updates, recurrent replay burn-in, replay bounds, performance veto, and delayed-reward tests;
 - a two-update CLI smoke train through cognitive recurrence, optimization, and atomic checkpoint creation;
-- an exact serious-actor constructor audit of 115,925,944 trainable parameters;
+- an exact serious-actor constructor audit of 115,931,878 trainable parameters;
 - a format-7 production training checkpoint that binds a deterministic retained-evaluation digest and deterministic prefetched batch, plus exact tiled held-out CE that cannot mutate training state;
 - a fail-closed serious-checkpoint authority with typed evidence production, independently recomputed confidence/criterion decisions, exact task-set identity, and measured 32K hardware budgets;
 - a deterministic eight-experiment learned-behavior suite with preregistered thresholds, explicit ablations, and a JSON result artifact.

@@ -36,9 +36,20 @@ def tiny_config():
     return MRCRAConfig(carrier, cognitive, actor_parameter_minimum=1, actor_parameter_maximum=10_000_000)
 
 
-def packet(values, ledger, *, boundaries=None, segments=None, uri="doc://x"):
+def packet(
+    values,
+    ledger,
+    *,
+    boundaries=None,
+    segments=None,
+    valid=None,
+    uri="doc://x",
+):
     batch, length = values.shape[:2]
-    valid = torch.ones(batch, length, dtype=torch.bool)
+    valid = (
+        torch.ones(batch, length, dtype=torch.bool)
+        if valid is None else valid
+    )
     boundaries = (
         torch.zeros(batch, length, dtype=torch.int64)
         if boundaries is None else boundaries
@@ -47,6 +58,8 @@ def packet(values, ledger, *, boundaries=None, segments=None, uri="doc://x"):
         torch.zeros(batch, length, dtype=torch.int64)
         if segments is None else segments
     )
+    segments = segments.masked_fill(~valid, -1)
+    values = values * valid.unsqueeze(-1)
     timestamps = torch.arange(length, dtype=values.dtype).expand(batch, -1)
     return register_external_observations(
         values, valid, observed_mask=valid, timestamps=timestamps,
@@ -171,6 +184,134 @@ def test_integrated_multirate_training_is_causal_and_pressurizes_controller():
     assert torch.linalg.vector_norm(model.output_context_adapter.weight.grad) > 0
     assert model.controller.action_head.weight.grad is not None
     assert torch.linalg.vector_norm(model.controller.action_head.weight.grad) > 0
+
+
+def test_integrated_static_batch_matches_document_alone_and_masks_padding():
+    torch.manual_seed(105)
+    model = MultimodalRelationalContinuityResonanceNetwork(tiny_config()).double()
+    values = torch.randn(2, 8, 8, dtype=torch.float64)
+    valid = torch.tensor(
+        [
+            [True] * 8,
+            [True] * 5 + [False] * 3,
+        ]
+    )
+    batched_ledger = ProvenanceLedger()
+    batched = model.forward_integrated_training(
+        packet(values, batched_ledger, valid=valid),
+        batched_ledger,
+        cognitive_stride=2,
+        cognitive_tbptt_events=2,
+    )
+
+    individual = []
+    for row, length in enumerate((8, 5)):
+        ledger = ProvenanceLedger()
+        individual.append(
+            model.forward_integrated_training(
+                packet(
+                    values[row : row + 1, :length],
+                    ledger,
+                    uri=f"doc://x/{row}",
+                ),
+                ledger,
+                cognitive_stride=2,
+                cognitive_tbptt_events=2,
+            )
+        )
+
+    for row, length in enumerate((8, 5)):
+        torch.testing.assert_close(
+            batched.output_latent[row, :length],
+            individual[row].output_latent[0],
+            atol=2e-6,
+            rtol=2e-6,
+        )
+        torch.testing.assert_close(
+            batched.state.cognitive.relational_context[row],
+            individual[row].state.cognitive.relational_context[0],
+            atol=2e-6,
+            rtol=2e-6,
+        )
+        torch.testing.assert_close(
+            batched.state.cognitive.nodes.content[row],
+            individual[row].state.cognitive.nodes.content[0],
+            atol=2e-6,
+            rtol=2e-6,
+        )
+        assert torch.equal(
+            batched.state.cognitive.nodes.active[row],
+            individual[row].state.cognitive.nodes.active[0],
+        )
+        expected_events = (length + 1) // 2
+        assert batched.event_mask[row].sum() == expected_events
+        assert torch.equal(
+            batched.cognitive_cycles[row, :expected_events],
+            individual[row].cognitive_cycles[0],
+        )
+    assert not batched.event_mask[1, 3]
+    assert torch.count_nonzero(batched.output_latent[1, 5:]) == 0
+
+
+def test_integrated_document_rows_and_masked_tail_have_zero_cross_gradient():
+    torch.manual_seed(106)
+    model = MultimodalRelationalContinuityResonanceNetwork(tiny_config()).double()
+    values = torch.randn(2, 8, 8, dtype=torch.float64, requires_grad=True)
+    valid = torch.tensor(
+        [
+            [True] * 8,
+            [True] * 5 + [False] * 3,
+        ]
+    )
+    ledger = ProvenanceLedger()
+    output = model.forward_integrated_training(
+        packet(values, ledger, valid=valid),
+        ledger,
+        cognitive_stride=2,
+        cognitive_tbptt_events=2,
+    )
+    gradient = torch.autograd.grad(
+        output.output_latent[0].square().sum(), values
+    )[0]
+    assert torch.count_nonzero(gradient[1]) == 0
+
+    ledger = ProvenanceLedger()
+    tail_objective = model.forward_integrated_training(
+        packet(values, ledger, valid=valid),
+        ledger,
+        cognitive_stride=2,
+        cognitive_tbptt_events=2,
+    ).output_latent[1, :5].square().sum()
+    tail_gradient = torch.autograd.grad(tail_objective, values)[0]
+    assert torch.count_nonzero(tail_gradient[0]) == 0
+    assert torch.count_nonzero(tail_gradient[1, 5:]) == 0
+
+
+def test_integrated_padding_mask_cannot_reactivate_or_supply_an_empty_row():
+    model = MultimodalRelationalContinuityResonanceNetwork(tiny_config()).double()
+    values = torch.randn(2, 4, 8, dtype=torch.float64)
+    with pytest.raises(ValueError, match="prefix"):
+        ledger = ProvenanceLedger()
+        packet(
+            values,
+            ledger,
+            valid=torch.tensor(
+                [[True, False, True, False], [True, True, True, True]]
+            ),
+        )
+
+    ledger = ProvenanceLedger()
+    observed = packet(
+        values,
+        ledger,
+        valid=torch.tensor(
+            [[False, False, False, False], [True, True, True, True]]
+        ),
+    )
+    with pytest.raises(ValueError, match="at least one"):
+        model.forward_integrated_training(
+            observed, ledger, cognitive_stride=2
+        )
 
 
 def test_integrated_training_preserves_complete_carrier_state_across_tbptt_spans():

@@ -117,7 +117,7 @@
     "passed": true
   },
   "model_profile": "mrcra_8p4m_light",
-  "parameter_count": 8413442,
+  "parameter_count": 8416803,
   "parameter_count_by_subsystem": {
     "cognitive.abstraction_applicability": 111559,
     "cognitive.carrier": 2168080,
@@ -151,6 +151,7 @@
     "cognitive.viability_forecaster": 112,
     "cognitive.workspace_graph": 161088,
     "cognitive.world_model": 136473,
+    "cstm_predictor": 3361,
     "token_embedding": 4824672
   },
   "parameter_tensors_by_subsystem": {
@@ -186,17 +187,18 @@
     "cognitive.viability_forecaster": 4,
     "cognitive.workspace_graph": 58,
     "cognitive.world_model": 30,
+    "cstm_predictor": 8,
     "token_embedding": 1
   },
   "static_storage_gib": {
-    "bf16_or_fp16_parameters_if_materialized": 0.015671256929636,
-    "fp32_parameters": 0.031342513859272,
-    "fp32_parameters_gradients_and_adam_moments": 0.125370055437088
+    "bf16_or_fp16_parameters_if_materialized": 0.015677517279982567,
+    "fp32_parameters": 0.031355034559965134,
+    "fp32_parameters_gradients_and_adam_moments": 0.12542013823986053
   },
   "storage_scope": "Static tensor storage only; excludes activations, CUDA allocator reserve, checkpoint recomputation workspaces, and cognitive runtime state.",
   "tied_token_and_output_weights": true,
   "torch_version": "2.13.0",
-  "trainable_parameter_count": 8413442,
-  "unique_parameter_tensors": 749,
+  "trainable_parameter_count": 8416803,
+  "unique_parameter_tensors": 757,
   "vocabulary_size": 50257
 }

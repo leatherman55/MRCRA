@@ -118,7 +118,7 @@ cost.
 
 For the production 8.4M light profile:
 
-- actor: 8,413,442 parameters;
+- actor including the default CSTM head: 8,416,803 parameters;
 - PC-RASL critic: 139,537 parameters;
 - critic-to-actor ratio: approximately 1.66%;
 - target actor: none;

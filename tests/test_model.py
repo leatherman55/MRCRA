@@ -249,6 +249,74 @@ def test_prefill_preserves_chunk_state_across_repeated_calls_and_arbitrary_tail(
     assert third.state.position == complete.state.position == 23
 
 
+def test_prefill_band_histories_have_exact_completion_positions_and_chunk_invariance():
+    torch.manual_seed(614)
+    model = MRRN(tiny_config()).double().eval()
+    values = torch.randn(1, 23, 3, dtype=torch.float64)
+    with torch.no_grad():
+        complete = model.prefill(values)
+        state = model.initial_stream_state(1, dtype=torch.float64)
+        pieces = (
+            model.prefill(values[:, :7], state=state),
+        )
+        pieces += (
+            model.prefill(values[:, 7:18], state=pieces[-1].state),
+        )
+        pieces += (
+            model.prefill(values[:, 18:], state=pieces[-1].state),
+        )
+
+    assert len(complete.band_histories) == model.config.scales
+    for scale, history in enumerate(complete.band_histories):
+        assert history is not None
+        expected_positions = torch.arange(
+            history.band.support - 1,
+            values.shape[1],
+            history.band.support,
+            dtype=torch.int64,
+        )
+        torch.testing.assert_close(history.end_positions.cpu(), expected_positions)
+        assert history.band.scale == scale
+        assert history.band.data.shape[1] == expected_positions.numel()
+        piece_histories = [
+            result.band_histories[scale]
+            for result in pieces
+            if result.band_histories[scale] is not None
+        ]
+        torch.testing.assert_close(
+            torch.cat([item.end_positions for item in piece_histories]),
+            history.end_positions,
+        )
+        torch.testing.assert_close(
+            torch.cat([item.band.data for item in piece_histories], 1),
+            history.band.data,
+            atol=2e-5,
+            rtol=2e-5,
+        )
+
+
+def test_prefill_band_history_cannot_change_when_only_later_tokens_change():
+    torch.manual_seed(615)
+    model = MRRN(tiny_config()).double().eval()
+    values = torch.randn(1, 20, 3, dtype=torch.float64)
+    changed = values.clone()
+    changed[:, 12:] += 100
+    with torch.no_grad():
+        baseline = model.prefill(values)
+        perturbed = model.prefill(changed)
+    for before, after in zip(
+        baseline.band_histories, perturbed.band_histories, strict=True
+    ):
+        assert before is not None and after is not None
+        unchanged = before.end_positions < 12
+        torch.testing.assert_close(
+            before.band.data[:, unchanged],
+            after.band.data[:, unchanged],
+            atol=1e-10,
+            rtol=1e-10,
+        )
+
+
 def test_compiled_tensor_core_boundary_preserves_outputs_and_ordered_state(
     monkeypatch,
 ):
@@ -282,6 +350,141 @@ def test_compiled_tensor_core_boundary_preserves_outputs_and_ordered_state(
             torch.testing.assert_close(actual_state.value, expected_state.value)
     compiled.disable_compiled_tensor_cores()
     assert all(not block._compiled_chunk_cores for block in compiled.blocks)
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "compile"),
+    reason="PyTorch compiler is unavailable",
+)
+def test_real_aot_carrier_attempt_preserves_semantics_and_reports_fallback():
+    """Exercise the real AOT boundary and require truthful eager resolution."""
+
+    torch.manual_seed(619)
+    eager = MRRN(tiny_config()).float().train()
+    compiled = MRRN(tiny_config()).float().train()
+    compiled.load_state_dict(eager.state_dict())
+    compiled.enable_compiled_tensor_cores(backend="aot_eager")
+    eager_input = torch.randn(
+        1, 12, 3, dtype=torch.float32, requires_grad=True
+    )
+    compiled_input = eager_input.detach().clone().requires_grad_(True)
+    try:
+        continuation = torch.randn(1, 16, 3)
+        eager_state = compiled_state = None
+        with torch.no_grad():
+            for start in (0, 8):
+                eager_chunk = eager.prefill(
+                    continuation[:, start : start + 8],
+                    state=eager_state,
+                )
+                compiled_chunk = compiled.prefill(
+                    continuation[:, start : start + 8],
+                    state=compiled_state,
+                )
+                eager_state = eager_chunk.state
+                compiled_state = compiled_chunk.state
+                torch.testing.assert_close(
+                    compiled_chunk.prediction,
+                    eager_chunk.prediction,
+                    atol=3e-5,
+                    rtol=3e-4,
+                )
+        assert eager_state is not None and compiled_state is not None
+        assert compiled_state.position == eager_state.position == 16
+        for actual_block, expected_block in zip(
+            compiled_state.blocks, eager_state.blocks, strict=True
+        ):
+            for actual_resonator, expected_resonator in zip(
+                actual_block.resonators,
+                expected_block.resonators,
+                strict=True,
+            ):
+                torch.testing.assert_close(
+                    actual_resonator.value,
+                    expected_resonator.value,
+                    atol=3e-5,
+                    rtol=3e-4,
+                )
+        expected = eager.prefill(eager_input)
+        actual = compiled.prefill(compiled_input)
+        torch.testing.assert_close(
+            actual.prediction, expected.prediction,
+            atol=3e-5, rtol=3e-4,
+        )
+        torch.testing.assert_close(
+            actual.latent, expected.latent,
+            atol=3e-5, rtol=3e-4,
+        )
+        assert actual.state.position == expected.state.position == 12
+        for actual_history, expected_history in zip(
+            actual.band_histories,
+            expected.band_histories,
+            strict=True,
+        ):
+            assert actual_history is not None
+            assert expected_history is not None
+            torch.testing.assert_close(
+                actual_history.band.data,
+                expected_history.band.data,
+                atol=3e-5,
+                rtol=3e-4,
+            )
+            assert torch.equal(
+                actual_history.band.mask,
+                expected_history.band.mask,
+            )
+            assert torch.equal(
+                actual_history.end_positions,
+                expected_history.end_positions,
+            )
+        expected_loss = (
+            expected.prediction.square().mean()
+            + 0.1 * expected.latent.square().mean()
+        )
+        actual_loss = (
+            actual.prediction.square().mean()
+            + 0.1 * actual.latent.square().mean()
+        )
+        expected_loss.backward()
+        actual_loss.backward()
+        torch.testing.assert_close(
+            compiled_input.grad,
+            eager_input.grad,
+            atol=3e-5,
+            rtol=3e-4,
+        )
+        for (expected_name, expected_parameter), (
+            actual_name, actual_parameter,
+        ) in zip(
+            eager.named_parameters(),
+            compiled.named_parameters(),
+            strict=True,
+        ):
+            assert actual_name == expected_name
+            assert (
+                actual_parameter.grad is None
+            ) == (
+                expected_parameter.grad is None
+            ), actual_name
+            if expected_parameter.grad is not None:
+                torch.testing.assert_close(
+                    actual_parameter.grad,
+                    expected_parameter.grad,
+                    atol=5e-5,
+                    rtol=5e-4,
+                    msg=actual_name,
+                )
+        receipt = compiled.compilation_receipt()
+        assert receipt["compiled_shape_count"] > 0
+        assert receipt["fallback_count"] > 0
+        assert receipt["graph_break_count"] == receipt["fallback_count"]
+        assert sum(receipt["fallback_reasons"].values()) == int(
+            receipt["fallback_count"]
+        )
+    finally:
+        compiled.disable_compiled_tensor_cores()
+        if hasattr(torch, "_dynamo"):
+            torch._dynamo.reset()
 
 
 def test_stream_activation_checkpointing_preserves_outputs_and_gradients():

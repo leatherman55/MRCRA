@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 import sys
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -361,6 +362,129 @@ def test_trackio_reporter_logs_jsonl_dashboard_warning_and_rejects_nonfinite(tmp
     assert Path(show[1]["frontend_dir"], "mrrn-spectral-view.html").is_file()
     with pytest.raises(FileExistsError, match="already exists"):
         TrackioReporter(config, {}, resume=False)
+
+
+def test_trackio_remote_delivery_is_bounded_and_local_stream_is_complete(
+    tmp_path, monkeypatch,
+):
+    gate = Event()
+
+    class SlowTrackio(_TrackioModule):
+        def log(self, metrics, *, step):
+            gate.wait(timeout=2.0)
+            super().log(metrics, step=step)
+
+    trackio = SlowTrackio()
+    monkeypatch.setitem(sys.modules, "trackio", trackio)
+    config = LMTrainingConfig(
+        output_dir=str(tmp_path),
+        total_tokens=4,
+        sequence_length=4,
+        evaluation_batches=1,
+        show_dashboard=False,
+        spectral_dashboard=False,
+        trackio_remote_log_interval=1,
+    )
+    reporter = TrackioReporter(config, {"model": "tiny"}, resume=True)
+    for step in range(100):
+        reporter.log({"loss": float(step)}, step=step)
+    assert not reporter._drain_remote_logs(timeout_seconds=0.02)
+    assert reporter._remote_dropped > 0
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert sum(record["kind"] == "metrics" for record in records) == 100
+    gate.set()
+    reporter.finish()
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    summary = next(
+        record
+        for record in records
+        if record["kind"] == "trackio_remote_summary"
+    )
+    assert summary["dropped_remote_metric_rows"] > 0
+    assert summary["drain_timeouts"] == 1
+    assert summary["worker_alive_at_bounded_finish"] is False
+
+
+def test_trackio_coalesces_remote_scalars_but_retains_every_local_row(
+    tmp_path, monkeypatch,
+):
+    trackio = _TrackioModule()
+    monkeypatch.setitem(sys.modules, "trackio", trackio)
+    config = LMTrainingConfig(
+        output_dir=str(tmp_path),
+        total_tokens=4,
+        sequence_length=4,
+        evaluation_batches=1,
+        show_dashboard=False,
+        spectral_dashboard=False,
+        trackio_remote_log_interval=4,
+    )
+    reporter = TrackioReporter(config, {}, resume=True)
+    for step in range(1, 11):
+        reporter.log({"loss": float(step)}, step=step)
+    reporter.finish()
+
+    remote_steps = [
+        event[1] for event in trackio.events if event[0] == "log"
+    ]
+    assert remote_steps == [4, 8, 10]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert sum(record["kind"] == "metrics" for record in records) == 10
+    summary = next(
+        record
+        for record in records
+        if record["kind"] == "trackio_remote_summary"
+    )
+    assert summary["coalesced_remote_metric_rows"] == 7
+    assert summary["dropped_remote_metric_rows"] == 0
+
+
+def test_trackio_coalesces_only_repetitive_checkpoint_info_alerts(
+    tmp_path, monkeypatch,
+):
+    trackio = _TrackioModule()
+    monkeypatch.setitem(sys.modules, "trackio", trackio)
+    config = LMTrainingConfig(
+        output_dir=str(tmp_path),
+        total_tokens=4,
+        sequence_length=4,
+        evaluation_batches=1,
+        show_dashboard=False,
+        spectral_dashboard=False,
+    )
+    reporter = TrackioReporter(config, {}, resume=True)
+    for step in range(1, 12):
+        reporter.alert(
+            "MRCRA checkpoint saved",
+            f"step-{step}.pt",
+            level="info",
+            step=step,
+        )
+    reporter.alert("failure", "important", level="error", step=12)
+    reporter.alert("First MRCRA hard event", "important", level="info", step=12)
+    reporter.finish()
+    remote_alerts = [
+        event for event in trackio.events if event[0] == "alert"
+    ]
+    # Checkpoints 1 and 10, plus both nonrepetitive alerts.
+    assert len(remote_alerts) == 4
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert sum(record["kind"] == "alert" for record in records) == 13
+    assert sum(
+        record.get("remote_coalesced") is True for record in records
+    ) == 9
 
 
 class _Reporter:

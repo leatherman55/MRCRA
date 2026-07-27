@@ -1,0 +1,198 @@
+{
+  "criteria": [
+    {
+      "evidence": {
+        "all_threshold_ties_retained": true,
+        "exact_threshold_sets": true,
+        "maximum_logit_error": 2.86102294921875e-06,
+        "queries": 13
+      },
+      "name": "dense_reference_exactness",
+      "passed": true
+    },
+    {
+      "evidence": {
+        "bounded_search_dense_fallback": true,
+        "bounded_search_fallback_exact": true,
+        "stale_index_dense_fallback": true,
+        "stale_index_detected": true,
+        "stale_index_fallback_exact": true
+      },
+      "name": "fail_closed_fallback_and_staleness",
+      "passed": true
+    },
+    {
+      "evidence": {
+        "round_trip_exact": true,
+        "wrong_checkpoint_rejected": true
+      },
+      "name": "content_bound_serialization",
+      "passed": true
+    },
+    {
+      "evidence": {
+        "maximum_logit_error": 0.0,
+        "minimum_avoided_fraction": 0.9898123644467437,
+        "profiles": 3
+      },
+      "name": "certified_work_reduction",
+      "passed": true
+    },
+    {
+      "evidence": {
+        "available": true,
+        "certificate_rate": 1.0,
+        "dense_fallback_rate": 0.0,
+        "exact_threshold_sets": true,
+        "maximum_logit_error": 0.0,
+        "output_vectors_avoided": 896,
+        "pytorch_mps_router_available": true,
+        "pytorch_mps_router_certificate_rate": 1.0,
+        "pytorch_mps_router_control_device": "cpu",
+        "pytorch_mps_router_exact": true,
+        "pytorch_mps_router_maximum_logit_error": 0.0,
+        "pytorch_mps_router_metadata_resident": true
+      },
+      "name": "mlx_exact_authority",
+      "passed": true
+    },
+    {
+      "evidence": {
+        "dense_reference_seconds": 0.005168957985006273,
+        "float32_loss_tolerance": 9.504016876220702e-05,
+        "mlx_native_cce_available": true,
+        "mlx_native_cce_cold_seconds": 0.05730762501480058,
+        "mlx_native_cce_exact": true,
+        "mlx_native_cce_loss_error": 0.0,
+        "mlx_native_cce_maximum_gradient_error": 5.19677996635437e-07,
+        "mlx_native_cce_warm_seconds": 0.03157387499231845,
+        "model_dimension": 96,
+        "native_tiled_exact": true,
+        "native_tiled_loss_error": 0.0,
+        "native_tiled_maximum_gradient_error": 4.76837158203125e-07,
+        "native_tiled_mps_available": true,
+        "native_tiled_mps_exact": true,
+        "native_tiled_mps_loss_error": 0.0,
+        "native_tiled_mps_maximum_gradient_error": 4.3213367462158203e-07,
+        "native_tiled_mps_seconds": 0.11146962502971292,
+        "native_tiled_seconds": 0.5266303749522194,
+        "official_cce_available": true,
+        "official_cce_exact": true,
+        "official_cce_implementation": "torch_compile",
+        "official_cce_loss_error": 0.0,
+        "official_cce_maximum_gradient_error": 3.2782554626464844e-07,
+        "official_cce_mps_available": true,
+        "official_cce_mps_exact": true,
+        "official_cce_mps_loss_error": 0.0,
+        "official_cce_mps_maximum_gradient_error": 4.172325134277344e-07,
+        "official_cce_mps_seconds": 0.055563958012498915,
+        "official_cce_seconds": 1.0133450000430457,
+        "tokens": 12,
+        "vocabulary_size": 50257
+      },
+      "name": "portable_exact_training_authority",
+      "passed": true
+    }
+  ],
+  "exact_training": {
+    "dense_reference_seconds": 0.005168957985006273,
+    "float32_loss_tolerance": 9.504016876220702e-05,
+    "mlx_native_cce_available": true,
+    "mlx_native_cce_cold_seconds": 0.05730762501480058,
+    "mlx_native_cce_exact": true,
+    "mlx_native_cce_loss_error": 0.0,
+    "mlx_native_cce_maximum_gradient_error": 5.19677996635437e-07,
+    "mlx_native_cce_warm_seconds": 0.03157387499231845,
+    "model_dimension": 96,
+    "native_tiled_exact": true,
+    "native_tiled_loss_error": 0.0,
+    "native_tiled_maximum_gradient_error": 4.76837158203125e-07,
+    "native_tiled_mps_available": true,
+    "native_tiled_mps_exact": true,
+    "native_tiled_mps_loss_error": 0.0,
+    "native_tiled_mps_maximum_gradient_error": 4.3213367462158203e-07,
+    "native_tiled_mps_seconds": 0.11146962502971292,
+    "native_tiled_seconds": 0.5266303749522194,
+    "official_cce_available": true,
+    "official_cce_exact": true,
+    "official_cce_implementation": "torch_compile",
+    "official_cce_loss_error": 0.0,
+    "official_cce_maximum_gradient_error": 3.2782554626464844e-07,
+    "official_cce_mps_available": true,
+    "official_cce_mps_exact": true,
+    "official_cce_mps_loss_error": 0.0,
+    "official_cce_mps_maximum_gradient_error": 4.172325134277344e-07,
+    "official_cce_mps_seconds": 0.055563958012498915,
+    "official_cce_seconds": 1.0133450000430457,
+    "tokens": 12,
+    "vocabulary_size": 50257
+  },
+  "experiments": [
+    {
+      "avoided_fraction": 0.9898322621724337,
+      "certificate_rate": 1.0,
+      "dense_fallback_rate": 0.0,
+      "dense_seconds": 0.0002554723372062047,
+      "exact_threshold_sets": true,
+      "index_build_seconds": 0.7767283749999478,
+      "maximum_logit_error": 0.0,
+      "model_dimension": 20,
+      "name": "structured-v50257-d20",
+      "output_vectors_avoided": 49746,
+      "routed_seconds": 0.000585527663740019,
+      "token_vectors_evaluated": 511,
+      "top_k": 50,
+      "vocabulary_size": 50257
+    },
+    {
+      "avoided_fraction": 0.9898123644467437,
+      "certificate_rate": 1.0,
+      "dense_fallback_rate": 0.0,
+      "dense_seconds": 0.0006143196563546857,
+      "exact_threshold_sets": true,
+      "index_build_seconds": 0.9473023330210708,
+      "maximum_logit_error": 0.0,
+      "model_dimension": 96,
+      "name": "structured-v50257-d96",
+      "output_vectors_avoided": 49745,
+      "routed_seconds": 0.0002938889859554668,
+      "token_vectors_evaluated": 512,
+      "top_k": 50,
+      "vocabulary_size": 50257
+    },
+    {
+      "avoided_fraction": 0.9898123644467437,
+      "certificate_rate": 1.0,
+      "dense_fallback_rate": 0.0,
+      "dense_seconds": 0.001158139028120786,
+      "exact_threshold_sets": true,
+      "index_build_seconds": 1.5117002500337549,
+      "maximum_logit_error": 0.0,
+      "model_dimension": 256,
+      "name": "structured-v50257-d256",
+      "output_vectors_avoided": 49745,
+      "routed_seconds": 0.0003504443254011373,
+      "token_vectors_evaluated": 512,
+      "top_k": 50,
+      "vocabulary_size": 50257
+    }
+  ],
+  "mlx": {
+    "available": true,
+    "certificate_rate": 1.0,
+    "dense_fallback_rate": 0.0,
+    "exact_threshold_sets": true,
+    "maximum_logit_error": 0.0,
+    "output_vectors_avoided": 896,
+    "pytorch_mps_router_available": true,
+    "pytorch_mps_router_certificate_rate": 1.0,
+    "pytorch_mps_router_control_device": "cpu",
+    "pytorch_mps_router_exact": true,
+    "pytorch_mps_router_maximum_logit_error": 0.0,
+    "pytorch_mps_router_metadata_resident": true
+  },
+  "passed": true,
+  "production_scale": true,
+  "schema_version": 2,
+  "seed": 20260725
+}

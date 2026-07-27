@@ -15,7 +15,7 @@ envelopes, and the application executor retain authority. Compatibility defaults
 remain available, while `MRCRAConfig.serious_120m()` enables the integrated
 mechanisms and still begins with no external capability or permission.
 
-The canonical serious actor contains 115,925,944 trainable parameters, within the
+The canonical serious actor contains 115,931,878 trainable parameters, within the
 declared 110M–125M range. The count is structural—no padding parameters—and is
 recorded in `outputs/mrcra_120m_parameter_report.json`.
 

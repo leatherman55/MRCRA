@@ -4,7 +4,7 @@
 **Implementation:** MRCRA 4.0.0  
 **Runtime checkpoint format:** 5  
 **Training checkpoint format:** 6  
-**Serious actor:** 115,925,944 trainable parameters  
+**Serious actor:** 115,931,878 trainable parameters  
 **Audit conclusion:** criteria 1–19 are implemented and locally evidenced; criterion 20 remains a deliberately unresolved serious-checkpoint/deployment gate.
 
 ## Completion-criterion ledger

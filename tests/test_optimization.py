@@ -158,6 +158,18 @@ def test_auxiliary_gradient_merge_projects_conflicts_and_enforces_subsystem_caps
             * torch.tensor([[1.0, 0.0]])
         ).sum()
     ) >= -1e-7
+    torch.testing.assert_close(
+        report.subsystem_auxiliary_norms_before["carrier"],
+        torch.tensor(200.0).sqrt(),
+    )
+    torch.testing.assert_close(
+        report.subsystem_auxiliary_norms_after["carrier"],
+        torch.tensor(0.0),
+    )
+    torch.testing.assert_close(
+        report.subsystem_auxiliary_norms_after["controller"],
+        controller_auxiliary.norm(),
+    )
 
 
 def test_auxiliary_gradient_merge_rejects_auxiliary_only_and_unknown_paths():
@@ -170,4 +182,67 @@ def test_auxiliary_gradient_merge_rejects_auxiliary_only_and_unknown_paths():
     with pytest.raises(ValueError, match="unknown parameters"):
         merge_auxiliary_gradients(
             network, {"missing": torch.ones(1)}, {"carrier": 1.0}
+        )
+
+
+def test_auxiliary_gradient_merge_admits_only_an_explicit_capped_head():
+    class Instrumented(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.token_embedding = nn.Linear(2, 1, bias=False)
+            self.cstm_predictor = nn.Linear(2, 1, bias=False)
+            self.unrelated_head = nn.Linear(2, 1, bias=False)
+
+    network = Instrumented()
+    named = dict(network.named_parameters())
+    named["token_embedding.weight"].grad = torch.tensor([[3.0, 4.0]])
+    auxiliary = {
+        "cstm_predictor.weight": torch.tensor([[30.0, 40.0]]),
+        "unrelated_head.weight": torch.tensor([[30.0, 40.0]]),
+    }
+    report = merge_auxiliary_gradients(
+        network,
+        auxiliary,
+        {"carrier": 0.0},
+        auxiliary_only_caps={"cstm_head": 0.1},
+    )
+
+    assert report.applied
+    assert report.conflicting_subsystems == ()
+    torch.testing.assert_close(report.task_norm, torch.tensor(5.0))
+    # The reported pre-governance norm includes both supplied auxiliaries,
+    # including the one that is rejected for lacking explicit authority.
+    torch.testing.assert_close(
+        report.auxiliary_norm_before,
+        torch.tensor(50.0 * 2**0.5),
+    )
+    assert named["unrelated_head.weight"].grad is None
+    torch.testing.assert_close(
+        named["cstm_predictor.weight"].grad.norm(),
+        torch.tensor(0.5),
+    )
+    torch.testing.assert_close(report.auxiliary_norm_after, torch.tensor(0.5))
+    torch.testing.assert_close(
+        report.subsystem_scales["cstm_head"],
+        torch.tensor(0.01),
+    )
+    torch.testing.assert_close(
+        report.subsystem_auxiliary_norms_before["cstm_head"],
+        torch.tensor(50.0),
+    )
+    torch.testing.assert_close(
+        report.subsystem_auxiliary_norms_after["cstm_head"],
+        torch.tensor(0.5),
+    )
+
+
+@pytest.mark.parametrize("cap", [float("nan"), float("inf"), -0.1])
+def test_auxiliary_gradient_merge_rejects_nonfinite_or_negative_caps(cap):
+    network = nn.Linear(2, 1, bias=False)
+    network.weight.grad = torch.ones_like(network.weight)
+    with pytest.raises(ValueError, match="caps"):
+        merge_auxiliary_gradients(
+            network,
+            {"weight": torch.ones_like(network.weight)},
+            {"carrier": cap},
         )

@@ -101,6 +101,46 @@ def test_training_series_uses_latest_monotonic_run(tmp_path):
     assert all(sample["ablation_full_ce"] is None for sample in samples)
 
 
+def test_training_series_is_memory_bounded_and_retains_causal_receipts(tmp_path):
+    path = tmp_path / "long-metrics.jsonl"
+    rows = []
+    for step in range(1, 2_001):
+        metrics = {
+            "optimization/gradient_norm_before_clip": 1.0 / step,
+            "progress/tokens_seen": step * 32_768,
+        }
+        if step == 1_234:
+            metrics["architecture/event_emitted"] = 1.0
+        rows.append({
+            "kind": "metrics",
+            "step": step,
+            "metrics": metrics,
+        })
+    path.write_text(
+        "\n".join(json.dumps(row) for row in rows),
+        encoding="utf-8",
+    )
+
+    result = load_training_series(
+        path, label="bounded", maximum_samples=64,
+    )
+    retained_steps = [sample["step"] for sample in result["samples"]]
+    assert result["sample_count_total"] == 2_000
+    assert result["sample_count_retained"] == 64
+    assert result["downsampled"] is True
+    assert retained_steps[0] == 1
+    assert retained_steps[-1] == 2_000
+    assert 1_234 in retained_steps
+    assert retained_steps == sorted(set(retained_steps))
+
+
+def test_training_series_rejects_an_unusable_memory_bound(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    _metrics(path, 1.0)
+    with pytest.raises(ValueError, match="at least two"):
+        load_training_series(path, label="invalid", maximum_samples=1)
+
+
 def test_training_series_exports_progress_rasl_and_guard_without_phase_telemetry(
     tmp_path,
 ):

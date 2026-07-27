@@ -1,0 +1,191 @@
+{
+  "claim_boundary": "This acceptance proves target mathematics, boundary isolation, causal integrated prediction behavior, predictor trainability, geometric work, and parameter bounds on deterministic fixtures. It does not claim downstream language-quality improvement; that requires matched corpus-scale ablation.",
+  "criteria": [
+    {
+      "comparison": "at_most",
+      "name": "direct_dft_max_abs_error",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 1e-06
+    },
+    {
+      "comparison": "at_most",
+      "name": "permutation_dc_max_abs_change",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 1e-06
+    },
+    {
+      "comparison": "at_least",
+      "name": "permutation_harmonic_rms_change",
+      "observed": 0.166096031665802,
+      "passed": true,
+      "threshold": 0.001
+    },
+    {
+      "comparison": "equal",
+      "name": "cross_boundary_valid_rows",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 0
+    },
+    {
+      "comparison": "at_most",
+      "name": "predictor_final_to_initial_ratio",
+      "observed": 0.19321475330116336,
+      "passed": true,
+      "threshold": 0.35
+    },
+    {
+      "comparison": "at_most",
+      "name": "integrated_past_prediction_change",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 1e-09
+    },
+    {
+      "comparison": "at_least",
+      "name": "integrated_future_prediction_change",
+      "observed": 0.008282912890778123,
+      "passed": true,
+      "threshold": 1e-05
+    },
+    {
+      "comparison": "at_least",
+      "name": "past_rows_compared",
+      "observed": 12.0,
+      "passed": true,
+      "threshold": 1
+    },
+    {
+      "comparison": "at_most",
+      "name": "geometric_two_horizon_row_ratio",
+      "observed": 2.0,
+      "passed": true,
+      "threshold": 2.0
+    },
+    {
+      "comparison": "at_most",
+      "name": "ultralight_cstm_predictor_parameters",
+      "observed": 2158.0,
+      "passed": true,
+      "threshold": 5000
+    },
+    {
+      "comparison": "at_most",
+      "name": "ultralight_actor_parameter_ceiling",
+      "observed": 1301827.0,
+      "passed": true,
+      "threshold": 1310000.0
+    },
+    {
+      "comparison": "equal",
+      "name": "gradient_auxiliary_applied",
+      "observed": 1.0,
+      "passed": true,
+      "threshold": 1
+    },
+    {
+      "comparison": "at_most",
+      "name": "gradient_maximum_subsystem_cap_ratio",
+      "observed": 0.9999999403953552,
+      "passed": true,
+      "threshold": 1.00001
+    },
+    {
+      "comparison": "at_least",
+      "name": "gradient_minimum_task_auxiliary_alignment",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": -1e-07
+    },
+    {
+      "comparison": "at_least",
+      "name": "gradient_governed_overlap_subsystems",
+      "observed": 6.0,
+      "passed": true,
+      "threshold": 1
+    },
+    {
+      "comparison": "at_least",
+      "name": "cstm_head_gradient_norm",
+      "observed": 0.019601427018642426,
+      "passed": true,
+      "threshold": 1e-08
+    },
+    {
+      "comparison": "at_least",
+      "name": "spectral_target_views",
+      "observed": 2.0,
+      "passed": true,
+      "threshold": 1
+    },
+    {
+      "comparison": "equal",
+      "name": "physical_token_counter_delta",
+      "observed": 0.0,
+      "passed": true,
+      "threshold": 0
+    }
+  ],
+  "experiments": [
+    {
+      "description": "Compares production target construction with a direct negative-exponent DFT, permutes block order, and probes blocks that would cross packed-document boundaries.",
+      "metrics": {
+        "cross_boundary_valid_rows": 0.0,
+        "direct_dft_max_abs_error": 0.0,
+        "permutation_dc_max_abs_change": 0.0,
+        "permutation_harmonic_rms_change": 0.166096031665802
+      },
+      "name": "fixed_target_authority"
+    },
+    {
+      "description": "Optimizes the production shared rank-eight, scale/horizon-conditioned, paired-real predictor against fixed CSTM targets.",
+      "metrics": {
+        "final_standardized_huber": 0.24629640579223633,
+        "final_to_initial_ratio": 0.19321475330116336,
+        "initial_standardized_huber": 1.274728775024414,
+        "token_participations": 160.0,
+        "valid_target_rows": 40.0
+      },
+      "name": "predictor_learning"
+    },
+    {
+      "description": "Runs the real causal carrier, event-rate cognitive residual, band history, synthesis adapters, and CSTM head twice while changing only tokens at and after position twelve.",
+      "metrics": {
+        "future_prediction_max_abs_change": 0.008282912890778123,
+        "past_prediction_max_abs_change": 0.0,
+        "past_rows_compared": 12.0
+      },
+      "name": "integrated_causality"
+    },
+    {
+      "description": "Uses the production six-scale supports and real GPT-2-vocabulary ultralight actor to measure derived work and parameter overhead.",
+      "metrics": {
+        "context_tokens": 32768.0,
+        "cstm_predictor_parameters": 2158.0,
+        "target_rows_per_physical_token": 2.0,
+        "two_horizon_target_rows": 65536.0,
+        "ultralight_actor_parameters": 1301827.0,
+        "ultralight_parameter_maximum": 1310000.0
+      },
+      "name": "efficiency_and_parameter_contract"
+    },
+    {
+      "description": "Runs the real integrated trainer through CSTM target construction and a separate auxiliary backward, then inspects conflict projection, subsystem-relative caps, auxiliary-head gradients, and the unchanged physical-token counter.",
+      "metrics": {
+        "auxiliary_applied": 1.0,
+        "cstm_head_gradient_norm": 0.019601427018642426,
+        "governed_overlap_subsystems": 6.0,
+        "maximum_subsystem_cap_ratio": 0.9999999403953552,
+        "minimum_task_auxiliary_alignment": 0.0,
+        "packed_physical_tokens": 32.0,
+        "physical_token_counter_delta": 0.0,
+        "spectral_target_views": 2.0
+      },
+      "name": "gradient_governance_and_accounting"
+    }
+  ],
+  "passed": true,
+  "schema_version": 1
+}

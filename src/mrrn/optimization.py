@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import cos, pi, sqrt
+from math import cos, isfinite, pi, sqrt
 from typing import Mapping, Sequence
 
 import torch
@@ -52,11 +52,15 @@ class AuxiliaryGradientMergeReport:
     task_norm: Tensor
     conflicting_subsystems: tuple[str, ...]
     subsystem_scales: dict[str, Tensor]
+    subsystem_auxiliary_norms_before: dict[str, Tensor]
+    subsystem_auxiliary_norms_after: dict[str, Tensor]
 
 
 def gradient_subsystem(name: str) -> str:
     """Map a parameter to one stable, low-cardinality architecture family."""
 
+    if name.startswith("cstm_predictor."):
+        return "cstm_head"
     if name.startswith("token_embedding.") or name.startswith("cognitive.carrier."):
         return "carrier"
     if name.startswith((
@@ -101,6 +105,7 @@ def merge_auxiliary_gradients(
     auxiliary_gradients: Mapping[str, Tensor | None],
     subsystem_caps: Mapping[str, float],
     *,
+    auxiliary_only_caps: Mapping[str, float] | None = None,
     epsilon: float = 1e-12,
 ) -> AuxiliaryGradientMergeReport:
     """Project task-conflicting auxiliary gradients and apply relative caps.
@@ -112,9 +117,12 @@ def merge_auxiliary_gradients(
     norm before being added.
     """
 
+    auxiliary_only_caps = auxiliary_only_caps or {}
     if epsilon <= 0 or any(
-        not isinstance(value, (int, float)) or value < 0
-        for value in subsystem_caps.values()
+        not isinstance(value, (int, float))
+        or not isfinite(float(value))
+        or value < 0
+        for value in (*subsystem_caps.values(), *auxiliary_only_caps.values())
     ):
         raise ValueError("auxiliary gradient caps must be finite and nonnegative")
     named = dict(model.named_parameters())
@@ -122,8 +130,18 @@ def merge_auxiliary_gradients(
     if unknown:
         raise ValueError(f"auxiliary gradients name unknown parameters: {sorted(unknown)}")
     grouped: dict[str, list[tuple[nn.Parameter, Tensor]]] = {}
+    auxiliary_only: dict[str, list[tuple[nn.Parameter, Tensor]]] = {}
     anchor = next(model.parameters())
-    task_total = anchor.new_zeros((), dtype=torch.float32)
+    task_total = sum(
+        (
+            parameter.grad.detach().float().square().sum()
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        ),
+        start=anchor.new_zeros((), dtype=torch.float32),
+    )
+    if not bool(torch.isfinite(task_total)):
+        raise FloatingPointError("primary task gradients became non-finite")
     aux_total = anchor.new_zeros((), dtype=torch.float32)
     for name, auxiliary in auxiliary_gradients.items():
         if auxiliary is None:
@@ -133,17 +151,24 @@ def merge_auxiliary_gradients(
             raise ValueError("auxiliary gradients must match their live parameters")
         if not bool(torch.isfinite(auxiliary).all()):
             raise FloatingPointError("auxiliary gradients became non-finite")
+        aux_total += auxiliary.detach().float().square().sum()
         if parameter.grad is None:
-            # No auxiliary-only mutation: the ordinary task must expose a live
-            # path to every parameter that progress pressure may alter.
+            subsystem = gradient_subsystem(name)
+            if subsystem in auxiliary_only_caps:
+                auxiliary_only.setdefault(subsystem, []).append(
+                    (parameter, auxiliary.detach())
+                )
+            # Ordinary actor parameters still fail closed when the primary task
+            # exposes no path. Explicit auxiliary-only heads are the sole
+            # exception and receive their own global-task-relative cap below.
             continue
         grouped.setdefault(gradient_subsystem(name), []).append(
             (parameter, auxiliary.detach())
         )
-        task_total += parameter.grad.detach().float().square().sum()
-        aux_total += auxiliary.detach().float().square().sum()
     conflicts: list[str] = []
     scales: dict[str, Tensor] = {}
+    subsystem_before: dict[str, Tensor] = {}
+    subsystem_after: dict[str, Tensor] = {}
     after_total = anchor.new_zeros((), dtype=torch.float32)
     for subsystem, rows in grouped.items():
         cap = float(subsystem_caps.get(subsystem, 0.0))
@@ -172,6 +197,9 @@ def merge_auxiliary_gradients(
         projected_norm = torch.stack([
             value.float().square().sum() for value in projected
         ]).sum().sqrt()
+        subsystem_before[subsystem] = torch.stack([
+            auxiliary.float().square().sum() for _, auxiliary in rows
+        ]).sum().sqrt().detach()
         task_norm = task_norm_sq.sqrt()
         allowed = cap * task_norm
         scale = torch.clamp(
@@ -180,19 +208,65 @@ def merge_auxiliary_gradients(
         if cap == 0:
             scale = scale * 0
         scales[subsystem] = scale.detach()
+        contributed_norm_squared = anchor.new_zeros((), dtype=torch.float32)
         for (parameter, _), value in zip(rows, projected, strict=True):
             contribution = value.to(parameter.grad.dtype) * scale.to(
                 parameter.grad.dtype
             )
             parameter.grad.add_(contribution)
-            after_total += contribution.float().square().sum()
+            contribution_squared = contribution.float().square().sum()
+            contributed_norm_squared += contribution_squared
+            after_total += contribution_squared
+        subsystem_after[subsystem] = contributed_norm_squared.sqrt().detach()
+    global_task_norm = task_total.sqrt()
+    for subsystem, rows in auxiliary_only.items():
+        cap = float(auxiliary_only_caps[subsystem])
+        norm = torch.stack([
+            value.float().square().sum() for _, value in rows
+        ]).sum().sqrt()
+        allowed = cap * global_task_norm
+        scale = torch.clamp(allowed / norm.clamp_min(epsilon), max=1.0)
+        if cap == 0:
+            scale = scale * 0
+        scale_key = (
+            f"{subsystem}_auxiliary_only"
+            if subsystem in scales else subsystem
+        )
+        scales[scale_key] = scale.detach()
+        prior_before = subsystem_before.get(subsystem)
+        subsystem_before[subsystem] = (
+            norm.detach()
+            if prior_before is None
+            else (
+                prior_before.float().square() + norm.float().square()
+            ).sqrt().detach()
+        )
+        contributed_norm_squared = anchor.new_zeros((), dtype=torch.float32)
+        for parameter, value in rows:
+            contribution = value.to(parameter.dtype) * scale.to(parameter.dtype)
+            parameter.grad = contribution.clone()
+            contribution_squared = contribution.float().square().sum()
+            contributed_norm_squared += contribution_squared
+            after_total += contribution_squared
+        contributed_norm = contributed_norm_squared.sqrt()
+        prior_after = subsystem_after.get(subsystem)
+        subsystem_after[subsystem] = (
+            contributed_norm.detach()
+            if prior_after is None
+            else (
+                prior_after.float().square()
+                + contributed_norm.float().square()
+            ).sqrt().detach()
+        )
     return AuxiliaryGradientMergeReport(
-        bool(grouped),
+        bool(grouped or auxiliary_only),
         aux_total.sqrt(),
         after_total.sqrt(),
         task_total.sqrt(),
         tuple(sorted(conflicts)),
         scales,
+        subsystem_before,
+        subsystem_after,
     )
 
 

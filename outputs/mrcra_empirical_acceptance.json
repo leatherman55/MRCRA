@@ -34,7 +34,7 @@
           "threshold": 0.05
         }
       ],
-      "duration_seconds": 0.013436791996355169,
+      "duration_seconds": 0.013926708954386413,
       "gate": "G",
       "maturity": "mechanism",
       "metrics": {
@@ -76,7 +76,7 @@
           "threshold": 1.0
         }
       ],
-      "duration_seconds": 0.674812417011708,
+      "duration_seconds": 0.5238270409754477,
       "gate": "Stage 4",
       "maturity": "mechanism",
       "metrics": {
@@ -120,7 +120,7 @@
           "threshold": 0.9
         }
       ],
-      "duration_seconds": 0.15835991599305999,
+      "duration_seconds": 0.1590893329703249,
       "gate": "H",
       "maturity": "mechanism",
       "metrics": {
@@ -171,7 +171,7 @@
           "threshold": 1.1
         }
       ],
-      "duration_seconds": 0.07729820899839979,
+      "duration_seconds": 0.0785767079796642,
       "gate": "I",
       "maturity": "mechanism",
       "metrics": {
@@ -205,7 +205,7 @@
           "threshold": 0.8
         }
       ],
-      "duration_seconds": 0.058422332993359305,
+      "duration_seconds": 0.059626457979902625,
       "gate": "J",
       "maturity": "mechanism",
       "metrics": {
@@ -248,7 +248,7 @@
           "threshold": 0.02
         }
       ],
-      "duration_seconds": 0.1106496669963235,
+      "duration_seconds": 0.11654816602822393,
       "gate": "K",
       "maturity": "mechanism",
       "metrics": {
@@ -291,7 +291,7 @@
           "threshold": 1.0
         }
       ],
-      "duration_seconds": 0.11227466599666514,
+      "duration_seconds": 0.11432024999521673,
       "gate": "L",
       "maturity": "mechanism",
       "metrics": {
@@ -351,7 +351,7 @@
           "threshold": 1.0
         }
       ],
-      "duration_seconds": 0.044750875007594004,
+      "duration_seconds": 0.04426279099425301,
       "gate": "Stage 9",
       "maturity": "mechanism",
       "metrics": {

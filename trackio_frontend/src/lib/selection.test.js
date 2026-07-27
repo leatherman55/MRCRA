@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { latestOnlySelection, reconcileSelectedRuns } from "./selection.js";
+import {
+  latestOnlySelection,
+  pruneRunCache,
+  reconcileSelectedRuns,
+} from "./selection.js";
 
 describe("latestOnlySelection", () => {
   test("returns an empty array when there are no runs", () => {
@@ -17,9 +21,23 @@ describe("latestOnlySelection", () => {
   });
 });
 
+describe("pruneRunCache", () => {
+  test("releases deselected run payloads while retaining active identities", () => {
+    const cache = new Map([
+      ["a", [{ step: 1 }]],
+      ["b", [{ step: 2 }]],
+      ["c", [{ step: 3 }]],
+    ]);
+    expect(
+      pruneRunCache(cache, [{ id: "b", name: "run-b" }, "c"]),
+    ).toBe(cache);
+    expect([...cache.keys()]).toEqual(["b", "c"]);
+  });
+});
+
 describe("reconcileSelectedRuns", () => {
-  test("selects all runs when the previous selection was empty (fresh load)", () => {
-    expect(reconcileSelectedRuns([], ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+  test("selects only the newest run when the previous selection was empty", () => {
+    expect(reconcileSelectedRuns([], ["a", "b", "c"])).toEqual(["a"]);
   });
 
   test("keeps a partial selection without auto-selecting new runs", () => {
@@ -49,10 +67,10 @@ describe("reconcileSelectedRuns", () => {
     ).toEqual(["a", "c"]);
   });
 
-  test("falls back to all runs when none of the previously selected runs exist anymore", () => {
+  test("falls back to the newest run when selected runs no longer exist", () => {
     expect(reconcileSelectedRuns(["a"], ["b"], ["a"])).toEqual(["b"]);
     expect(
       reconcileSelectedRuns(["x", "y"], ["a", "b", "c"], ["x", "y"]),
-    ).toEqual(["a", "b", "c"]);
+    ).toEqual(["a"]);
   });
 });

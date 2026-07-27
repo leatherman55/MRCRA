@@ -7,6 +7,7 @@
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import { getLogsBatch } from "../lib/api.js";
   import {
+    createSingleFlightPoller,
     getMetricsPollIntervalMs,
     isRateLimitCooldownActive,
     isTabHidden,
@@ -19,6 +20,11 @@
     computeMetricPlotData,
     logsHaveNewData,
   } from "../lib/dataProcessing.js";
+  import {
+    MAX_METRIC_POINTS_PER_RUN,
+    isDefaultMetricGroupOpen,
+  } from "../lib/resourcePolicy.js";
+  import { pruneRunCache } from "../lib/selection.js";
   import { buildColorMap } from "../lib/stores.js";
 
   let {
@@ -50,6 +56,7 @@
   let rawDataCache = new Map();
   let refreshTimer = null;
   const MAX_BATCH_RUNS = 64;
+  const runMetricsPoll = createSingleFlightPoller();
 
   let colorMap = $derived(buildColorMap(allRuns));
 
@@ -155,7 +162,10 @@
     const results = [];
     for (let i = 0; i < runs.length; i += MAX_BATCH_RUNS) {
       const chunk = runs.slice(i, i + MAX_BATCH_RUNS);
-      const batch = await getLogsBatch(project, chunk, { scalar_only: true });
+      const batch = await getLogsBatch(project, chunk, {
+        scalar_only: true,
+        max_points: MAX_METRIC_POINTS_PER_RUN,
+      });
       results.push(...batch);
     }
     return results;
@@ -228,6 +238,7 @@
     selectedRuns;
     appBootstrapReady;
     rawDataCache = project ? rawDataCache : new Map();
+    pruneRunCache(rawDataCache, selectedRuns);
     fetchNewRuns();
   });
 
@@ -251,10 +262,11 @@
         xLim = [lo, hi];
       }
     }
-    refreshTimer = setInterval(
-      refreshCachedRuns,
-      getMetricsPollIntervalMs(),
-    );
+    refreshTimer = setInterval(() => {
+      runMetricsPoll(refreshCachedRuns).catch((error) => {
+        console.error("Failed to poll metric logs:", error);
+      });
+    }, getMetricsPollIntervalMs());
     return () => {
       if (refreshTimer) clearInterval(refreshTimer);
     };
@@ -308,7 +320,7 @@
 
       <Accordion
         label="{groupName} ({totalCount})"
-        open={true}
+        open={isDefaultMetricGroupOpen(groupName)}
         hidden={!showHeaders}
       >
         {#if orderedDirect.length > 0}
@@ -363,7 +375,7 @@
             {@const orderedSub = getOrderedMetrics(subKey, subMetrics)}
             <Accordion
               label="{subName} ({subMetrics.length})"
-              open={true}
+              open={false}
               hidden={!showHeaders}
             >
               <div class="plot-grid">

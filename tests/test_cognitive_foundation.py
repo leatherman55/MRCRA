@@ -83,7 +83,7 @@ def test_light_8p4m_profile_preserves_integrated_cognition_and_exact_budget():
         )
     )
     model = MRCRALanguageModel(light, model_authority="light-profile-test")
-    assert model.parameter_count == 8_413_442
+    assert model.parameter_count == 8_416_803
     light.require_actor_parameter_count(model.parameter_count)
     with pytest.raises(ValueError):
         light.require_actor_parameter_count(8_500_000)
@@ -128,7 +128,7 @@ def test_ultralight_1p3m_profile_preserves_complete_six_scale_cognition():
     model = MRCRALanguageModel(
         ultralight, model_authority="ultralight-profile-test"
     )
-    assert model.parameter_count == 1_299_669
+    assert model.parameter_count == 1_301_827
     assert (
         model.token_embedding.weight
         is model.cognitive.carrier.output_head.weight

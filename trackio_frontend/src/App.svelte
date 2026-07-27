@@ -29,12 +29,17 @@
     setMediaDir,
   } from "./lib/api.js";
   import {
+    createSingleFlightPoller,
     getAppPollIntervalMs,
     isRateLimitCooldownActive,
     isTabHidden,
   } from "./lib/hostPolling.js";
+  import { DEFAULT_SMOOTHING } from "./lib/resourcePolicy.js";
   import { setColorPalette } from "./lib/stores.js";
-  import { reconcileSelectedRuns } from "./lib/selection.js";
+  import {
+    latestOnlySelection,
+    reconcileSelectedRuns,
+  } from "./lib/selection.js";
   import {
     canonicalProject,
   } from "./lib/projectPolicy.js";
@@ -77,7 +82,10 @@
   let selectedProject = $state(null);
   let runs = $state([]);
   let selectedRuns = $state([]);
-  let smoothing = $state(10);
+  let latestOnly = $state(true);
+  // Smoothing materializes a second complete copy of every selected run.
+  // Raw observations are the bounded default; smoothing remains opt-in.
+  let smoothing = $state(DEFAULT_SMOOTHING);
   let xAxis = $state("step");
   let logScaleX = $state(false);
   let logScaleY = $state(false);
@@ -115,6 +123,7 @@
   let shouldOpenFirstNonEmptyTab = false;
   let openedFirstNonEmptyTab = false;
   const TAB_AVAILABILITY_POLL_INTERVAL_MS = 15000;
+  const runAppPoll = createSingleFlightPoller();
 
   const OPTIONAL_EMPTY_TABS = new Set([
     "system",
@@ -198,26 +207,29 @@
       runConfigs = {};
     }
     try {
-      const [data, configs] = await Promise.all([
-        getRunsForProject(project),
-        getRunConfigs(project).catch(() => null),
-      ]);
+      const data = await getRunsForProject(project);
       if (selectedProject !== project) return;
       const newRuns = [...(data || [])].reverse();
+      const recordsChanged =
+        JSON.stringify(runs) !== JSON.stringify(newRuns);
 
-      if (JSON.stringify(runs) !== JSON.stringify(newRuns)) {
+      if (recordsChanged) {
         const prevSelected = selectedRuns;
         const prevOrdered = runs.map(runKey);
         runs = newRuns;
-        selectedRuns = reconcileSelectedRuns(
-          prevSelected,
-          newRuns.map(runKey),
-          prevOrdered,
-        );
+        const newOrderedKeys = newRuns.map(runKey);
+        selectedRuns = latestOnly
+          ? latestOnlySelection(newOrderedKeys)
+          : reconcileSelectedRuns(prevSelected, newOrderedKeys, prevOrdered);
       }
-      if (configs != null) {
-        runConfigs = configs;
-        runConfigsProject = project;
+      // Run configuration is immutable.  Reload it only when the project or
+      // run inventory changes instead of on every observer poll.
+      if (recordsChanged || project !== runConfigsProject) {
+        const configs = await getRunConfigs(project).catch(() => null);
+        if (selectedProject === project && configs != null) {
+          runConfigs = configs;
+          runConfigsProject = project;
+        }
       }
     } catch (e) {
       console.error("Failed to load runs:", e);
@@ -289,14 +301,17 @@
 
   function startPolling() {
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      if (!realtimeEnabled) return;
-      if (isTabHidden()) return;
-      if (isRateLimitCooldownActive()) return;
-      await refreshProjects();
-      await refreshRuns();
-      await refreshAlerts();
-      await refreshTabAvailability();
+    pollTimer = setInterval(() => {
+      runAppPoll(async () => {
+        if (!realtimeEnabled) return;
+        if (isTabHidden()) return;
+        if (isRateLimitCooldownActive()) return;
+        await refreshRuns();
+        await refreshAlerts();
+        await refreshTabAvailability();
+      }).catch((error) => {
+        console.error("Failed to refresh dashboard state:", error);
+      });
     }, getAppPollIntervalMs());
   }
 
@@ -507,6 +522,7 @@
       wanted = runs.filter((r) => wantedNames.has(r.name)).map((r) => runKey(r));
     }
     if (wanted.length) {
+      latestOnly = false;
       selectedRuns = wanted;
     }
     urlRunsFromQueryApplied = true;
@@ -544,6 +560,7 @@
       {runs}
       {runConfigs}
       bind:selectedRuns
+      bind:latestOnly
       bind:smoothing
       bind:xAxis
       bind:logScaleX

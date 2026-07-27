@@ -16,6 +16,15 @@ from .agent_session import (
     ExecutorResult, SessionStepResult, StructuredEnvironmentExecutor,
 )
 from .boundaries import BoundaryContextState, legacy_scope
+from .carrier_execution import (
+    CarrierCompositeReceipt, CarrierExecutionPolicy, TensorTreeSpec,
+    flatten_tensor_tree, fused_simplex_residual,
+    resolve_carrier_execution_policy, unflatten_tensor_tree,
+)
+from .carrier_execution_acceptance import (
+    CarrierExecutionAcceptanceReport, CarrierExecutionCriterion,
+    run_carrier_execution_acceptance,
+)
 from .checkpoint import load_stream_checkpoint, save_stream_checkpoint
 from .config import CognitiveConfig, MRCRAConfig, MRRNConfig, ScaleConfig
 from .cognitive_checkpoint import load_mrcra_checkpoint, save_mrcra_checkpoint
@@ -40,6 +49,18 @@ from .cognitive_training import (
     CognitiveSupervisionProvider, MRCRANextTokenTrainer, MRCRATrainingConfig,
     MRCRATrainingState, TiledCrossEntropy, exact_tiled_cross_entropy,
     progress_conditioned_rasl_configuration,
+)
+from .cstm import (
+    CSTMArchitectureConfig, CSTMLoss, CSTMPredictionBatch, CSTMTargetBatch,
+    CausalSpectralTargetPredictor, build_causal_spectral_targets,
+    causal_spectral_target_mask, deterministic_token_codes,
+)
+from .cstm_acceptance import (
+    CSTMAcceptanceReport, CSTMCriterion, CSTMExperiment,
+    benchmark_efficiency_and_parameter_contract,
+    benchmark_gradient_governance_and_accounting,
+    benchmark_integrated_causality, benchmark_predictor_learning,
+    benchmark_target_authority, run_cstm_acceptance,
 )
 from .empirical_acceptance import (
     BENCHMARKS, EmpiricalAcceptanceReport, EmpiricalBenchmarkResult,
@@ -72,6 +93,11 @@ from .gradient_governance import (
     GradientGovernanceReport, objective_gradient_report,
     project_conflicting_gradients,
 )
+from .document_batching import (
+    DocumentBatchPlan, DocumentMajorBatchPlanner, DocumentSequence,
+    DocumentSpan, DocumentTargetAuthority, StaticDocumentCohort,
+    StaticDocumentSpanBatch, TargetBijectionReceipt,
+)
 from .lifting import LiftingAnalysisBank, LiftingStreamState, ReconstructionContext, ScaleTensor
 from .interaction import (
     ActionParameterSpec, ActionSchema, ActionSchemaRegistry,
@@ -93,9 +119,18 @@ from .metacognition import (
     MetacognitivePrediction, MetacognitiveRouter, MetacognitiveState,
     append_metacognitive_record,
 )
-from .mlx_backend import MLXCausalTransformer, MLXMRRN, mlx_available
+from .mlx_backend import (
+    MLXCertifiedBalancedVocabularyRouter,
+    MLXCausalTransformer,
+    MLXMRRN,
+    MLXRoutedVocabularyCandidates,
+    mlx_exact_tiled_cross_entropy,
+    mlx_available,
+)
 from .mixer import HybridSpectralMixer, ResonantSpectralGLU
-from .model import MRRN, MRRNOutput, MRRNState, MRRNStreamState
+from .model import (
+    CausalBandHistory, MRRN, MRRNOutput, MRRNState, MRRNStreamState,
+)
 from .multimodal_io import MultimodalPacketAssembler, PreparedModality
 from .language import (
     LanguageModelOutput,
@@ -111,9 +146,26 @@ from .learning_progress import (
     LearningProgressAuthority, LearningProgressConfig, LearningProgressReport,
     PowerLawBaseline, ProgressObservation, robust_line,
 )
-from .resonance import ComplexResonator, ResonatorState
+from .resonance import (
+    ComplexResonator, ResonatorState, associative_affine_scan,
+    masked_associative_affine_scan,
+)
 from .observation import ObservationPacket, register_external_observations, register_internal_inputs
 from .provenance import ProvenanceLedger, ProvenanceRecord, VerificationEvent
+from .vocabulary_router import (
+    CertifiedBalancedVocabularyRouter,
+    RoutedVocabularyCandidates,
+    VocabularyParameterSignature,
+    VocabularyRouterConfig,
+    VocabularyRouterIndex,
+    VocabularyRoutingMetrics,
+)
+from .vocabulary_router_acceptance import (
+    VocabularyRouterAcceptanceReport,
+    VocabularyRouterCriterion,
+    VocabularyRouterExperiment,
+    run_vocabulary_router_acceptance,
+)
 from .performance_acceptance import (
     PerformanceAcceptanceReport, PerformanceGateResult,
     run_performance_acceptance,
@@ -169,6 +221,19 @@ from .viability import (
 from .world_model import CandidateRollout
 
 __all__ = [
+    "CSTMArchitectureConfig",
+    "CSTMAcceptanceReport",
+    "CSTMCriterion",
+    "CSTMExperiment",
+    "CSTMLoss",
+    "CSTMPredictionBatch",
+    "CSTMTargetBatch",
+    "CausalBandHistory",
+    "CausalSpectralTargetPredictor",
+    "CarrierCompositeReceipt",
+    "CarrierExecutionPolicy",
+    "CarrierExecutionAcceptanceReport",
+    "CarrierExecutionCriterion",
     "AttentionCandidates",
     "AbstractionApplicability",
     "AbstractionApplicabilityHead",
@@ -179,6 +244,7 @@ __all__ = [
     "ActionCandidateState",
     "CandidateRollout",
     "CandidateViabilityForecaster",
+    "CertifiedBalancedVocabularyRouter",
     "ActionParameterSpec",
     "ActionSchema",
     "ActionSchemaRegistry",
@@ -212,6 +278,11 @@ __all__ = [
     "CriticLossBreakdown",
     "DotProductCandidateAttention",
     "DeliberationResult",
+    "DocumentBatchPlan",
+    "DocumentMajorBatchPlanner",
+    "DocumentSequence",
+    "DocumentSpan",
+    "DocumentTargetAuthority",
     "EideticMemory",
     "EnvironmentExecutor",
     "EvidenceBackedCognitiveSupervisor",
@@ -271,7 +342,10 @@ __all__ = [
     "MultimodalPacketAssembler",
     "MultimodalRelationalContinuityResonanceNetwork",
     "MLXCausalTransformer",
+    "MLXCertifiedBalancedVocabularyRouter",
     "MLXMRRN",
+    "MLXRoutedVocabularyCandidates",
+    "mlx_exact_tiled_cross_entropy",
     "ReconstructionContext",
     "ConditionalGraphReconstructor",
     "ReconstructionEvidence",
@@ -306,13 +380,18 @@ __all__ = [
     "ResonatorState",
     "RelationFamily",
     "RoutedHypotheses",
+    "RoutedVocabularyCandidates",
     "ScaleConfig",
     "ScaleTensor",
+    "StaticDocumentCohort",
+    "StaticDocumentSpanBatch",
     "SeriousCheckpointAcceptanceReport",
     "SeriousGate",
     "SessionStepResult",
     "TrajectoryBatch",
     "TiledCrossEntropy",
+    "TargetBijectionReceipt",
+    "TensorTreeSpec",
     "TrainerMode",
     "TrainingAuthorityReport",
     "TrainingProfile",
@@ -327,21 +406,37 @@ __all__ = [
     "ViabilityForecast",
     "ViabilityGate",
     "VerificationEvent",
+    "VocabularyParameterSignature",
+    "VocabularyRouterAcceptanceReport",
+    "VocabularyRouterConfig",
+    "VocabularyRouterCriterion",
+    "VocabularyRouterExperiment",
+    "VocabularyRouterIndex",
+    "VocabularyRoutingMetrics",
     "actor_losses",
+    "associative_affine_scan",
     "BENCHMARKS",
     "authorize_external_actions",
     "authorize_candidate_provenance",
     "append_metacognitive_record",
     "build_action_candidates",
+    "build_causal_spectral_targets",
+    "causal_spectral_target_mask",
     "benchmark_consequence_learning",
     "benchmark_continual_adaptation",
     "benchmark_controller",
+    "benchmark_efficiency_and_parameter_contract",
+    "benchmark_gradient_governance_and_accounting",
     "benchmark_hierarchy",
+    "benchmark_integrated_causality",
     "benchmark_multimodal_binding",
     "benchmark_retrieval",
+    "benchmark_predictor_learning",
+    "benchmark_target_authority",
     "benchmark_uncertainty",
     "benchmark_world_model",
     "critic_losses",
+    "deterministic_token_codes",
     "cognitive_evidence",
     "cognitive_metrics",
     "combine_cognitive_objectives",
@@ -352,6 +447,8 @@ __all__ = [
     "functional_surprise_target",
     "fineweb_4p7m_config",
     "fineweb_27m_config",
+    "flatten_tensor_tree",
+    "fused_simplex_residual",
     "load_stream_checkpoint",
     "load_mrcra_checkpoint",
     "load_cognitive_rasl_checkpoint",
@@ -360,6 +457,7 @@ __all__ = [
     "get_training_profile",
     "mlx_available",
     "metacognitive_objectives",
+    "masked_associative_affine_scan",
     "multihorizon_returns",
     "objective_gradient_report",
     "phase_aware_latent_error",
@@ -374,9 +472,13 @@ __all__ = [
     "robust_line",
     "record_external_artifact",
     "run_empirical_acceptance",
+    "run_cstm_acceptance",
+    "run_carrier_execution_acceptance",
     "run_integrated_acceptance",
     "run_performance_acceptance",
+    "run_vocabulary_router_acceptance",
     "run_pc_rasl_acceptance",
+    "resolve_carrier_execution_policy",
     "PCRASLAcceptanceReport",
     "PCRASLCriterion",
     "PCRASLExperiment",
@@ -397,6 +499,7 @@ __all__ = [
     "transition_evidence_requests",
     "update_measured_viability",
     "update_system_model_from_feedback",
+    "unflatten_tensor_tree",
     "validate_training_authority",
     "verify_external_artifact",
     "legacy_scope",

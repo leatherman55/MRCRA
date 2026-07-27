@@ -67,7 +67,7 @@ def test_ultralightmodel_selects_exact_complete_1p3m_profile_and_names():
         lightmodel=False, ultralightmodel=True, total_tokens=20_000_000
     )
 
-    assert model.parameter_count == 1_299_669
+    assert model.parameter_count == 1_301_827
     assert ultralight.actor_parameter_minimum == 1_290_000
     assert ultralight.actor_parameter_maximum == 1_310_000
     assert ultralight.carrier.model_dim == ultralight.cognitive.workspace_dim == 20
@@ -110,7 +110,7 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     assert completed.returncode == 0, completed.stdout
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["model_profile"] == "mrcra_1p3m_ultralight"
-    assert report["parameter_count"] == report["trainable_parameter_count"] == 1_299_669
+    assert report["parameter_count"] == report["trainable_parameter_count"] == 1_301_827
     assert report["declared_range"]["passed"] is True
     assert report["tied_token_and_output_weights"] is True
     assert report["configuration"]["carrier"]["scales"] == 6
@@ -118,6 +118,7 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     assert report["parameter_count_by_subsystem"]["cognitive.workspace_graph"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.controller"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.world_model"] > 0
+    assert report["parameter_count_by_subsystem"]["cstm_predictor"] == 2_158
 
 
 def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
@@ -137,7 +138,7 @@ def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
         parameter.numel() for parameter in learner.critic.parameters()
     )
 
-    assert actor.parameter_count == 8_413_442
+    assert actor.parameter_count == 8_416_803
     assert critic_parameters == 139_537
     assert critic_parameters / actor.parameter_count < 0.02
     assert learner.target_actor is None
@@ -175,7 +176,9 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     arguments = parser().parse_args([])
     configuration = MRCRATrainingConfig()
 
-    assert (arguments.cpu_threads, arguments.cpu_interop_threads) == (4, 1)
+    # The CLI requests bounded startup calibration with zero; direct API users
+    # retain the conservative fixed four-thread default unless they opt in.
+    assert (arguments.cpu_threads, arguments.cpu_interop_threads) == (0, 1)
     assert arguments.apple_mps_loss_offload is False
     assert arguments.compile_tensor_cores is None
     assert arguments.phase_transition_telemetry is True
@@ -189,11 +192,40 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert arguments.pc_rasl_captures_per_observation == 1
     assert arguments.pc_rasl_updates_per_observation == 1
     assert arguments.activation_checkpointing is None
+    assert arguments.allow_unsafe_activation_policy is False
+    assert arguments.dashboard is False
+    assert arguments.trackio_remote_log_interval == 4
+    assert arguments.maximum_compiled_cce_mib == 512
+    assert arguments.document_static_batching is True
+    assert arguments.document_planner == "auto"
+    assert arguments.document_cost_calibration is True
+    assert tuple(arguments.document_bucket_lengths) == tuple(
+        range(64, 4_096 + 1, 64)
+    )
+    assert arguments.document_batch_token_budget == 8_192
+    assert arguments.cstm_execution == "sampled"
+    assert arguments.cstm_sampling_duty_cycle == 0.25
+    assert arguments.compile_carrier == "auto"
+    assert arguments.performance_calibration is True
+    assert arguments.cstm_max_substrate_vjps == 1
+    assert arguments.cstm_target_participation_budget == 8_192
+    assert arguments.cstm_predictor_update_interval == 1
+    assert arguments.cstm_maximum_coverage_gap == 4_096
     assert (configuration.cpu_threads, configuration.cpu_interop_threads) == (4, 1)
     assert configuration.compile_tensor_cores is None
+    assert configuration.performance_calibration is True
+    assert configuration.document_static_batching is True
+    assert configuration.document_cost_calibration is True
+    assert configuration.document_batch_token_budget == 8_192
+    assert configuration.cstm_execution == "sampled"
+    assert configuration.cstm_sampling_duty_cycle == 0.25
+    assert configuration.cstm_max_substrate_vjps == 1
+    assert configuration.cstm_target_participation_budget == 8_192
+    assert configuration.cstm_predictor_update_interval == 1
+    assert configuration.cstm_maximum_coverage_gap == 4_096
     assert configuration.apple_mps_loss_offload is False
     assert configuration.maximum_fused_loss_bytes == 512 << 20
-    assert configuration.vocabulary_tile_size == 2_048
+    assert configuration.vocabulary_tile_size == 4_096
     assert configuration.phase_transition_telemetry is True
     assert configuration.phase_transition_ablation is True
     assert configuration.phase_transition_ablation_batches == 1
@@ -201,6 +233,28 @@ def test_measured_apple_optimization_policy_is_the_no_flag_default():
     assert configuration.low_clip_coefficient_patience == 10
     assert configuration.pc_rasl_captures_per_observation == 1
     assert configuration.pc_rasl_updates_per_observation == 1
+    assert configuration.trackio_enabled is True
+    assert configuration.trackio_remote_log_interval == 4
+    assert configuration.show_dashboard is False
+
+
+def test_canonical_execution_control_aliases_are_explicit_and_parseable():
+    arguments = parser().parse_args(
+        [
+            "--document-planner", "fixed",
+            "--no-document-cost-calibration",
+            "--cstm-substrate-duty-probability", "0.125",
+            "--upgrade-cstm-execution-policy",
+            "--compile-carrier", "off",
+            "--no-performance-calibration",
+        ]
+    )
+    assert arguments.document_planner == "fixed"
+    assert arguments.document_cost_calibration is False
+    assert arguments.cstm_sampling_duty_cycle == 0.125
+    assert arguments.allow_cstm_execution_upgrade is True
+    assert arguments.compile_carrier == "off"
+    assert arguments.performance_calibration is False
 
 
 def test_ultralight_uses_measured_stride_and_memory_aware_checkpoint_policy(
@@ -269,6 +323,7 @@ def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
     assert "--progress-interval-tokens" in completed.stdout
     assert "--cognitive-stride" in completed.stdout
     assert "--compile-tensor-cores" in completed.stdout
+    assert "--maximum-compiled-cce-mib" in completed.stdout
     assert "--phase-transition-telemetry" in completed.stdout
     assert "--phase-transition-ablation" in completed.stdout
     assert "--progress-conditioned-rasl" in completed.stdout
@@ -287,7 +342,7 @@ def test_familiar_fineweb_entrypoint_help_is_mrcra_not_legacy_mrrn():
     assert "not allowed with argument --lightmodel" in conflicting.stdout
 
 
-def test_default_fineweb_smoke_runs_integrated_mrcra_without_pc_rasl_and_format12_checkpoint(tmp_path):
+def test_default_fineweb_smoke_runs_integrated_mrcra_with_cstm_and_format16_checkpoint(tmp_path):
     output = tmp_path / "canonical-fineweb-smoke"
     completed = run_entrypoint(
         "--smoke-test", "--output-dir", str(output), "--no-dashboard",
@@ -310,6 +365,10 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_without_pc_rasl_and_format1
     assert training["evaluation_interval"] == training["evaluation_batches"] == 1
     assert training["integrated_cognitive_path"] is True
     assert training["progress_conditioned_rasl"] is False
+    assert training["cstm_enabled"] is True
+    assert manifest["cstm_enabled"] is True
+    assert manifest["cstm_effective"] is True
+    assert manifest["cstm_architecture"]["code_dimension"] == 64
     assert training["progress_probe_batches"] == 0
     assert manifest["functional_surprise_enabled"] is False
     assert manifest["functional_surprise_mode"] == "disabled"
@@ -337,16 +396,39 @@ def test_default_fineweb_smoke_runs_integrated_mrcra_without_pc_rasl_and_format1
     checkpoint = torch.load(
         output / "checkpoints" / pointer["checkpoint"], weights_only=True,
     )
-    assert checkpoint["format_version"] == MRCRA_TRAINING_FORMAT_VERSION == 12
-    assert checkpoint["identity"]["evaluation"] == manifest["evaluation_identity"]
-    assert checkpoint["identity"]["progress_probe"] == (
+    assert checkpoint["format_version"] == MRCRA_TRAINING_FORMAT_VERSION == 16
+    assert checkpoint["identity"]["semantic"]["evaluation"] == manifest["evaluation_identity"]
+    assert checkpoint["identity"]["semantic"]["progress_probe"] == (
         manifest["progress_probe_identity"]
     )
-    assert checkpoint["identity"]["training"]["require_evaluation"] is True
+    assert checkpoint["identity"]["observation"]["training"][
+        "require_evaluation"
+    ] is True
+    assert checkpoint["execution_policy_history"]
     assert checkpoint["learning_progress"] is None
     assert checkpoint["pc_rasl"] is None
     assert checkpoint["last_runtime"] is not None
     assert checkpoint["last_provenance"] is not None
+
+
+def test_canonical_smoke_forwards_compiled_cce_workspace_policy(tmp_path):
+    output = tmp_path / "bounded-cce-smoke"
+    completed = run_entrypoint(
+        "--smoke-test",
+        "--output-dir",
+        str(output),
+        "--maximum-compiled-cce-mib",
+        "0",
+        "--no-dashboard",
+        "--no-trackio",
+    )
+    assert completed.returncode == 0, completed.stdout
+    manifest = json.loads(
+        (output / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["training_config"]["maximum_fused_loss_bytes"] == 0
+    assert manifest["runtime"]["compiled_cce_fits_workspace"] is False
+    assert manifest["runtime"]["exact_loss_backend"] == "tiled"
 
 
 def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
@@ -361,13 +443,13 @@ def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
         "--no-trackio",
     )
     assert completed.returncode == 0, completed.stdout
-    assert "MRCRA actor: 1,299,669 parameters" in completed.stdout
+    assert "MRCRA actor: 1,301,827 parameters" in completed.stdout
 
     manifest = json.loads(
         (output / "run_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["model_profile"] == "mrcra_1p3m_ultralight"
-    assert manifest["model_parameters"] == 1_299_669
+    assert manifest["model_parameters"] == 1_301_827
     assert manifest["tokenizer"] == {
         "kind": "utf8-bytes-production-width-smoke",
         "vocabulary_size": 50_257,
@@ -383,6 +465,8 @@ def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
     training = manifest["training_config"]
     assert training["run_name"] == "mrcra-1p3m-ultralight-smoke"
     assert training["integrated_cognitive_path"] is True
+    assert training["cstm_enabled"] is True
+    assert manifest["cstm_effective"] is True
     assert training["progress_conditioned_rasl"] is False
     assert manifest["functional_surprise_enabled"] is False
     assert manifest["completed"] is True

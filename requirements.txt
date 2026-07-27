@@ -1,6 +1,7 @@
 # Install a CUDA-enabled PyTorch wheel first on NVIDIA systems; see README.md.
-torch>=2.2
+torch>=2.4
 mlx>=0.31,<0.33; platform_system == "Darwin" and platform_machine == "arm64"
+cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git ; platform_system == "Darwin"
 
 # FineWeb streaming, tokenization, telemetry, and dashboard support.
 datasets>=4.0,<5

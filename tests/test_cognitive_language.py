@@ -4,6 +4,7 @@ import torch
 from mrrn.cognitive_types import BoundaryClass, SourceClass
 from mrrn.config import CognitiveConfig, MRCRAConfig, MRRNConfig
 from mrrn.language import MRCRALanguageModel
+from mrrn.vocabulary_router import VocabularyRouterConfig
 
 
 def language_config(vocabulary=17):
@@ -84,3 +85,35 @@ def test_cognitive_language_contracts_fail_closed():
     model = MRCRALanguageModel(language_config())
     with pytest.raises(ValueError):
         model(torch.tensor([[99]]))
+
+
+def test_mrcra_generation_uses_projection_free_exact_router_and_emits_receipts(monkeypatch):
+    torch.manual_seed(107)
+    model = MRCRALanguageModel(
+        language_config(vocabulary=29),
+        vocabulary_router_config=VocabularyRouterConfig(
+            cluster_size=4,
+            clustering_iterations=2,
+            initial_refinement_clusters=2,
+            maximum_refinement_clusters=128,
+            minimum_vocabulary_size=2,
+            minimum_model_dimension=1,
+        ),
+    ).eval()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("MRCRA generation executed the dense output module")
+
+    monkeypatch.setattr(model.cognitive.carrier.output_head, "forward", forbidden)
+    generated = model.generate(
+        torch.tensor([[1, 2, 3]]),
+        maximum_new_tokens=3,
+        temperature=0,
+        top_k=7,
+    )
+    assert generated.tokens.shape == (1, 6)
+    assert len(generated.routing_receipts) == 3
+    assert all(receipt.certified_queries == 1 for receipt in generated.routing_receipts)
+    assert all(receipt.dense_fallback_queries == 0 for receipt in generated.routing_receipts)
+    metrics = model.vocabulary_routing_metrics()
+    assert metrics["softmax/router/queries"] == 3

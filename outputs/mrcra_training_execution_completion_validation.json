@@ -1,0 +1,62 @@
+{
+  "claim_boundary": "This cross-artifact receipt authorizes the complete local training-execution repair only when its production performance, FineWeb learning, 100-step soak, Trackio, and available-device evidence are simultaneously current. CUDA remains untested when no CUDA device is present.",
+  "criteria": [
+    {
+      "detail": "baseline authority digest equals current benchmark sources",
+      "name": "production_execution_source_current",
+      "passed": false
+    },
+    {
+      "detail": "8.4M/32K matrix is complete and every criterion passes",
+      "name": "production_execution_complete_and_passed",
+      "passed": true
+    },
+    {
+      "detail": "accepted samples and compiler receipt equal the raw journal",
+      "name": "production_execution_raw_summary_identity",
+      "passed": true
+    },
+    {
+      "detail": "optional compilation is executed or explicitly rejected",
+      "name": "compiler_candidate_truthful",
+      "passed": true
+    },
+    {
+      "detail": "learning report and journal match current source authority",
+      "name": "fineweb_learning_source_current",
+      "passed": false
+    },
+    {
+      "detail": "three paired seeds, three variants, exact journal identity",
+      "name": "fineweb_learning_complete_and_passed",
+      "passed": false
+    },
+    {
+      "detail": "FineWeb English sample and tokenizer are commit-pinned",
+      "name": "fineweb_learning_immutable_data_identity",
+      "passed": false
+    },
+    {
+      "detail": "100-step soak matches current source authority",
+      "name": "production_soak_source_current",
+      "passed": false
+    },
+    {
+      "detail": "full 8.4M/32K resource/resume soak passes",
+      "name": "production_soak_complete_and_passed",
+      "passed": false
+    },
+    {
+      "detail": "Trackio timing and memory budgets pass",
+      "name": "trackio_resource_budget_passed",
+      "passed": true
+    },
+    {
+      "detail": "CPU and locally available MPS execute the parity suite",
+      "name": "available_device_parity_passed",
+      "passed": true
+    }
+  ],
+  "passed": false,
+  "schema_version": 1
+}

@@ -32,6 +32,90 @@ PERFORMANCE_IMPLEMENTATION = [
     "outputs/mrcra_performance_acceptance.json",
 ]
 PERFORMANCE_TESTS = ["tests/test_performance_acceptance.py"]
+CSTM_IMPLEMENTATION = [
+    "src/mrrn/cstm.py",
+    "src/mrrn/cstm_acceptance.py",
+    "scripts/run_cstm_acceptance.py",
+    "outputs/cstm_implementation_report.md",
+    "outputs/cstm_empirical_acceptance.json",
+]
+CSTM_TESTS = [
+    "tests/test_cstm.py",
+    "tests/test_cstm_acceptance.py",
+]
+CARRIER_EXECUTION_IMPLEMENTATION = [
+    "src/mrrn/carrier_execution.py",
+    "src/mrrn/carrier_execution_acceptance.py",
+    "src/mrrn/document_batching.py",
+    "scripts/run_carrier_execution_acceptance.py",
+    "outputs/carrier_execution_optimization_report.md",
+    "outputs/carrier_execution_empirical_acceptance.json",
+]
+CARRIER_EXECUTION_TESTS = [
+    "tests/test_carrier_execution.py",
+    "tests/test_carrier_execution_acceptance.py",
+    "tests/test_document_batching.py",
+]
+TRAINING_EXECUTION_IMPLEMENTATION = [
+    "src/mrrn/activation_execution.py",
+    "src/mrrn/document_cost_model.py",
+    "src/mrrn/cstm_sampling.py",
+    "src/mrrn/cstm_schedule.py",
+    "src/mrrn/device_parity_acceptance.py",
+    "src/mrrn/training_execution_fixture.py",
+    "src/mrrn/training_execution_acceptance.py",
+    "src/mrrn/observability_acceptance.py",
+    "src/mrrn/resource_soak_acceptance.py",
+    "src/mrrn/learning_nonregression.py",
+    "src/mrrn/retained_training_acceptance.py",
+    "scripts/benchmark_mrcra_training_execution.py",
+    "scripts/benchmark_trackio_overhead.py",
+    "scripts/run_mrcra_resource_soak.py",
+    "scripts/run_mrcra_learning_nonregression.py",
+    "scripts/run_mrcra_device_parity.py",
+    "scripts/validate_mrcra_training_execution_completion.py",
+    "outputs/mrcra_training_execution_repair_implementation_plan.md",
+    "outputs/mrcra_training_execution_repair_implementation_report.md",
+    "outputs/mrcra_training_execution_acceptance.json",
+    "outputs/mrcra_training_execution_acceptance_quick.json",
+    "outputs/mrcra_training_execution_baseline.json",
+    "outputs/mrcra_training_execution_baseline_quick.json",
+    "outputs/mrcra_device_parity_acceptance.json",
+    "outputs/mrcra_trackio_overhead_acceptance.json",
+    "outputs/mrcra_resource_soak_acceptance.json",
+    "outputs/mrcra_resource_soak_acceptance_quick.json",
+    "outputs/mrcra_learning_nonregression_procedure.json",
+    "outputs/mrcra_learning_nonregression_procedure_runs.json",
+    "outputs/mrcra_learning_nonregression_procedure_quick.json",
+    "outputs/mrcra_learning_nonregression_procedure_quick_runs.json",
+    "outputs/mrcra_training_execution_completion_validation.json",
+]
+TRAINING_EXECUTION_TESTS = [
+    "tests/test_activation_execution_policy.py",
+    "tests/test_document_cost_planner.py",
+    "tests/test_cstm_sampling.py",
+    "tests/test_cstm_execution_policy.py",
+    "tests/test_cstm_checkpoint_resume.py",
+    "tests/test_device_parity_acceptance.py",
+    "tests/test_training_execution_fixture.py",
+    "tests/test_training_execution_acceptance.py",
+    "tests/test_observability_acceptance.py",
+    "tests/test_resource_soak_acceptance.py",
+    "tests/test_learning_nonregression.py",
+    "tests/test_retained_training_acceptance.py",
+]
+VOCABULARY_ROUTER_IMPLEMENTATION = [
+    "src/mrrn/vocabulary_router.py",
+    "src/mrrn/vocabulary_router_acceptance.py",
+    "src/mrrn/mlx_backend.py",
+    "scripts/run_vocabulary_router_acceptance.py",
+    "outputs/vocabulary_router_empirical_acceptance.json",
+]
+VOCABULARY_ROUTER_TESTS = [
+    "tests/test_vocabulary_router.py",
+    "tests/test_vocabulary_router_acceptance.py",
+    "tests/test_mlx_backend.py",
+]
 INTEGRATED_MAJORS = {13, 14, 15, 16}
 
 PATHS = {
@@ -56,11 +140,11 @@ PATHS = {
         "src/mrrn/model.py", "src/mrrn/attention.py", "src/mrrn/mixer.py",
         "src/mrrn/lifting.py", "src/mrrn/scale_exchange.py",
         "src/mrrn/packed_projection.py",
-    ], [
+    ] + CARRIER_EXECUTION_IMPLEMENTATION, [
         "tests/test_model.py", "tests/test_extrapolation.py",
         "tests/test_attention.py", "tests/test_lifting.py",
         "tests/test_scale_exchange.py", "tests/test_packed_projection.py",
-    ]),
+    ] + CARRIER_EXECUTION_TESTS),
     5: (["src/mrrn/modalities.py", "src/mrrn/observation.py", "src/mrrn/language.py"], ["tests/test_modalities.py", "tests/test_cognitive_foundation.py"]),
     6: (["src/mrrn/events.py"], ["tests/test_events.py"]),
     7: (["src/mrrn/relational_router.py", "src/mrrn/workspace.py"], ["tests/test_relational_router.py", "tests/test_workspace.py"]),
@@ -82,31 +166,33 @@ PATHS = {
         "tests/test_pc_rasl_acceptance.py",
     ]),
     18: (["src/mrrn/cognitive_model.py", "src/mrrn/language.py", "src/mrrn/cognitive_diagnostics.py"], ["tests/test_cognitive_language.py", "tests/test_cognitive_model.py"]),
-    19: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/training_profiles.py", "src/mrrn/gradient_governance.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"], ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_training_profiles.py", "tests/test_production_objectives.py", "tests/test_gradient_governance.py", "tests/test_fineweb_entrypoint.py"]),
-    20: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/cognitive_surprise.py", "src/mrrn/learning_progress.py", "src/mrrn/pc_rasl_acceptance.py", "src/mrrn/continual_adaptation.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py", "scripts/run_pc_rasl_acceptance.py"], ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_cognitive_surprise.py", "tests/test_learning_progress.py", "tests/test_pc_rasl_training.py", "tests/test_pc_rasl_acceptance.py", "tests/test_continual_adaptation.py", "tests/test_fineweb_entrypoint.py"]),
-    21: (["src/mrrn/config.py", "src/mrrn/model.py", "src/mrrn/cognitive_training.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"], ["tests/test_model.py", "tests/test_cognitive_training.py", "tests/test_fineweb_entrypoint.py"]),
+    19: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/training_profiles.py", "src/mrrn/gradient_governance.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"] + CSTM_IMPLEMENTATION + CARRIER_EXECUTION_IMPLEMENTATION + TRAINING_EXECUTION_IMPLEMENTATION, ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_training_profiles.py", "tests/test_production_objectives.py", "tests/test_gradient_governance.py", "tests/test_fineweb_entrypoint.py"] + CSTM_TESTS + CARRIER_EXECUTION_TESTS + TRAINING_EXECUTION_TESTS),
+    20: (["src/mrrn/cognitive_objectives.py", "src/mrrn/cognitive_supervision.py", "src/mrrn/cognitive_training.py", "src/mrrn/cognitive_surprise.py", "src/mrrn/learning_progress.py", "src/mrrn/pc_rasl_acceptance.py", "src/mrrn/continual_adaptation.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py", "scripts/run_pc_rasl_acceptance.py"] + CSTM_IMPLEMENTATION, ["tests/test_cognitive_objectives.py", "tests/test_cognitive_supervision.py", "tests/test_cognitive_training.py", "tests/test_cognitive_surprise.py", "tests/test_learning_progress.py", "tests/test_pc_rasl_training.py", "tests/test_pc_rasl_acceptance.py", "tests/test_continual_adaptation.py", "tests/test_fineweb_entrypoint.py"] + CSTM_TESTS),
+    21: (["src/mrrn/config.py", "src/mrrn/model.py", "src/mrrn/cognitive_training.py", "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py"] + CSTM_IMPLEMENTATION + CARRIER_EXECUTION_IMPLEMENTATION + TRAINING_EXECUTION_IMPLEMENTATION, ["tests/test_model.py", "tests/test_cognitive_training.py", "tests/test_fineweb_entrypoint.py"] + CSTM_TESTS + CARRIER_EXECUTION_TESTS + TRAINING_EXECUTION_TESTS),
     22: ([
         "src/mrrn/config.py", "src/mrrn/cognitive_model.py",
-        "src/mrrn/language.py", "scripts/report_mrcra_parameters.py",
+        "src/mrrn/language.py", "src/mrrn/cstm.py",
+        "scripts/report_mrcra_parameters.py",
         "outputs/mrcra_1p3m_design_report.md",
         "outputs/mrcra_1p3m_parameter_report.json",
         "outputs/mrcra_8p4m_parameter_report.json",
         "outputs/mrcra_120m_parameter_report.json",
     ], [
         "tests/test_cognitive_foundation.py",
-        "tests/test_fineweb_entrypoint.py",
+        "tests/test_fineweb_entrypoint.py", "tests/test_cstm.py",
     ]),
     23: ([
         "src/mrrn/attention.py", "src/mrrn/model.py",
         "src/mrrn/lifting.py", "src/mrrn/scale_exchange.py",
         "src/mrrn/packed_projection.py", "src/mrrn/cognitive_training.py",
+        "src/mrrn/cstm.py",
         "scripts/train_fineweb.py", "scripts/train_mrcra_fineweb.py",
-    ], [
+    ] + VOCABULARY_ROUTER_IMPLEMENTATION + CARRIER_EXECUTION_IMPLEMENTATION + TRAINING_EXECUTION_IMPLEMENTATION, [
         "tests/test_attention.py", "tests/test_model.py",
         "tests/test_lifting.py", "tests/test_scale_exchange.py",
         "tests/test_packed_projection.py", "tests/test_cognitive_training.py",
-        "tests/test_fineweb_entrypoint.py",
-    ]),
+        "tests/test_fineweb_entrypoint.py", "tests/test_cstm.py",
+    ] + VOCABULARY_ROUTER_TESTS + CARRIER_EXECUTION_TESTS + TRAINING_EXECUTION_TESTS),
     24: (["src/mrrn/cognitive_model.py", "src/mrrn/cognitive_types.py", "src/mrrn/memory_v2.py"], ["tests/test_cognitive_model.py", "tests/test_cognitive_foundation.py"]),
     25: (["src/mrrn/cognitive_model.py", "src/mrrn/language.py"], ["tests/test_cognitive_model.py", "tests/test_cognitive_language.py"]),
     26: (["src/mrrn/cognitive_model.py", "src/mrrn/provenance.py", "src/mrrn/cognitive_training.py"], ["tests/test_cognitive_model.py", "tests/test_cognitive_training.py"]),

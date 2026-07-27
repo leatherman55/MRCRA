@@ -16,13 +16,16 @@ without exceeding a narrow 1.29M–1.31M construction-time envelope.
 
 | Allocation | Parameters | Share |
 | --- | ---: | ---: |
-| Tied token/input-output embedding | 1,005,140 | 77.34% |
-| Six-scale MRRN carrier excluding tied embedding | 202,548 | 15.58% |
-| Complete cognitive architecture | 91,981 | 7.08% |
-| **Actor total** | **1,299,669** | **100%** |
+| Tied token/input-output embedding | 1,005,140 | 77.21% |
+| Six-scale MRRN carrier excluding tied embedding | 202,548 | 15.56% |
+| Complete cognitive architecture | 91,981 | 7.07% |
+| Shared CSTM predictor | 2,158 | 0.17% |
+| **Actor total** | **1,301,827** | **100%** |
 
-The tied weight is counted once. All actor parameters are trainable. PC-RASL
-is a training-only auxiliary system and is not included in the inference actor
+The tied weight is counted once. All actor parameters are trainable. CSTM's
+shared predictor is included because its predictions and learned statistics are
+part of the checkpointed actor. PC-RASL is a separate, experimental
+training-only auxiliary system and is not included in the inference actor
 count.
 
 ## Carrier design
@@ -95,6 +98,26 @@ step depth, and long world-model horizons are intentionally preserved rather
 than minimized away. Capacity reductions affect how many simultaneous records
 can be represented, not which kinds of reasoning operation exist.
 
+## Causal Spectral Target Multiplexing
+
+The ultralight profile retains the same default CSTM contract as the larger
+profiles:
+
+- fixed, non-trainable normalized token codes;
+- DC plus the first order-sensitive Fourier harmonic;
+- complete strictly future blocks at all six physical scales;
+- exact packed-document boundary rejection;
+- one always-on next-block horizon plus one rotating longer horizon;
+- a shared rank-eight predictor with scale and horizon conditioning;
+- a zero-initialized cognitive-residual gate;
+- checkpointed per-scale target RMS;
+- a separately computed auxiliary gradient governed relative to exact
+  next-token CE.
+
+The 2,158-parameter head preserves this complete mechanism while consuming only
+0.17% of the actor budget. It does not duplicate the vocabulary projection and
+does not cause additional carrier or cognitive forward passes.
+
 ## Progress-Conditioned RASL
 
 The ultralight actor uses the same causal Progress-Conditioned RASL authority,
@@ -124,7 +147,7 @@ The flag is mutually exclusive with `--lightmodel`. It selects:
 - model authority `mrcra-ultralight-1p3m-fineweb-stage1`;
 - cognitive stride 64 unless explicitly overridden.
 
-An offline smoke test constructs and trains the real 1,299,669-parameter actor
+An offline smoke test constructs and trains the real 1,301,827-parameter actor
 without downloading FineWeb or a tokenizer:
 
 ```bash
@@ -145,17 +168,20 @@ that it does not provide GPT-2 token semantics.
 Production tests assert:
 
 - exact actor parameter count and declared range;
+- exact CSTM predictor allocation, causal target construction, and governed
+  auxiliary gradient route;
 - tied token/output storage;
 - six physical scales and independent recurrent topology;
 - expected width and resonance-mode allocation at every scale;
 - presence of every major cognitive parameter group;
 - all integrated cognition switches enabled;
-- exact PC-RASL critic size and absence of a target actor;
+- exact experimental PC-RASL critic size and absence of a target actor;
 - stable profile, output-directory, authority, and Trackio names;
 - CLI mutual exclusion;
 - reproducible machine-readable parameter audit;
-- successful offline training, evaluation, PC-RASL, checkpoint, and manifest
-  completion using the real ultralight actor.
+- successful offline training, evaluation, CSTM, checkpoint, and manifest
+  completion using the real ultralight actor; PC-RASL is tested only when
+  explicitly enabled.
 
 The exact subsystem allocation is retained in
 `outputs/mrcra_1p3m_parameter_report.json`.
@@ -164,7 +190,7 @@ The exact subsystem allocation is retained in
 
 Structural completeness means every mechanism and authority boundary is
 present and executable. It does not imply sufficient width for high-quality
-language modeling or general cognitive capability. Because 77.34% of the actor
+language modeling or general cognitive capability. Because 77.21% of the actor
 is necessarily committed to the tied GPT-2 vocabulary embedding, the profile
 should be used for mechanism development, causal ablations, training-system
 tests, and small-scale empirical comparisons. The 8.4M light and 120M serious

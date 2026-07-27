@@ -222,8 +222,14 @@ def test_pc_rasl_checkpoint_binds_both_probe_and_guard_evidence(tmp_path):
     assert retained_trajectory.behavior_internal_mask is not None
     checkpoint = source.save_checkpoint()
     payload = torch.load(checkpoint, weights_only=True)
-    assert payload["identity"]["progress_probe"] == source.progress_probe_identity
-    assert payload["identity"]["evaluation"] == source.evaluation_identity
+    assert (
+        payload["identity"]["semantic"]["progress_probe"]
+        == source.progress_probe_identity
+    )
+    assert (
+        payload["identity"]["semantic"]["evaluation"]
+        == source.evaluation_identity
+    )
     assert payload["pc_rasl"] is not None
     assert payload["learning_progress"] is not None
     finalized = payload["pc_rasl"]["finalized_batches"][0]
@@ -329,6 +335,8 @@ def test_format8_checkpoint_migrates_into_fresh_causal_pc_rasl_warmup(tmp_path):
     current = old.save_checkpoint()
     payload = torch.load(current, weights_only=True)
     payload["format_version"] = 8
+    payload["identity"] = old._legacy_identity()
+    payload["identity"]["training"]["cstm_enabled"] = False
     payload["identity"].pop("progress_probe", None)
     for name in (
         "progress_conditioned_rasl",
@@ -383,6 +391,8 @@ def test_format9_pc_rasl_checkpoint_discards_pre_v10_replay_authority(tmp_path):
     assert payload["pc_rasl"] is not None
     assert payload["pc_rasl"]["finalized_batches"]
     payload["format_version"] = 9
+    payload["identity"] = old._legacy_identity()
+    payload["identity"]["training"]["cstm_enabled"] = False
     legacy = path / "format9.pt"
     torch.save(payload, legacy)
 
@@ -407,6 +417,8 @@ def test_format10_checkpoint_migrates_outstanding_consequence_once(tmp_path):
     payload = torch.load(current, weights_only=True)
     assert payload["pc_rasl"]["finalized_batches"]
     payload["format_version"] = 10
+    payload["identity"] = source._legacy_identity()
+    payload["identity"]["training"]["cstm_enabled"] = False
     for name in (
         "pc_rasl_captures_per_observation",
         "pc_rasl_updates_per_observation",
@@ -441,6 +453,8 @@ def test_format11_pc_rasl_checkpoint_can_resume_with_subsystem_retired(tmp_path)
     assert payload["learning_progress"] is not None
     assert payload["pc_rasl"] is not None
     payload["format_version"] = 11
+    payload["identity"] = source._legacy_identity()
+    payload["identity"]["training"]["cstm_enabled"] = False
     legacy = path / "format11.pt"
     torch.save(payload, legacy)
 

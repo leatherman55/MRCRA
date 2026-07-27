@@ -4,6 +4,7 @@
   import IndentGuides from "./IndentGuides.svelte";
   import { listArtifacts } from "../lib/api.js";
   import {
+    createSingleFlightPoller,
     getAppPollIntervalMs,
     isRateLimitCooldownActive,
     isTabHidden,
@@ -28,6 +29,7 @@
   let search = $state("");
   let expandedTypes = $state({});
   let expandedArtifacts = $state({});
+  const runArtifactPoll = createSingleFlightPoller();
 
   function verKey(name, version) {
     return `${name}@v${version}`;
@@ -159,7 +161,9 @@
   $effect(() => {
     const timer = setInterval(() => {
       if (isTabHidden() || isRateLimitCooldownActive()) return;
-      refreshArtifacts();
+      runArtifactPoll(refreshArtifacts).catch((cause) => {
+        console.error("Failed to poll artifacts:", cause);
+      });
     }, getAppPollIntervalMs());
     return () => clearInterval(timer);
   });

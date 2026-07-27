@@ -9,6 +9,7 @@
   import { buildColorMap, getColorForIndex } from "../lib/stores.js";
   import { latestOnlySelection } from "../lib/selection.js";
   import { filterMetricsByRegex } from "../lib/dataProcessing.js";
+  import { DEFAULT_SMOOTHING } from "../lib/resourcePolicy.js";
   import { computeGroupByOptions, computeGroupedRuns } from "../lib/grouping.js";
 
   let {
@@ -18,9 +19,10 @@
     selectedProject = $bindable(null),
     runs = [],
     selectedRuns = $bindable([]),
+    latestOnly = $bindable(true),
     availableSystemDevices = [],
     selectedSystemDevices = $bindable([]),
-    smoothing = $bindable(10),
+    smoothing = $bindable(DEFAULT_SMOOTHING),
     xAxis = $bindable("step"),
     logScaleX = $bindable(false),
     logScaleY = $bindable(false),
@@ -105,7 +107,6 @@
   let groupByOptions = $derived(computeGroupByOptions(runConfigs));
   let groupedRuns = $derived(computeGroupedRuns(filteredRuns, runConfigs, groupByRaw));
 
-  let latestOnly = $state(false);
   let shareTab = $state("share");
   let copyFeedback = $state(null);
 
@@ -176,7 +177,7 @@
     if (runIds.length) {
       params.set("run_ids", runIds.join(","));
     }
-    if (smoothing != null && smoothing !== 10) {
+    if (smoothing != null && smoothing !== DEFAULT_SMOOTHING) {
       params.set("smoothing", smoothing.toString());
     }
     if (!showHeaders) {

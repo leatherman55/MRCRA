@@ -316,7 +316,66 @@ def parser() -> argparse.ArgumentParser:
         help="Gradient span; defaults to 4,096 tokens.",
     )
     result.add_argument(
-        "--vocabulary-tile-size", type=int, default=2_048,
+        "--document-static-batching",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Regroup independent packed documents into deterministic stable-row "
+            "static cohorts (default: enabled). Disable only for matched serial "
+            "execution audits."
+        ),
+    )
+    result.add_argument(
+        "--document-planner",
+        choices=("auto", "fixed", "serial"),
+        default="auto",
+        help=(
+            "Select cost-aware automatic document cohorts, fixed exact-signature "
+            "cohorts, or the serial reference path."
+        ),
+    )
+    result.add_argument(
+        "--document-cost-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Measure the document execution cost model at startup.",
+    )
+    result.add_argument(
+        "--document-bucket-lengths",
+        type=int,
+        nargs="+",
+        default=tuple(range(64, 4_096 + 1, 64)),
+        metavar="TOKENS",
+        help=(
+            "Increasing carrier-aligned static span buckets. Cognitive event "
+            "masks exactly cover a final partial stride. The "
+            "largest value must cover --tbptt-length."
+        ),
+    )
+    result.add_argument(
+        "--document-batch-token-budget",
+        type=int,
+        default=8_192,
+        help="Maximum padded tokens in one document-major physical invocation.",
+    )
+    result.add_argument(
+        "--document-grouping-policy",
+        choices=("cost-aware", "exact-signature"),
+        default="cost-aware",
+        help=(
+            "Cost-aware deterministically merges compatible span-count "
+            "signatures when fewer launches are cheaper; exact-signature is "
+            "the legacy audit path."
+        ),
+    )
+    result.add_argument(
+        "--document-plan-cache-capacity",
+        type=int,
+        default=128,
+        help="Maximum deterministic grouping plans retained in process.",
+    )
+    result.add_argument(
+        "--vocabulary-tile-size", type=int, default=4_096,
         help="Exact-softmax vocabulary tile width (memory control, not an approximation).",
     )
     result.add_argument(
@@ -330,6 +389,31 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--maximum-retained-loss-mib", type=int, default=1_024,
         help="Auto-policy ceiling for retained exact-softmax activations.",
+    )
+    result.add_argument(
+        "--maximum-compiled-cce-mib", type=int, default=512,
+        help=(
+            "Maximum estimated full-logit workspace for auto-selecting fused "
+            "or torch.compile CCE; larger workloads use exact tiled CCE."
+        ),
+    )
+    result.add_argument(
+        "--exact-loss-backend",
+        choices=(
+            "auto",
+            "cce_kahan_full_c",
+            "cce_exact",
+            "torch_compile",
+            "fused",
+            "tiled",
+        ),
+        default="auto",
+        help=(
+            "Exact full-vocabulary loss executor. Auto selects Kahan Full-C "
+            "CCE on compatible CUDA, official compiled exact CCE on macOS/CPU "
+            "when installed and within the declared workspace, and the native "
+            "exact fused/tiled path otherwise."
+        ),
     )
     result.add_argument(
         "--progress-interval-tokens", type=int, default=2_048,
@@ -353,6 +437,37 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     result.add_argument(
+        "--activation-policy",
+        choices=("auto", "retain", "selective", "whole-span"),
+        default="auto",
+        help=(
+            "Measured carrier activation policy. Auto benchmarks equivalent "
+            "retain/selective/whole-span candidates and selects the fastest "
+            "one satisfying the live-memory reserve."
+        ),
+    )
+    result.add_argument(
+        "--activation-memory-reserve-mib",
+        type=int,
+        default=4_096,
+        help="Memory that activation calibration must leave available.",
+    )
+    result.add_argument(
+        "--activation-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Measure activation candidates before training (default: enabled).",
+    )
+    result.add_argument(
+        "--allow-unsafe-activation-policy",
+        action="store_true",
+        help=(
+            "Explicitly bypass the measured activation-memory reserve for a "
+            "non-auto policy. This can terminate the process and is never "
+            "enabled by default."
+        ),
+    )
+    result.add_argument(
         "--cognitive-tbptt-events", type=int, default=4,
         help="Backpropagate through this many consecutive cognitive event cycles.",
     )
@@ -360,11 +475,107 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--learning-rate", type=float, default=6e-5)
     result.add_argument("--warmup-tokens", type=int, default=1_000_000)
     result.add_argument("--weight-decay", type=float, default=0.1)
+    result.add_argument(
+        "--cstm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable Causal Spectral Target Multiplexing on the integrated "
+            "carrier path (default: enabled)."
+        ),
+    )
+    result.add_argument(
+        "--cstm-weight",
+        type=float,
+        default=0.04,
+        help="Maximum CSTM objective coefficient after its causal warmup/ramp.",
+    )
+    result.add_argument(
+        "--cstm-warmup-tokens",
+        type=int,
+        default=100_000,
+        help="Physical corpus tokens trained with pure exact CE before CSTM begins.",
+    )
+    result.add_argument(
+        "--cstm-ramp-tokens",
+        type=int,
+        default=400_000,
+        help="Physical tokens over which CSTM reaches its configured weight.",
+    )
+    result.add_argument("--cstm-carrier-gradient-cap", type=float, default=0.10)
+    result.add_argument("--cstm-cognitive-gradient-cap", type=float, default=0.05)
+    result.add_argument("--cstm-head-gradient-cap", type=float, default=0.10)
+    result.add_argument(
+        "--cstm-execution",
+        choices=("sampled", "legacy-dense"),
+        default="sampled",
+        help=(
+            "Pressure-preserving sampled execution is the default; legacy-dense "
+            "exists for checkpoint migration and matched audits."
+        ),
+    )
+    result.add_argument(
+        "--cstm-sampling-duty-cycle",
+        "--cstm-substrate-duty-probability",
+        dest="cstm_sampling_duty_cycle",
+        type=float,
+        default=0.25,
+        help="Context-level CSTM sampling probability before importance correction.",
+    )
+    result.add_argument(
+        "--cstm-sampling-uniform-mixture",
+        type=float,
+        default=0.05,
+        help="Exploration mixture preventing vanishing obligation probabilities.",
+    )
+    result.add_argument(
+        "--cstm-max-substrate-vjps",
+        type=int,
+        default=1,
+        help=(
+            "Hard maximum CSTM substrate adjoints per optimizer context; the "
+            "accepted production authority requires exactly 1."
+        ),
+    )
+    result.add_argument(
+        "--cstm-target-participation-budget",
+        type=int,
+        default=8_192,
+        help=(
+            "Maximum sampled token-support participations per selected CSTM "
+            "invocation/scale before exact inclusion correction."
+        ),
+    )
+    result.add_argument(
+        "--cstm-predictor-update-interval",
+        type=int,
+        default=1,
+        help="Train the detached CSTM predictor every N optimizer contexts.",
+    )
+    result.add_argument(
+        "--cstm-maximum-coverage-gap",
+        type=int,
+        default=4_096,
+        help=(
+            "Fail closed if an eligible sampled CSTM scale/horizon goes this "
+            "many optimizer steps without predictor coverage."
+        ),
+    )
+    result.add_argument(
+        "--allow-cstm-execution-upgrade",
+        "--upgrade-cstm-execution-policy",
+        dest="allow_cstm_execution_upgrade",
+        action="store_true",
+        help=(
+            "Explicitly authorize one-way migration of a legacy dense CSTM "
+            "checkpoint to sampled execution."
+        ),
+    )
     result.add_argument("--curriculum-stage", type=int, default=1)
     result.add_argument("--training-profile", default="substrate_language_pretraining")
     result.add_argument("--trainer-mode", default="independent_packed_documents")
-    result.add_argument("--checkpoint-interval", type=int, default=25)
-    result.add_argument("--eval-interval", type=int, default=25)
+    result.add_argument("--checkpoint-interval", type=int, default=100)
+    result.add_argument("--eval-interval", type=int, default=100)
     result.add_argument("--eval-batches", type=int, default=4)
     result.add_argument(
         "--progress-conditioned-rasl",
@@ -430,8 +641,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--device", default="auto")
     result.add_argument("--precision", choices=("auto", "fp32", "bf16", "fp16"), default="auto")
     result.add_argument(
-        "--cpu-threads", type=int, default=4,
-        help="CPU intra-op workers; four is the matched Apple integrated default.",
+        "--cpu-threads", type=int, default=0,
+        help=(
+            "CPU intra-op workers. Zero (default) benchmarks 2/4/6/8 workers "
+            "in fresh subprocesses on the actual carrier and records the "
+            "selected count."
+        ),
     )
     result.add_argument(
         "--cpu-interop-threads", type=int, default=1,
@@ -443,6 +658,24 @@ def parser() -> argparse.ArgumentParser:
         help=(
             "Compile pure carrier chunk kernels. The default enables this on "
             "CUDA and leaves CPU/MPS eager."
+        ),
+    )
+    result.add_argument(
+        "--compile-carrier",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Portable carrier compiler policy. Auto enables compilation only "
+            "when startup measurements prove an amortized speed benefit."
+        ),
+    )
+    result.add_argument(
+        "--performance-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run bounded startup performance calibration for automatic CPU and "
+            "compiler execution decisions."
         ),
     )
     result.add_argument(
@@ -464,7 +697,24 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--run-name")
     result.add_argument("--trackio-space-id")
-    result.add_argument("--dashboard", action=argparse.BooleanOptionalAction, default=True)
+    result.add_argument(
+        "--trackio-remote-log-interval",
+        type=int,
+        default=4,
+        help=(
+            "Send one coalesced scalar row to the remote Trackio store every "
+            "N optimizer steps while retaining every row in local JSONL."
+        ),
+    )
+    result.add_argument(
+        "--dashboard",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Launch the local Trackio web UI inside the training process "
+            "(default: disabled; logging remains enabled)."
+        ),
+    )
     result.add_argument("--spectral-dashboard", action=argparse.BooleanOptionalAction, default=True)
     result.add_argument("--snapshot-interval", type=int, default=25)
     result.add_argument(
@@ -500,8 +750,57 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.document_planner != "auto":
+        requested_static = args.document_planner != "serial"
+        requested_grouping = (
+            "exact-signature"
+            if args.document_planner == "fixed"
+            else "cost-aware"
+        )
+        if (
+            args.document_static_batching != requested_static
+            or args.document_grouping_policy != requested_grouping
+        ):
+            # Legacy controls retain their defaults when the canonical
+            # planner selector is used. Only non-default contradictions fail.
+            if (
+                args.document_static_batching is not True
+                or args.document_grouping_policy != "cost-aware"
+            ):
+                raise ValueError(
+                    "--document-planner conflicts with legacy document "
+                    "batching/grouping controls"
+                )
+        args.document_static_batching = requested_static
+        args.document_grouping_policy = requested_grouping
+    compile_carrier = {
+        "auto": None,
+        "on": True,
+        "off": False,
+    }[args.compile_carrier]
+    if (
+        args.compile_tensor_cores is not None
+        and compile_carrier is not None
+        and args.compile_tensor_cores != compile_carrier
+    ):
+        raise ValueError(
+            "--compile-carrier conflicts with --[no-]compile-tensor-cores"
+        )
+    if compile_carrier is not None:
+        args.compile_tensor_cores = compile_carrier
+    if args.activation_checkpointing is not None:
+        if args.activation_policy != "auto":
+            raise ValueError(
+                "deprecated --[no-]activation-checkpointing cannot be combined "
+                "with --activation-policy"
+            )
+        activation_request = (
+            "whole_span" if args.activation_checkpointing else "retain"
+        )
+    else:
+        activation_request = args.activation_policy.replace("-", "_")
     if min(
-        args.cpu_threads, args.cpu_interop_threads,
+        args.cpu_interop_threads,
         args.maximum_retained_loss_mib, args.phase_ablation_batches,
         args.low_clip_coefficient_patience,
         args.progress_probe_interval, args.progress_probe_batches,
@@ -515,10 +814,18 @@ def main() -> None:
         args.pc_rasl_captures_per_observation,
         args.pc_rasl_updates_per_observation,
         args.pc_rasl_critic_warmup_observations,
+        args.cstm_ramp_tokens,
+        args.cstm_max_substrate_vjps,
+        args.cstm_target_participation_budget,
+        args.cstm_predictor_update_interval,
+        args.activation_memory_reserve_mib,
+        args.document_batch_token_budget,
     ) <= 0:
         raise ValueError(
             "thread, workspace, evaluation, and progress controls must be positive"
         )
+    if args.cpu_threads < 0:
+        raise ValueError("--cpu-threads must be zero for auto or positive")
     progress_configuration = LearningProgressConfig(
         observation_interval=args.progress_probe_interval,
         warmup_observations=args.progress_warmup_observations,
@@ -535,7 +842,8 @@ def main() -> None:
         guard_regression_patience=args.progress_guard_patience,
         guard_recovery_patience=args.progress_guard_patience,
     )
-    torch.set_num_threads(args.cpu_threads)
+    if args.cpu_threads > 0:
+        torch.set_num_threads(args.cpu_threads)
     if torch.get_num_interop_threads() != args.cpu_interop_threads:
         torch.set_num_interop_threads(args.cpu_interop_threads)
     torch.manual_seed(args.seed)
@@ -624,7 +932,52 @@ def main() -> None:
             vocabulary_tile_size=smoke_vocabulary_tile_size,
             integrated_cognitive_path=True, cognitive_stride=2,
             cognitive_tbptt_events=2,
+            document_static_batching=args.document_static_batching,
+            document_bucket_lengths=tuple(args.document_bucket_lengths),
+            document_batch_token_budget=args.document_batch_token_budget,
+            document_grouping_policy=args.document_grouping_policy.replace(
+                "-", "_"
+            ),
+            document_plan_cache_capacity=args.document_plan_cache_capacity,
+            document_cost_calibration=args.document_cost_calibration,
+            cstm_enabled=args.cstm,
+            cstm_weight=args.cstm_weight,
+            cstm_warmup_tokens=0,
+            cstm_ramp_tokens=1,
+            cstm_carrier_gradient_cap=args.cstm_carrier_gradient_cap,
+            cstm_cognitive_gradient_cap=args.cstm_cognitive_gradient_cap,
+            cstm_head_gradient_cap=args.cstm_head_gradient_cap,
+            cstm_execution=args.cstm_execution.replace("-", "_"),
+            cstm_sampling_duty_cycle=args.cstm_sampling_duty_cycle,
+            cstm_sampling_uniform_mixture=(
+                args.cstm_sampling_uniform_mixture
+            ),
+            cstm_max_substrate_vjps=args.cstm_max_substrate_vjps,
+            cstm_target_participation_budget=(
+                args.cstm_target_participation_budget
+            ),
+            cstm_predictor_update_interval=(
+                args.cstm_predictor_update_interval
+            ),
+            cstm_maximum_coverage_gap=args.cstm_maximum_coverage_gap,
+            allow_cstm_execution_upgrade=args.allow_cstm_execution_upgrade,
+            checkpoint_tiles=(
+                None if args.loss_memory_policy == "auto"
+                else args.loss_memory_policy == "recompute"
+            ),
+            maximum_retained_loss_bytes=args.maximum_retained_loss_mib << 20,
+            maximum_fused_loss_bytes=args.maximum_compiled_cce_mib << 20,
+            exact_loss_backend=args.exact_loss_backend,
             warmup_tokens=8, checkpoint_interval=2, device="cpu", precision="fp32",
+            activation_policy=activation_request,
+            activation_memory_reserve_bytes=(
+                args.activation_memory_reserve_mib << 20
+            ),
+            activation_calibration=args.activation_calibration,
+            allow_unsafe_activation_policy=(
+                args.allow_unsafe_activation_policy
+            ),
+            performance_calibration=args.performance_calibration,
             evaluation_interval=1, evaluation_batches=1,
             require_evaluation=True,
             progress_conditioned_rasl=args.progress_conditioned_rasl,
@@ -652,6 +1005,9 @@ def main() -> None:
             trackio_project=args.trackio_project,
             run_name=args.run_name or smoke_run_name,
             trackio_space_id=args.trackio_space_id,
+            trackio_remote_log_interval=(
+                args.trackio_remote_log_interval
+            ),
             seed=args.seed,
             phase_transition_telemetry=args.phase_transition_telemetry,
             phase_transition_ablation=args.phase_transition_ablation,
@@ -738,10 +1094,41 @@ def main() -> None:
                 else args.loss_memory_policy == "recompute"
             ),
             maximum_retained_loss_bytes=args.maximum_retained_loss_mib << 20,
+            maximum_fused_loss_bytes=args.maximum_compiled_cce_mib << 20,
+            exact_loss_backend=args.exact_loss_backend,
+            cstm_enabled=args.cstm,
+            cstm_weight=args.cstm_weight,
+            cstm_warmup_tokens=args.cstm_warmup_tokens,
+            cstm_ramp_tokens=args.cstm_ramp_tokens,
+            cstm_carrier_gradient_cap=args.cstm_carrier_gradient_cap,
+            cstm_cognitive_gradient_cap=args.cstm_cognitive_gradient_cap,
+            cstm_head_gradient_cap=args.cstm_head_gradient_cap,
+            cstm_execution=args.cstm_execution.replace("-", "_"),
+            cstm_sampling_duty_cycle=args.cstm_sampling_duty_cycle,
+            cstm_sampling_uniform_mixture=(
+                args.cstm_sampling_uniform_mixture
+            ),
+            cstm_max_substrate_vjps=args.cstm_max_substrate_vjps,
+            cstm_target_participation_budget=(
+                args.cstm_target_participation_budget
+            ),
+            cstm_predictor_update_interval=(
+                args.cstm_predictor_update_interval
+            ),
+            cstm_maximum_coverage_gap=args.cstm_maximum_coverage_gap,
+            allow_cstm_execution_upgrade=args.allow_cstm_execution_upgrade,
             integrated_cognitive_path=(
                 args.training_profile == "substrate_language_pretraining"
                 and args.trainer_mode == "independent_packed_documents"
             ),
+            document_static_batching=args.document_static_batching,
+            document_bucket_lengths=tuple(args.document_bucket_lengths),
+            document_batch_token_budget=args.document_batch_token_budget,
+            document_grouping_policy=args.document_grouping_policy.replace(
+                "-", "_"
+            ),
+            document_plan_cache_capacity=args.document_plan_cache_capacity,
+            document_cost_calibration=args.document_cost_calibration,
             cognitive_stride=cognitive_stride,
             cognitive_tbptt_events=args.cognitive_tbptt_events,
             progress_interval_tokens=args.progress_interval_tokens,
@@ -781,13 +1168,25 @@ def main() -> None:
             pc_rasl_cognitive_gradient_cap=args.pc_rasl_cognitive_gradient_cap,
             pc_rasl_controller_gradient_cap=args.pc_rasl_controller_gradient_cap,
             device=args.device, precision=args.precision, seed=args.seed,
+            activation_policy=activation_request,
+            activation_memory_reserve_bytes=(
+                args.activation_memory_reserve_mib << 20
+            ),
+            activation_calibration=args.activation_calibration,
+            allow_unsafe_activation_policy=(
+                args.allow_unsafe_activation_policy
+            ),
             cpu_threads=args.cpu_threads,
             cpu_interop_threads=args.cpu_interop_threads,
             compile_tensor_cores=args.compile_tensor_cores,
+            performance_calibration=args.performance_calibration,
             apple_mps_loss_offload=args.apple_mps_loss_offload,
             trackio_project=args.trackio_project,
             run_name=args.run_name or selected_profile.run_name,
             trackio_space_id=args.trackio_space_id,
+            trackio_remote_log_interval=(
+                args.trackio_remote_log_interval
+            ),
             trackio_enabled=args.trackio,
             show_dashboard=args.dashboard, spectral_dashboard=args.spectral_dashboard,
             spectral_snapshot_interval=args.snapshot_interval,
@@ -802,7 +1201,6 @@ def main() -> None:
         model, tokenizer, PackedTokenStream(source, tokenizer), configuration,
         evaluation_batches, progress_probe_batches=progress_probe_batches,
     )
-    trainer.runtime.update(activation_policy)
     manifest = {
         "model_parameters": model.parameter_count,
         "architecture": "integrated_mrcra",
@@ -823,6 +1221,17 @@ def main() -> None:
             if configuration.progress_conditioned_rasl else None
         ),
         "runtime": trainer.runtime,
+        "cstm_enabled": configuration.cstm_enabled,
+        "cstm_effective": trainer.cstm_enabled,
+        "cstm_architecture": asdict(model.cstm_predictor.config),
+        "cstm_accounting": {
+            "tokens_seen": "physical packed FineWeb token presentations only",
+            "spectral_target_views": "valid derived scale/horizon target rows",
+            "raw_token_view_equivalents": (
+                "constituent-token participations in derived multiscale targets; "
+                "correlated auxiliary supervision, not additional corpus tokens"
+            ),
+        },
         "functional_surprise_enabled": configuration.progress_conditioned_rasl,
         "functional_surprise_mode": (
             "progress_conditioned_rasl"
@@ -856,11 +1265,11 @@ def main() -> None:
     )
     print(
         "Carrier activation policy: "
-        f"{activation_policy['carrier_activation_checkpointing_policy']} "
-        f"(estimated "
-        f"{activation_policy['estimated_uncheckpointed_carrier_activation_bytes'] / (1 << 20):.0f} MiB, "
-        f"budget "
-        f"{activation_policy['carrier_activation_memory_budget_bytes'] / (1 << 20):.0f} MiB).",
+        f"{trainer.activation_execution_policy.resolved} "
+        f"({trainer.activation_execution_policy.calibration_kind}; estimated "
+        f"{trainer.activation_execution_policy.estimated_retain_bytes / (1 << 20):.0f} MiB; "
+        f"reserve "
+        f"{trainer.activation_execution_policy.required_reserve_bytes / (1 << 20):.0f} MiB).",
         flush=True,
     )
     if args.resume:

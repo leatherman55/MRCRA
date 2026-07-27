@@ -280,6 +280,52 @@ def _configuration(identity: dict[str, Any]) -> MRCRAConfig:
         raise ValueError(f"checkpoint model configuration is invalid: {error}") from error
 
 
+def _identity_authorities(
+    identity: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalize legacy and partitioned checkpoint identity authorities."""
+
+    if {
+        "schema_version",
+        "semantic",
+        "optimization",
+        "execution",
+        "observation",
+    }.issubset(identity):
+        semantic = identity.get("semantic")
+        training: dict[str, Any] = {}
+        for section_name in (
+            "optimization",
+            "execution",
+            "observation",
+        ):
+            section = identity.get(section_name)
+            section_training = (
+                section.get("training")
+                if isinstance(section, dict)
+                else None
+            )
+            if not isinstance(section_training, dict):
+                raise ValueError(
+                    "checkpoint identity authorities are missing or malformed"
+                )
+            overlap = set(training).intersection(section_training)
+            if overlap:
+                raise ValueError(
+                    "checkpoint identity training authorities overlap: "
+                    + ", ".join(sorted(overlap))
+                )
+            training.update(section_training)
+    else:
+        semantic = identity
+        training = identity.get("training")
+    if not isinstance(semantic, dict) or not isinstance(training, dict):
+        raise ValueError(
+            "checkpoint identity authorities are missing or malformed"
+        )
+    return semantic, training
+
+
 def _gate(name: str, condition: bool, evidence: str, failure: str) -> SeriousGate:
     return SeriousGate(name, bool(condition), evidence, None if condition else failure)
 
@@ -411,8 +457,13 @@ def audit_serious_checkpoint(
         identity = payload.get("identity")
         if not isinstance(identity, dict):
             raise ValueError("checkpoint identity is missing")
-        config = _configuration(identity)
-        parameter_count = int(identity.get("parameter_count", -1))
+        semantic_identity, optimization_training = (
+            _identity_authorities(identity)
+        )
+        config = _configuration(semantic_identity)
+        parameter_count = int(
+            semantic_identity.get("parameter_count", -1)
+        )
         # Some authority-state constructors validate scalar tensor contents and
         # therefore cannot be instantiated on the meta device.  Acceptance is
         # an offline operation; materializing one CPU architecture image is
@@ -455,13 +506,13 @@ def audit_serious_checkpoint(
             f"tokens_seen={tokens_seen}; required={minimum_training_tokens}",
             "checkpoint has insufficient training exposure for the declared maturity",
         ))
-        evaluation_identity = identity.get("evaluation")
+        evaluation_identity = semantic_identity.get("evaluation")
         evaluation_bound = (
             isinstance(evaluation_identity, dict)
             and int(evaluation_identity.get("batch_count", 0)) > 0
             and isinstance(evaluation_identity.get("sha256"), str)
             and len(evaluation_identity["sha256"]) == 64
-            and bool(identity.get("training", {}).get("require_evaluation"))
+            and bool(optimization_training.get("require_evaluation"))
         )
         gates.append(_gate(
             "checkpoint_bound_retained_evaluation", evaluation_bound,
@@ -485,10 +536,12 @@ def audit_serious_checkpoint(
             and isinstance(training_source.get("revision"), str)
             and bool(_PINNED_REVISION.fullmatch(training_source["revision"]))
         )
-        checkpoint_source = identity.get("source")
+        checkpoint_source = semantic_identity.get("source")
         production_identity = contract_fixture or (
-            manifest.get("model_config") == identity.get("model_config")
-            and manifest.get("tokenizer") == identity.get("tokenizer")
+            manifest.get("model_config")
+            == semantic_identity.get("model_config")
+            and manifest.get("tokenizer")
+            == semantic_identity.get("tokenizer")
             and isinstance(checkpoint_source, dict)
             and all(
                 training_source.get(name) == checkpoint_source.get(name)

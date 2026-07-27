@@ -57,7 +57,7 @@ from .metacognition import (
     MetacognitivePrediction, MetacognitiveRouter, MetacognitiveState,
     append_metacognitive_record,
 )
-from .model import MRRN, MRRNStreamState
+from .model import CausalBandHistory, MRRN, MRRNStreamState
 from .observation import ObservationPacket, register_internal_inputs
 from .provenance import ProvenanceLedger
 from .reconstruction import (
@@ -256,6 +256,7 @@ class MRCRAIntegratedTrainingOutput:
     state: MRCRAIntegratedTrainingState
     cognitive_cycles: Tensor
     event_counts: Tensor
+    event_mask: Tensor
     feedback_rms: Tensor
     event_activation_mean: Tensor
     active_nodes_mean: Tensor
@@ -267,6 +268,9 @@ class MRCRAIntegratedTrainingOutput:
     event_emitted: Tensor
     event_quota_rejected: Tensor
     event_open_after: Tensor
+    band_histories: tuple[CausalBandHistory | None, ...]
+    base_latent: Tensor
+    cognitive_residual: Tensor
     first_hard_event: "HardEventTrace | None"
 
 
@@ -287,6 +291,7 @@ class HardEventTrace:
     active_relations_after: Tensor
     workspace_before: Tensor
     workspace_after: Tensor
+    batch_index: int = 0
 
 
 def _replace_rows(current, fresh, reset: Tensor):
@@ -3065,10 +3070,16 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
         """
 
         packet.assert_ledger_consistent(ledger, allow_internal=True)
-        if packet.batch != 1 or not bool(packet.valid_mask.all()):
+        if packet.batch <= 0 or packet.length <= 0:
+            raise ValueError("integrated language training requires a nonempty packet")
+        if not bool(packet.valid_mask.any(-1).all()):
             raise ValueError(
-                "integrated language training requires one fully valid document span"
+                "every integrated document row requires at least one valid token"
             )
+        if packet.length > 1 and bool(
+            (packet.valid_mask[:, 1:] & ~packet.valid_mask[:, :-1]).any()
+        ):
+            raise ValueError("integrated document padding cannot reactivate")
         stride = (
             self.config.cognitive.event_chunk_size
             if cognitive_stride is None else cognitive_stride
@@ -3092,15 +3103,43 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
             cognitive_state = state.cognitive
             carrier_state = state.carrier
             feedback = state.feedback
-        carrier_output = self.carrier.prefill(
-            packet.values,
-            packet.valid_mask,
-            state=carrier_state,
-            relational_context=cognitive_state.relational_context,
-            project_output=False,
+            if (
+                cognitive_state.batch != packet.batch
+                or carrier_state.batch != packet.batch
+                or feedback.shape
+                != (packet.batch, self.config.cognitive.workspace_dim)
+            ):
+                raise ValueError(
+                    "integrated continuation state does not match the document batch"
+                )
+        activation_policy = self.carrier.activation_execution_policy
+        if activation_policy == "whole_span":
+            carrier_output = self.carrier.prefill_coarse_checkpointed(
+                packet.values,
+                packet.valid_mask,
+                state=carrier_state,
+                relational_context=cognitive_state.relational_context,
+            )
+        elif activation_policy in {"retain", "selective"}:
+            carrier_output = self.carrier.prefill(
+                packet.values,
+                packet.valid_mask,
+                state=carrier_state,
+                relational_context=cognitive_state.relational_context,
+                project_output=False,
+            )
+        else:
+            raise RuntimeError(
+                "carrier resolved an unknown activation execution policy"
+            )
+        base_latent = (
+            carrier_output.latent * packet.valid_mask.unsqueeze(-1)
         )
-        base_latent = carrier_output.latent
         anchors = tuple(range(0, packet.length, stride))
+        anchor_indices = torch.tensor(
+            anchors, dtype=torch.int64, device=packet.values.device
+        )
+        event_mask = packet.valid_mask[:, anchor_indices]
         if cognition_mode == "off":
             count = len(anchors)
             batch = packet.batch
@@ -3119,8 +3158,13 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                 torch.zeros(
                     batch, count, dtype=torch.int64, device=packet.values.device
                 ),
+                event_mask,
                 zero, zero, zero, zero, zero_logits, zero_logits,
-                boolean, boolean, boolean, boolean, boolean, None,
+                boolean, boolean, boolean, boolean, boolean,
+                carrier_output.band_histories,
+                base_latent,
+                torch.zeros_like(base_latent),
+                None,
             )
         summaries, parent_ids, timestamps = [], [], []
         modalities, uncertainties, segments, boundaries = [], [], [], []
@@ -3128,12 +3172,24 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
         for anchor in anchors:
             causal_start = previous_anchor + 1
             causal_end = anchor + 1
-            summaries.append(base_latent[:, causal_start:causal_end].mean(1))
+            local_valid = packet.valid_mask[:, causal_start:causal_end]
+            local_weight = local_valid.to(base_latent.dtype)
+            summaries.append(
+                (
+                    base_latent[:, causal_start:causal_end]
+                    * local_weight.unsqueeze(-1)
+                ).sum(1)
+                / local_weight.sum(1, keepdim=True).clamp_min(1)
+            )
             parent_ids.append(packet.source_record_ids[:, anchor])
             timestamps.append(packet.timestamps[:, anchor])
             modalities.append(packet.modality_ids[:, anchor])
             uncertainties.append(
-                packet.uncertainty_seed[:, causal_start:causal_end].mean(1)
+                (
+                    packet.uncertainty_seed[:, causal_start:causal_end]
+                    * local_weight.unsqueeze(-1)
+                ).sum(1)
+                / local_weight.sum(1, keepdim=True).clamp_min(1)
             )
             segments.append(packet.segment_ids[:, anchor])
             local_boundaries = packet.boundary_classes[:, causal_start:causal_end]
@@ -3141,7 +3197,11 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                 packet.batch, dtype=torch.int64, device=packet.values.device
             )
             for offset in range(local_boundaries.shape[1]):
-                candidate = local_boundaries[:, offset]
+                candidate = torch.where(
+                    local_valid[:, offset],
+                    local_boundaries[:, offset],
+                    torch.zeros_like(local_boundaries[:, offset]),
+                )
                 boundary = torch.where(
                     (boundary == int(BoundaryClass.NONE))
                     & (candidate != int(BoundaryClass.NONE)),
@@ -3149,22 +3209,30 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                 )
             boundaries.append(boundary)
             previous_anchor = anchor
-        event_values = torch.stack(summaries, 1)
-        event_mask = torch.ones(
-            packet.batch, len(anchors), dtype=torch.bool, device=packet.values.device
+        event_values = (
+            torch.stack(summaries, 1) * event_mask.unsqueeze(-1)
         )
         event_timestamps = torch.stack(timestamps, 1)
+        event_parents = torch.stack(parent_ids, 1).masked_fill(
+            ~event_mask, -1
+        )
+        event_uncertainty = torch.stack(uncertainties, 1) * (
+            event_mask.unsqueeze(-1)
+        )
+        event_segments = torch.stack(segments, 1).masked_fill(
+            ~event_mask, -1
+        )
         event_packet = register_internal_inputs(
             event_values,
             event_mask,
-            parent_record_ids=torch.stack(parent_ids, 1).unsqueeze(-1),
+            parent_record_ids=event_parents.unsqueeze(-1),
             timestamps=event_timestamps,
             coordinates=event_timestamps.unsqueeze(-1),
             sample_intervals=packet.sample_intervals * stride,
             boundary_classes=torch.stack(boundaries, 1),
             modality_ids=torch.stack(modalities, 1),
-            uncertainty_seed=torch.stack(uncertainties, 1),
-            segment_ids=torch.stack(segments, 1),
+            uncertainty_seed=event_uncertainty,
+            segment_ids=event_segments,
             ledger=ledger,
             source_class=SourceClass.INFERRED,
             operator="mrcra:causal_event_summary:v1",
@@ -3272,6 +3340,7 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                         workspace_after=cognitive_state.workspace.active.sum(-1)[
                             batch_index
                         ].detach(),
+                        batch_index=batch_index,
                     )
                 receipts = cognitive_output.action_receipts
                 action_context = soft_choice_context(
@@ -3287,11 +3356,7 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                 policy_context = 0.5 * (action_context + relation_context)
                 event_type_context = soft_choice_context(
                     cognitive_output.event_type_logits[:, None],
-                    torch.ones(
-                        cognitive_output.event_type_logits.shape[0], 1,
-                        dtype=torch.bool,
-                        device=cognitive_output.event_type_logits.device,
-                    ),
+                    event_mask[:, event_index : event_index + 1],
                 )
                 proposal_probability = torch.sigmoid(
                     cognitive_output.event_proposal_logits
@@ -3306,10 +3371,14 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                 event_activation = proposal_probability * (
                     0.5 + 0.5 * completion_probability
                 )
+                active_event = event_mask[:, event_index]
+                event_activation = event_activation * active_event.to(
+                    event_activation.dtype
+                )
                 event_context = 0.5 * (
                     cognitive_output.event_soft_content + event_type_context
                 )
-                feedback = 0.5 * (
+                proposed_feedback = 0.5 * (
                     cognitive_output.cognitive_features
                     + cognitive_state.relational_context
                 ) + (
@@ -3319,12 +3388,19 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
                     self.config.cognitive.broadcast_gain_maximum
                     * event_activation[:, None] * torch.tanh(event_context)
                 )
+                feedback = torch.where(
+                    active_event[:, None], proposed_feedback, feedback
+                )
                 end = (
                     anchors[event_index + 1]
                     if event_index + 1 < len(anchors) else packet.length
                 )
                 context = self.output_context_adapter(torch.tanh(feedback))
-                modulated.append(base_latent[:, anchor:end] + context[:, None])
+                segment_mask = packet.valid_mask[:, anchor:end]
+                modulated.append(
+                    base_latent[:, anchor:end]
+                    + context[:, None] * segment_mask.unsqueeze(-1)
+                )
                 cycles.append(cognitive_output.cognitive_cycle_mask)
                 events.append(cognitive_output.events.active.sum(-1))
                 event_activations.append(event_activation)
@@ -3338,8 +3414,15 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
         validate_dataclass_tree(cognitive_state)
         output_latent = torch.cat(modulated, 1)
         feedback_rms = feedback.float().square().mean(-1).sqrt().max()
-        event_activation_mean = torch.stack(event_activations, 1).mean()
+        event_weights = event_mask.to(feedback.dtype)
+        event_activation_mean = (
+            torch.stack(event_activations, 1) * event_weights
+        ).sum() / event_weights.sum().clamp_min(1)
         active_node_count = torch.stack(active_node_counts, 1)
+        active_nodes_mean = (
+            active_node_count * event_weights
+        ).sum() / event_weights.sum().clamp_min(1)
+        active_nodes_max = (active_node_count * event_weights).max()
         return MRCRAIntegratedTrainingOutput(
             output_latent,
             MRCRAIntegratedTrainingState(
@@ -3347,10 +3430,11 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
             ),
             torch.stack(cycles, 1),
             torch.stack(events, 1),
+            event_mask,
             feedback_rms,
             event_activation_mean,
-            active_node_count.mean(),
-            active_node_count.max(),
+            active_nodes_mean,
+            active_nodes_max,
             torch.stack(proposal_rows, 1),
             torch.stack(end_rows, 1),
             torch.stack(opened_rows, 1),
@@ -3358,6 +3442,9 @@ class MultimodalRelationalContinuityResonanceNetwork(nn.Module):
             torch.stack(emitted_rows, 1),
             torch.stack(rejected_rows, 1),
             torch.stack(open_after_rows, 1),
+            carrier_output.band_histories,
+            base_latent,
+            output_latent - base_latent,
             first_hard_event,
         )
 

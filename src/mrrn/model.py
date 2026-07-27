@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+from time import perf_counter
 
 import torch
 from torch import Tensor, nn
@@ -10,6 +12,14 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .attention import AttentionCandidates, ResonantAttention
+from .carrier_execution import (
+    CarrierCompilationRegistry,
+    CarrierCompositeReceipt,
+    CompiledCarrierShapeKey,
+    flatten_tensor_tree,
+    fused_simplex_residual,
+    unflatten_tensor_tree,
+)
 from .config import MRRNConfig
 from .lifting import LiftingAnalysisBank, LiftingStreamState, ReconstructionContext, ScaleTensor
 from .mixer import (
@@ -122,6 +132,32 @@ class MRRNPrefillOutput:
     prediction: Tensor
     state: MRRNStreamState
     latent: Tensor
+    band_histories: tuple["CausalBandHistory | None", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CausalBandHistory:
+    """Every coefficient emitted by one carrier band during a causal prefill."""
+
+    band: ScaleTensor
+    end_positions: Tensor
+
+    def __post_init__(self) -> None:
+        if (
+            self.end_positions.ndim != 1
+            or self.end_positions.dtype != torch.int64
+            or self.end_positions.shape[0] != self.band.data.shape[1]
+        ):
+            raise ValueError(
+                "causal band end positions must be int64 and name every coefficient"
+            )
+        if self.end_positions.numel() and (
+            int(self.end_positions.min()) < self.band.support - 1
+            or bool((self.end_positions[1:] <= self.end_positions[:-1]).any())
+        ):
+            raise ValueError(
+                "causal band end positions must be increasing and have full support"
+            )
 
 
 def _local_candidates(
@@ -252,6 +288,14 @@ def _join_candidates(left: AttentionCandidates, right: AttentionCandidates) -> A
         torch.cat((left.scales, right.scales), 1), torch.cat((left.mask, right.mask), 1),
         torch.cat((left_kinds, right_kinds), 1),
     )
+
+
+def _history_tensor(values: list[Tensor]) -> Tensor:
+    """Return one static history tensor without copying the common one-chunk case."""
+
+    if not values:
+        raise ValueError("cannot materialize an empty carrier history")
+    return values[0] if len(values) == 1 else torch.cat(values, 1)
 
 
 def _landmark_candidates(
@@ -490,6 +534,10 @@ class MRRNBlock(nn.Module):
         self.branch_gates = nn.ModuleList(nn.Linear(width, branch_count) for width in widths)
         self._packed_projection_cache: PackedCache = {}
         self._compiled_chunk_cores: dict[int, object] = {}
+        self._compile_semantic_digest = sha256(
+            repr((config, layer_index)).encode("utf-8")
+        ).hexdigest()
+        self._compilation_registry = CarrierCompilationRegistry()
         self.relational_projections = (
             nn.ModuleList(
                 nn.Linear(config.relational_context_dim, width, bias=False) for width in widths
@@ -509,6 +557,9 @@ class MRRNBlock(nn.Module):
         self.landmark_count = max(1, min(8, config.attention_window // 4))
         self.attention_query_tile_size = config.attention_query_tile_size
         self.activation_checkpointing = config.activation_checkpointing
+        # Empty means every scale when the legacy boolean is enabled.  A
+        # nonempty set is the measured selective-execution policy.
+        self.activation_checkpoint_scales: frozenset[int] = frozenset()
         for gate in self.branch_gates:
             nn.init.zeros_(gate.weight)
             bias = [-2.0, 0.0, -2.0, 1.0]
@@ -523,11 +574,15 @@ class MRRNBlock(nn.Module):
     def initial_state(self, batch: int, *, device=None, dtype=None) -> BlockState:
         return BlockState(tuple(module.initial_state(batch, device=device, dtype=dtype) for module in self.resonators))
 
-    def enable_compiled_tensor_cores(self, *, mode: str = "default") -> None:
+    def enable_compiled_tensor_cores(
+        self, *, mode: str = "default", backend: str = "inductor",
+    ) -> None:
         """Compile pure per-scale compute while leaving state commits in Python."""
 
         if not hasattr(torch, "compile"):
             raise RuntimeError("this PyTorch build does not provide torch.compile")
+        if backend not in {"aot_eager", "inductor"}:
+            raise ValueError("unsupported carrier compiler backend")
         compiled: dict[int, object] = {}
         for scale, (resonator, mixer) in enumerate(zip(
             self.resonators, self.mixers, strict=True
@@ -555,13 +610,24 @@ class MRRNBlock(nn.Module):
                     mixer_module(normalized),
                 )
 
+            compile_arguments: dict[str, object] = {
+                "backend": backend,
+                "fullgraph": True,
+                "dynamic": False,
+            }
+            # Only Inductor defines the performance-mode vocabulary.  Passing
+            # an Inductor mode to AOTAutograd is ignored by some PyTorch
+            # versions and rejected by others, so keep the contract exact.
+            if backend == "inductor":
+                compile_arguments["mode"] = mode
             compiled[scale] = torch.compile(
-                tensor_core, fullgraph=False, dynamic=False, mode=mode
+                tensor_core, **compile_arguments
             )
         self._compiled_chunk_cores = compiled
 
     def disable_compiled_tensor_cores(self) -> None:
         self._compiled_chunk_cores.clear()
+        self._compilation_registry = CarrierCompilationRegistry()
 
     def _identity_and_branch(self, scale: int, normalized: Tensor) -> tuple[Tensor, Tensor]:
         """Share one matrix launch for two independent projections of the same input."""
@@ -648,7 +714,14 @@ class MRRNBlock(nn.Module):
                     next_resonator.previous_drive, local_value,
                 )
 
-            if self.activation_checkpointing and self.training and torch.is_grad_enabled():
+            checkpoint_scale = (
+                self.activation_checkpointing
+                and (
+                    not self.activation_checkpoint_scales
+                    or scale in self.activation_checkpoint_scales
+                )
+            )
+            if checkpoint_scale and self.training and torch.is_grad_enabled():
                 resonant, next_value, next_drive, local = checkpoint(
                     resonance_and_mixer, normalized, resonator_state.value,
                     resonator_state.previous_drive, use_reentrant=False,
@@ -668,18 +741,29 @@ class MRRNBlock(nn.Module):
             local = local * band.mask.unsqueeze(-1)
             time = step_times[scale]
             if scheduled[scale]:
+                recent_features = _history_tensor(
+                    state.recent_features[scale]
+                )
+                recent_times = _history_tensor(state.recent_times[scale])
+                recent_masks = _history_tensor(state.recent_masks[scale])
                 candidates = AttentionCandidates(
-                    torch.cat(state.recent_features[scale], 1),
-                    torch.cat(state.recent_times[scale], 1),
-                    torch.full_like(torch.cat(state.recent_times[scale], 1), float(band.scale)),
-                    torch.cat(state.recent_masks[scale], 1),
+                    recent_features,
+                    recent_times,
+                    torch.full_like(recent_times, float(band.scale)),
+                    recent_masks,
                 )
                 if scale + 1 < len(self.widths) and state.recent_features[scale + 1]:
-                    landmark_times = torch.cat(state.recent_times[scale + 1], 1)[:, -self.landmark_count :]
-                    landmark_mask = torch.cat(state.recent_masks[scale + 1], 1)[:, -self.landmark_count :]
+                    landmark_times = _history_tensor(
+                        state.recent_times[scale + 1]
+                    )[:, -self.landmark_count :]
+                    landmark_mask = _history_tensor(
+                        state.recent_masks[scale + 1]
+                    )[:, -self.landmark_count :]
                     landmark = AttentionCandidates(
                         self.landmark_values[scale](
-                            torch.cat(state.recent_features[scale + 1], 1)[:, -self.landmark_count :]
+                            _history_tensor(
+                                state.recent_features[scale + 1]
+                            )[:, -self.landmark_count :]
                         ),
                         landmark_times,
                         torch.full_like(landmark_times, float(scale + 1)),
@@ -709,10 +793,7 @@ class MRRNBlock(nn.Module):
             else:
                 attended = torch.zeros_like(band.data)
             identity, branch = self._identity_and_branch(scale, normalized)
-            delta = (
-                branch[..., 0:1] * resonant + branch[..., 1:2] * local
-                + branch[..., 2:3] * attended + branch[..., 3:4] * identity
-            )
+            branch_values = [resonant, local, attended, identity]
             if self.relational_projections is not None:
                 if relational_context is None:
                     relational = torch.zeros_like(band.data)
@@ -721,8 +802,11 @@ class MRRNBlock(nn.Module):
                         raise ValueError("stream relational_context must have shape (batch,features)")
                     relational = self.relational_projections[scale](relational_context).unsqueeze(1)
                     relational = relational * band.mask.unsqueeze(-1)
-                delta = delta + branch[..., 4:5] * relational
-            updated = (band.data + self.layer_scale[scale] * delta) * band.mask.unsqueeze(-1)
+                branch_values.append(relational)
+            updated = fused_simplex_residual(
+                band.data, branch, self.layer_scale[scale], band.mask,
+                *branch_values,
+            )
             output.append(ScaleTensor(
                 updated, band.mask, band.scale, band.sample_interval, band.support, band.kind
             ))
@@ -773,9 +857,11 @@ class MRRNBlock(nn.Module):
             ).expand(band.data.shape[0], -1)
             current_times.append(time)
             if state.recent_features[scale]:
-                prior_features = torch.cat(state.recent_features[scale], 1)
-                prior_masks = torch.cat(state.recent_masks[scale], 1)
-                prior_times = torch.cat(state.recent_times[scale], 1)
+                prior_features = _history_tensor(
+                    state.recent_features[scale]
+                )
+                prior_masks = _history_tensor(state.recent_masks[scale])
+                prior_times = _history_tensor(state.recent_times[scale])
                 histories.append(AttentionCandidates(
                     prior_features,
                     prior_times,
@@ -821,13 +907,43 @@ class MRRNBlock(nn.Module):
                 compiled_core=self._compiled_chunk_cores.get(scale),
             ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
                 if compiled_core is not None:
-                    return compiled_core(
-                        normalized_value,
-                        state_value,
-                        previous_drive,
-                        mask,
-                        normalized_value.new_tensor(interval),
+                    activation_policy = (
+                        "selective"
+                        if self.activation_checkpoint_scales
+                        else "whole_span"
+                        if self.activation_checkpointing
+                        else "retain"
                     )
+                    key = CompiledCarrierShapeKey(
+                        model_semantic_digest=self._compile_semantic_digest,
+                        device=str(normalized_value.device),
+                        dtype=str(normalized_value.dtype),
+                        batch=normalized_value.shape[0],
+                        padded_length=normalized_value.shape[1],
+                        scale=scale,
+                        activation_policy=activation_policy,
+                        torch_version=str(torch.__version__),
+                    )
+                    first = self._compilation_registry.register(key)
+                    compiled_started = perf_counter()
+                    try:
+                        compiled_result = compiled_core(
+                            normalized_value,
+                            state_value,
+                            previous_drive,
+                            mask,
+                            normalized_value.new_tensor(interval),
+                        )
+                    except Exception as error:
+                        self._compilation_registry.record_fallback(
+                            type(error).__name__
+                        )
+                    else:
+                        if first:
+                            self._compilation_registry.record_first_execution(
+                                key, perf_counter() - compiled_started
+                            )
+                        return compiled_result
                 resonant_value, next_resonator, _ = resonator.parallel(
                     normalized_value,
                     ResonatorState(state_value, previous_drive, steps),
@@ -842,7 +958,14 @@ class MRRNBlock(nn.Module):
                     local_value,
                 )
 
-            if self.activation_checkpointing and self.training and torch.is_grad_enabled():
+            checkpoint_scale = (
+                self.activation_checkpointing
+                and (
+                    not self.activation_checkpoint_scales
+                    or scale in self.activation_checkpoint_scales
+                )
+            )
+            if checkpoint_scale and self.training and torch.is_grad_enabled():
                 resonant, next_value, next_drive, local = checkpoint(
                     resonance_and_mixer,
                     normalized,
@@ -911,12 +1034,7 @@ class MRRNBlock(nn.Module):
             else:
                 attended = torch.zeros_like(band.data)
             identity, branch = self._identity_and_branch(scale, normalized)
-            delta = (
-                branch[..., 0:1] * resonant
-                + branch[..., 1:2] * local
-                + branch[..., 2:3] * attended
-                + branch[..., 3:4] * identity
-            )
+            branch_values = [resonant, local, attended, identity]
             if self.relational_projections is not None:
                 if relational_context is None:
                     relational = torch.zeros_like(band.data)
@@ -950,10 +1068,11 @@ class MRRNBlock(nn.Module):
                         "relational context must be (batch,features) or (batch,time,features)"
                     )
                 relational = relational * band.mask.unsqueeze(-1)
-                delta = delta + branch[..., 4:5] * relational
-            updated = (
-                band.data + self.layer_scale[scale] * delta
-            ) * band.mask.unsqueeze(-1)
+                branch_values.append(relational)
+            updated = fused_simplex_residual(
+                band.data, branch, self.layer_scale[scale], band.mask,
+                *branch_values,
+            )
             output.append(ScaleTensor(
                 updated,
                 band.mask,
@@ -1043,12 +1162,7 @@ class MRRNBlock(nn.Module):
             else:
                 attended, weights = torch.zeros_like(band.data), None
             identity, branch = self._identity_and_branch(scale, normalized)
-            delta = (
-                branch[..., 0:1] * resonant
-                + branch[..., 1:2] * local
-                + branch[..., 2:3] * attended
-                + branch[..., 3:4] * identity
-            )
+            branch_values = [resonant, local, attended, identity]
             if self.relational_projections is not None:
                 if relational_context is None:
                     relational = torch.zeros_like(band.data)
@@ -1069,8 +1183,11 @@ class MRRNBlock(nn.Module):
                 else:
                     raise ValueError("relational_context must be (batch,features) or (batch,time,features)")
                 relational = relational * band.mask.unsqueeze(-1)
-                delta = delta + branch[..., 4:5] * relational
-            updated = (band.data + self.layer_scale[scale] * delta) * band.mask.unsqueeze(-1)
+                branch_values.append(relational)
+            updated = fused_simplex_residual(
+                band.data, branch, self.layer_scale[scale], band.mask,
+                *branch_values,
+            )
             outputs.append(
                 ScaleTensor(updated, band.mask, band.scale, band.sample_interval, band.support, band.kind)
             )
@@ -1142,6 +1259,51 @@ class MRRN(nn.Module):
         self.memory_signature = nn.Linear(config.model_dim, config.model_dim)
         self.memory_value = nn.Linear(config.model_dim, config.model_dim)
         self.memory_write_policy = MemoryWritePolicy()
+        self._last_composite_receipt: CarrierCompositeReceipt | None = None
+        self.activation_execution_policy = (
+            "whole_span" if config.activation_checkpointing else "retain"
+        )
+        self.activation_checkpoint_scales: tuple[int, ...] = ()
+
+    def configure_activation_execution(
+        self,
+        policy: str,
+        *,
+        selective_scales: tuple[int, ...] = (),
+    ) -> None:
+        """Apply a measured activation policy without changing model weights."""
+
+        if policy not in {"retain", "selective", "whole_span"}:
+            raise ValueError("unknown carrier activation execution policy")
+        if (
+            policy == "selective"
+            and (
+                not selective_scales
+                or tuple(sorted(set(selective_scales))) != selective_scales
+                or min(selective_scales) < 0
+                or max(selective_scales) >= self.config.scales
+            )
+        ):
+            raise ValueError(
+                "selective activation execution requires valid unique scales"
+            )
+        if policy != "selective" and selective_scales:
+            raise ValueError(
+                "selective scales require the selective activation policy"
+            )
+        self.activation_execution_policy = policy
+        self.activation_checkpoint_scales = selective_scales
+        enabled = policy != "retain"
+        seen: set[int] = set()
+        for block in self.blocks:
+            if id(block) in seen:
+                continue
+            seen.add(id(block))
+            block.activation_checkpointing = enabled
+            block.activation_checkpoint_scales = (
+                frozenset(selective_scales)
+                if policy == "selective" else frozenset()
+            )
 
     def create_memories(self, batch: int) -> list[EideticMemory]:
         if batch <= 0:
@@ -1154,14 +1316,18 @@ class MRRN(nn.Module):
             for _ in range(batch)
         ]
 
-    def enable_compiled_tensor_cores(self, *, mode: str = "default") -> None:
+    def enable_compiled_tensor_cores(
+        self, *, mode: str = "default", backend: str = "inductor",
+    ) -> None:
         """Compile each unique block's pure chunk kernels exactly once."""
 
         seen: set[int] = set()
         for block in self.blocks:
             identity = id(block)
             if identity not in seen:
-                block.enable_compiled_tensor_cores(mode=mode)
+                block.enable_compiled_tensor_cores(
+                    mode=mode, backend=backend
+                )
                 seen.add(identity)
 
     def disable_compiled_tensor_cores(self) -> None:
@@ -1171,6 +1337,38 @@ class MRRN(nn.Module):
             if identity not in seen:
                 block.disable_compiled_tensor_cores()
                 seen.add(identity)
+
+    def compilation_receipt(self) -> dict[str, object]:
+        """Aggregate bounded compiler specialization telemetry."""
+
+        seen: set[int] = set()
+        shape_count = 0
+        compile_seconds = 0.0
+        fallback_count = 0
+        fallback_reasons: dict[str, int] = {}
+        for block in self.blocks:
+            if id(block) in seen:
+                continue
+            seen.add(id(block))
+            shape_count += block._compilation_registry.shape_count
+            compile_seconds += block._compilation_registry.compile_seconds
+            fallback_count += block._compilation_registry.fallback_count
+            for reason, count in (
+                block._compilation_registry.fallback_reasons.items()
+            ):
+                fallback_reasons[reason] = (
+                    fallback_reasons.get(reason, 0) + count
+                )
+        receipt: dict[str, object] = {
+            "compiled_shape_count": float(shape_count),
+            "compile_seconds": compile_seconds,
+            "fallback_count": float(fallback_count),
+            # With ``fullgraph=True`` any graph break becomes a compiler
+            # execution failure and therefore a visible portable fallback.
+            "graph_break_count": float(fallback_count),
+            "fallback_reasons": dict(sorted(fallback_reasons.items())),
+        }
+        return receipt
 
     def write_memory_step(
         self,
@@ -1433,6 +1631,30 @@ class MRRN(nn.Module):
         cursor = 0
         predictions: list[Tensor] = []
         latents: list[Tensor] = []
+        history_bands: list[list[ScaleTensor]] = [
+            [] for _ in range(self.config.scales)
+        ]
+        history_positions: list[list[Tensor]] = [
+            [] for _ in range(self.config.scales)
+        ]
+
+        def retain_active(
+            active: tuple[ScaleTensor | None, ...],
+            end_positions: tuple[Tensor | None, ...],
+        ) -> None:
+            if len(active) != self.config.scales or len(end_positions) != self.config.scales:
+                raise RuntimeError("prefill band history count differs from carrier scales")
+            for scale, (band, positions) in enumerate(
+                zip(active, end_positions, strict=True)
+            ):
+                if band is None:
+                    if positions is not None:
+                        raise RuntimeError("absent prefill band has end positions")
+                    continue
+                if positions is None or positions.shape[0] != band.data.shape[1]:
+                    raise RuntimeError("prefill band positions do not match emissions")
+                history_bands[scale].append(band)
+                history_positions[scale].append(positions)
 
         def token_context(position: int) -> Tensor | None:
             if relational_context is None or relational_context.ndim == 2:
@@ -1440,6 +1662,7 @@ class MRRN(nn.Module):
             return relational_context[:, position]
 
         while cursor < x.shape[1] and state.position % alignment:
+            end_position = state.position
             result = self.step(
                 x[:, cursor],
                 state,
@@ -1452,6 +1675,17 @@ class MRRN(nn.Module):
             if result.latent is None:
                 raise RuntimeError("stream prefill step omitted its latent")
             latents.append(result.latent.unsqueeze(1))
+            retain_active(
+                result.active_bands,
+                tuple(
+                    None
+                    if band is None
+                    else torch.tensor(
+                        [end_position], dtype=torch.int64, device=x.device
+                    )
+                    for band in result.active_bands
+                ),
+            )
             cursor += 1
         aligned_length = ((x.shape[1] - cursor) // alignment) * alignment
         if aligned_length:
@@ -1460,6 +1694,7 @@ class MRRN(nn.Module):
                 if relational_context is None or relational_context.ndim == 2
                 else relational_context[:, cursor : cursor + aligned_length]
             )
+            chunk_start = state.position
             chunk = self.forward_aligned_chunk(
                 x[:, cursor : cursor + aligned_length],
                 state,
@@ -1470,8 +1705,22 @@ class MRRN(nn.Module):
             state = chunk.state
             predictions.append(chunk.prediction)
             latents.append(chunk.latent)
+            retain_active(
+                chunk.bands,
+                tuple(
+                    torch.arange(
+                        chunk_start + band.support - 1,
+                        chunk_start + aligned_length,
+                        band.support,
+                        dtype=torch.int64,
+                        device=x.device,
+                    )
+                    for band in chunk.bands
+                ),
+            )
             cursor += aligned_length
         while cursor < x.shape[1]:
+            end_position = state.position
             result = self.step(
                 x[:, cursor],
                 state,
@@ -1484,6 +1733,17 @@ class MRRN(nn.Module):
             if result.latent is None:
                 raise RuntimeError("stream prefill step omitted its latent")
             latents.append(result.latent.unsqueeze(1))
+            retain_active(
+                result.active_bands,
+                tuple(
+                    None
+                    if band is None
+                    else torch.tensor(
+                        [end_position], dtype=torch.int64, device=x.device
+                    )
+                    for band in result.active_bands
+                ),
+            )
             cursor += 1
         prediction_width = self.config.resolved_output_dim if project_output else 0
         prediction = (
@@ -1496,7 +1756,210 @@ class MRRN(nn.Module):
             if latents
             else x.new_zeros(x.shape[0], 0, self.config.model_dim)
         )
-        return MRRNPrefillOutput(prediction, state, latent)
+        histories: list[CausalBandHistory | None] = []
+        for scale, (bands, positions) in enumerate(
+            zip(history_bands, history_positions, strict=True)
+        ):
+            if not bands:
+                histories.append(None)
+                continue
+            first = bands[0]
+            if any(
+                (
+                    band.scale,
+                    band.sample_interval,
+                    band.support,
+                    band.kind,
+                )
+                != (
+                    first.scale,
+                    first.sample_interval,
+                    first.support,
+                    first.kind,
+                )
+                for band in bands[1:]
+            ):
+                raise RuntimeError("prefill combined incompatible band histories")
+            histories.append(CausalBandHistory(
+                ScaleTensor(
+                    torch.cat([band.data for band in bands], 1),
+                    torch.cat([band.mask for band in bands], 1),
+                    first.scale,
+                    first.sample_interval,
+                    first.support,
+                    first.kind,
+                ),
+                torch.cat(positions),
+            ))
+        return MRRNPrefillOutput(prediction, state, latent, tuple(histories))
+
+    def prefill_coarse_checkpointed(
+        self,
+        x: Tensor,
+        mask: Tensor,
+        *,
+        state: MRRNStreamState | None = None,
+        sample_interval: float = 1.0,
+        relational_context: Tensor | None = None,
+    ) -> MRRNPrefillOutput:
+        """Checkpoint one complete carrier span as a pure tensor composite.
+
+        Public stream state remains richly typed.  At the checkpoint boundary
+        it is losslessly flattened into tensors plus immutable metadata, then
+        reconstructed afresh on both the original forward and the single
+        backward recomputation.  This prevents mutation from leaking between
+        executions and replaces the former layer-by-scale checkpoint forest
+        with one recomputation boundary.
+        """
+
+        if x.ndim != 3 or mask.shape != x.shape[:2] or mask.dtype != torch.bool:
+            raise ValueError(
+                "coarse carrier checkpoint requires aligned input and boolean mask"
+            )
+        if relational_context is not None and (
+            relational_context.ndim not in (2, 3)
+            or relational_context.shape[0] != x.shape[0]
+            or (
+                relational_context.ndim == 3
+                and relational_context.shape[1] != x.shape[1]
+            )
+        ):
+            raise ValueError("coarse checkpoint relational context is misaligned")
+        if not self.training or not torch.is_grad_enabled():
+            return self.prefill(
+                x,
+                mask,
+                state=state,
+                sample_interval=sample_interval,
+                relational_context=relational_context,
+                project_output=False,
+            )
+        if state is None:
+            state = self.initial_stream_state(
+                x.shape[0],
+                sample_interval=sample_interval,
+                device=x.device,
+                dtype=x.dtype,
+            )
+        elif state.batch != x.shape[0]:
+            raise ValueError("coarse checkpoint state batch does not match input")
+
+        # Import lazily to avoid the checkpoint serializer's model import
+        # forming a module cycle during package initialization.
+        from .checkpoint import stream_state_dict, stream_state_from_dict
+
+        state_tensors, state_spec = flatten_tensor_tree(
+            stream_state_dict(state)
+        )
+        holder: dict[str, object] = {}
+        has_relational = relational_context is not None
+
+        def carrier_composite(*arguments: Tensor) -> tuple[Tensor, ...]:
+            local_x, local_mask = arguments[:2]
+            cursor = 2
+            local_relational = (
+                arguments[cursor] if has_relational else None
+            )
+            cursor += int(has_relational)
+            local_state_tensors = arguments[cursor:]
+            local_state = stream_state_from_dict(
+                unflatten_tensor_tree(local_state_tensors, state_spec)
+            )
+            prior_checkpointing = tuple(
+                block.activation_checkpointing for block in self.blocks
+            )
+            try:
+                # This outer boundary is authoritative. Nested per-scale
+                # checkpoints would recompute the same carrier work again.
+                for block in self.blocks:
+                    block.activation_checkpointing = False
+                result = self.prefill(
+                    local_x,
+                    local_mask,
+                    state=local_state,
+                    sample_interval=sample_interval,
+                    relational_context=local_relational,
+                    project_output=False,
+                )
+            finally:
+                for block, enabled in zip(
+                    self.blocks, prior_checkpointing, strict=True
+                ):
+                    block.activation_checkpointing = enabled
+
+            history_tree = tuple(
+                None
+                if history is None
+                else {
+                    "band": {
+                        "data": history.band.data,
+                        "mask": history.band.mask,
+                        "scale": history.band.scale,
+                        "sample_interval": history.band.sample_interval,
+                        "support": history.band.support,
+                        "kind": history.band.kind,
+                    },
+                    "end_positions": history.end_positions,
+                }
+                for history in result.band_histories
+            )
+            output_tensors, output_spec = flatten_tensor_tree(
+                {
+                    "state": stream_state_dict(result.state),
+                    "histories": history_tree,
+                }
+            )
+            prior_spec = holder.get("output_spec")
+            if prior_spec is None:
+                holder["output_spec"] = output_spec
+            elif prior_spec != output_spec:
+                raise RuntimeError(
+                    "carrier checkpoint recomputation changed its static output tree"
+                )
+            return (result.latent, *output_tensors)
+
+        arguments: tuple[Tensor, ...] = (x, mask)
+        if relational_context is not None:
+            arguments += (relational_context,)
+        arguments += state_tensors
+        flattened = checkpoint(
+            carrier_composite,
+            *arguments,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+        if not isinstance(flattened, tuple) or not flattened:
+            raise RuntimeError("carrier composite returned an invalid tensor tuple")
+        output_spec = holder.get("output_spec")
+        if output_spec is None:
+            raise RuntimeError("carrier composite omitted its static output contract")
+        restored = unflatten_tensor_tree(flattened[1:], output_spec)
+        restored_state = stream_state_from_dict(restored["state"])
+        histories = tuple(
+            None
+            if item is None
+            else CausalBandHistory(
+                ScaleTensor(**item["band"]), item["end_positions"]
+            )
+            for item in restored["histories"]
+        )
+        self._last_composite_receipt = CarrierCompositeReceipt(
+            state_spec.digest,
+            output_spec.digest,
+            len(state_tensors),
+            sum(
+                0
+                if history is None
+                else 3
+                for history in histories
+            ),
+        )
+        return MRRNPrefillOutput(
+            flattened[0].new_zeros(x.shape[0], x.shape[1], 0),
+            restored_state,
+            flattened[0],
+            histories,
+        )
 
     def _offline_synthesis(
         self, bands: tuple[ScaleTensor, ...], context: ReconstructionContext

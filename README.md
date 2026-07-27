@@ -368,6 +368,118 @@ MRRN provides continuity, delay, scale, and efficient recurrent context. MRCRA
 provides explicit relation, epistemic status, memory policy, alternatives,
 correction, and action constraint. The intended unit is the coupled loop.
 
+### Causal Spectral Target Multiplexing
+
+**Causal Spectral Target Multiplexing (CSTM)** is the default auxiliary
+training objective on the integrated FineWeb path. It increases the number of
+causal learning constraints extracted from each physical corpus token without
+replaying the context, running another carrier forward pass, or performing
+another full-vocabulary projection.
+
+Every emitted MRRN coefficient ends at a known document-relative position. For
+a band with support \(q_s\), that coefficient predicts a complete future block
+of \(q_s\) token labels. Vocabulary identities are mapped through a fixed,
+non-trainable normalized Rademacher code \(\phi\). The target retains the block
+DC coefficient and its first order-sensitive Fourier harmonic:
+
+$$
+C_{s,k,m}
+=
+\frac{1}{\sqrt{q_s}}
+\sum_{r=0}^{q_s-1}
+\phi(y_{b+r})
+\exp\left(-2\pi i m r/q_s\right).
+$$
+
+The DC component identifies future block composition; the paired-real harmonic
+distinguishes different token orders with the same composition. The source
+state ends strictly before the first target token. Incomplete blocks, padded
+positions, and blocks crossing a packed-document boundary are rejected rather
+than padded or partially supervised.
+
+The predictor is shared across scales and horizons. It uses the carrier's
+existing synthesis adapters, a rank-eight bottleneck, scale and horizon
+embeddings, bounded harmonic phase rotation, and a zero-initialized cognitive
+residual gate. The zero gate makes the initial objective carrier-safe; it can
+open only if MRCRA's event/workspace feedback improves future-block prediction.
+The next block is always predicted, while one additional horizon from
+\(\{2,4,8\}\) rotates deterministically by optimizer step and scale.
+
+Targets are standardized by checkpointed per-scale running RMS and optimized
+with Huber loss:
+
+$$
+\mathcal L
+=
+\mathcal L_{\mathrm{CE}}
++
+\lambda_{\mathrm{CSTM}}
+\frac{
+\sum_{s,h} w_{s,h}
+\mathrm{Huber}
+\left(
+\frac{\widehat C_{s,k,h}-\mathrm{stopgrad}(C_{s,k+h})}
+{r_s+\epsilon}
+\right)
+}{
+\sum_{s,h}w_{s,h}
+}.
+$$
+
+Exact next-token CE remains the primary authority. CSTM gradients are computed
+separately, projected when they conflict with the task gradient, and capped
+relative to that gradient: 10% for the carrier, 5% for cognition, and 10% for
+the CSTM-only prediction head by default. Training begins with pure CE for
+100,000 physical tokens, then ramps CSTM to weight 0.04 over 400,000 tokens.
+These controls are checkpoint-bound and exposed under `--cstm-*`.
+
+The production executor does not backpropagate every CSTM obligation through
+every carrier span. It enumerates exact positive-weight obligations by
+**physical invocation and scale**, selects one with deterministic
+counter-based importance sampling, and activates a substrate VJP on a
+configurable fraction \(q\) of contexts. If obligation \(J\) has conditional
+probability \(p_J\), dense numerator \(S_J\), and context denominator \(W\),
+the pre-governance substrate estimator is
+
+$$
+\widehat{\mathcal L}_{\mathrm{substrate}}
+=\frac{S_J}{Wq p_J}.
+$$
+
+Its expectation is the original dense normalized objective. A small uniform
+mixture prevents any positive obligation from receiving a vanishing
+probability. This unbiasedness claim applies before nonlinear gradient
+projection and subsystem caps; those governance operations are intentionally
+bounded but are not linear expectation-preserving transforms.
+
+The CSTM prediction head is trained separately every context from the same
+sampled obligation with carrier coefficients, synthesis-adapter output, and
+cognitive residual detached. Its estimator is \(S_J/(Wp_J)\). On duty-active
+contexts a second, full-graph pass supplies the substrate gradient while
+explicitly excluding predictor parameters. Consequently there is at most one
+substrate VJP per packed context, predictor learning remains continuous, and
+neither gradient authority is counted twice. The sampler is a pure hash of the
+seed, optimizer step, target-authority digest, and schema version, so resume
+reconstructs the same decision without consuming global RNG.
+
+The accounting is deliberately non-deceptive:
+
+- `progress/tokens_seen` remains physical packed FineWeb token presentations;
+- `cstm/spectral_target_views` counts valid derived scale/horizon rows;
+- `cstm/coefficient_targets` counts predicted fixed-code coefficients;
+- `cstm/raw_token_view_equivalents` counts constituent-token participation in
+  multiscale targets and is explicitly not additional corpus data.
+
+The valid row weight is counted once for the complete packed context using the
+same boundary authority as target construction. The loss is therefore
+independent of how that context is partitioned for TBPTT graph release. Across
+gradient-accumulation contexts, CSTM counters are summed and ratios are
+recomputed from their summed numerators and denominators.
+
+For a 32,768-token context, the six production scale supports with two active
+horizons produce at most two derived target rows per physical token. This is
+correlated multiresolution supervision, not two new independent datasets.
+
 ### Critic and self-learning (experimental and unfinished)
 
 The repository contains an unfinished prototype training system called the
@@ -613,9 +725,9 @@ The model sizes below use the GPT-2 vocabulary of 50,257 tokens.
 
 | Profile | Parameters | Carrier | Intended use | Selection |
 | --- | ---: | --- | --- | --- |
-| Integrated ultralight | 1,299,669 | 6 scales, shared learned depth, 20-wide base | Fast mechanism experiments and CPU-constrained training while preserving the complete architectural graph; not a serious capability scale | `--ultralightmodel` |
-| Integrated light | 8,413,442 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate | `--lightmodel` |
-| Serious | 115,925,944 | 6 scales, unshared learned depth, 256-wide base | Full architecture training and serious evaluation | Default |
+| Integrated ultralight | 1,301,827 | 6 scales, shared learned depth, 20-wide base | Fast mechanism experiments and CPU-constrained training while preserving the complete architectural graph and CSTM head; not a serious capability scale | `--ultralightmodel` |
+| Integrated light | 8,416,803 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate and CSTM head | `--lightmodel` |
+| Serious | 115,931,878 | 6 scales, unshared learned depth, 256-wide base | Full architecture and CSTM training with serious evaluation | Default |
 | Legacy sequence MRRN | 4,695,023 | Sequence-only spectral carrier | Compatibility and carrier-only ablation | `--legacy-mrrn` |
 
 The parameter counts are construction-time invariants, not rounded marketing
@@ -652,6 +764,10 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+On macOS, `requirements.txt` installs MLX on Apple silicon and installs Apple's
+Cut Cross-Entropy package on every architecture. The trainer therefore has an
+optimized exact CCE implementation by default; it does not require CUDA.
 
 ### Windows PowerShell
 
@@ -735,10 +851,109 @@ generated = model.generate(
 
 generated_tokens = generated.tokens
 generated_provenance_ids = generated.generated_provenance_ids
+routing_receipts = generated.routing_receipts
 ```
 
 Meaningful generation requires trained weights. Checkpoint identity includes the
 complete model configuration, so incompatible profiles cannot be silently mixed.
+
+### Exact-authority softmax stack
+
+MRCRA does not replace its full-vocabulary probability model with sampled,
+hierarchical, or code-aliased softmax. The stack separates mathematical
+authority from execution:
+
+- Training and held-out likelihood retain exact full-vocabulary cross entropy.
+  The fused/tiled implementations remain dependency-free references. With the
+  CCE dependency installed, `auto` selects pretraining-safe Kahan Full-C on a
+  qualified CUDA device and Apple's optimized `torch.compile` implementation
+  on macOS or CPU only when the declared live-logit workspace can contain it.
+  Larger macOS/CPU workloads automatically use the exact tiled implementation,
+  because compiled CCE is fast but is not the memory-bounded kernel. The CUDA
+  mode preserves every classifier-row gradient;
+  `cce_exact` is the no-filtering CUDA audit backend. On macOS, the compiled
+  implementation is exact and filters neither classifier nor latent gradients.
+  If the external CCE package is unavailable, the native tiled implementation
+  remains an exact, memory-bounded fallback on every PyTorch platform.
+- Generation exposes the final carrier/cognitive latent without projecting
+  every prompt position into 50,257 logits.
+- A lazy `CertifiedBalancedVocabularyRouter` builds deterministic,
+  equal-capacity geometric clusters over the tied classifier.
+  Centroid/radius/bias bounds prove when the exact top-k threshold has been
+  found, including every threshold tie. If the proof is incomplete, the
+  implementation computes the dense head instead of returning an approximation.
+- Certified candidates remain compact through temperature and nucleus sampling;
+  they are not expanded back into a 50,257-entry tensor. A persistent boolean
+  vocabulary mask makes repetition lookup proportional to the evaluated
+  candidates instead of prompt length times candidate count.
+- On PyTorch MPS, the branch-heavy certificate controller and an immutable FP32
+  classifier shadow run on CPU while the recurrent actor remains on Metal.
+  Only the bounded latent and sampled token cross that boundary. This avoids
+  repeated MPS scalar synchronizations without changing any logit, bound, tie,
+  fallback, or sampling authority. CUDA and CPU execute locally.
+- The index is cryptographically bound to both tied weights and output bias.
+  Parameter mutation is detected before routing. The default stale-index policy
+  rebuilds; explicit error and dense-fallback policies are also available.
+- Repetition penalties participate in exact candidate refinement. The original
+  cluster bound remains conservative because the supported penalty can only
+  lower a seen token's logit.
+
+The router is inference metadata and contributes no trainable parameters. It is
+built lazily on the first eligible top-k generation request. Production exports
+can build and save it ahead of time:
+
+```python
+model.eval()
+model.save_vocabulary_router_index("checkpoint.vocabulary-router.pt")
+
+# A later process verifies the content digest before accepting the sidecar.
+model.load_vocabulary_router_index("checkpoint.vocabulary-router.pt")
+```
+
+Routing observability is available through `generated.routing_receipts` and
+`model.vocabulary_routing_metrics()`. It includes certificate and fallback
+rates, clusters refined, token dot products evaluated, avoided output vectors,
+bound rounds, routing time, stale-index events, and certificate margin.
+
+The 20-wide ultralight profile remains dense by default: measured projection
+savings at that width do not reliably repay routing and synchronization
+overhead. Widths 32 and above are eligible. An eligible router also disables
+further bound searches after a bounded fallback window demonstrates that the
+current checkpoint geometry is not certifying efficiently; exact dense
+projection remains available throughout.
+
+Qualifying PyTorch and inference-only MLX executors enable routing by default.
+Pass `VocabularyRouterConfig(enabled=False)` for a deliberate dense audit.
+
+The standard macOS installation already includes the CCE executor. Editable
+installs can request the complete Apple stack or CCE alone. Explicit backend
+selection is mainly useful for auditing because `auto` is the default:
+
+```bash
+python -m pip install -e '.[apple]'  # MLX + CCE on Apple silicon
+python -m pip install -e '.[cce]'
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend auto
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend torch_compile
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend cce_kahan_full_c
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend cce_exact
+python scripts/train_fineweb.py --lightmodel --exact-loss-backend tiled
+```
+
+The two `cce_*` policy names select their specialized kernels on supported
+CUDA hardware. On macOS they resolve to exact `torch_compile` CCE, or to native
+exact tiled CCE if the external package is absent or the workspace ceiling is
+exceeded; neither option disappears because CUDA is unavailable.
+
+`--maximum-compiled-cce-mib` controls the `auto` workspace ceiling (512 MiB by
+default). `--maximum-retained-loss-mib` independently controls whether tiled
+activations are retained or recomputed during backward.
+
+Trackio records the resolved backend ID, whether external CCE was available,
+whether compiled CCE fit the workspace, the estimated full-logit footprint, and
+the invariant that training still uses the exact full vocabulary.
+
+The aggressively filtered `cce` policy is intentionally not exposed for
+pretraining because rare classifier rows are also the tied input embeddings.
 
 ## FineWeb training
 
@@ -759,7 +974,7 @@ python scripts/train_fineweb.py \
 Use this for fast end-to-end architecture and training experiments under tight
 compute constraints. It runs the same integrated carrier and cognitive
 training authority as the larger profiles. PC-RASL is not constructed or run
-unless explicitly enabled:
+unless explicitly enabled. CSTM is enabled by default:
 
 ```bash
 python scripts/train_fineweb.py \
@@ -775,6 +990,27 @@ aggregation primitive while invoking the complete cognitive cycle once per two
 event chunks, avoiding the launch/control overhead that otherwise dominates a
 1.3M-parameter actor. `--cognitive-stride` remains an explicit experimental
 override.
+
+To run a matched CSTM ablation, use `--no-cstm`. This changes the checkpointed
+training contract and cannot be toggled silently during resume. CSTM schedule
+and gradient controls are available as:
+
+```text
+--cstm-weight
+--cstm-warmup-tokens
+--cstm-ramp-tokens
+--cstm-carrier-gradient-cap
+--cstm-cognitive-gradient-cap
+--cstm-head-gradient-cap
+--cstm-execution sampled|legacy-dense
+--cstm-sampling-duty-cycle 0.25
+--cstm-sampling-uniform-mixture 0.05
+```
+
+`legacy-dense` remains available for matched audits and old checkpoints. A
+legacy checkpoint with active dense CSTM cannot silently enter sampled
+execution; the resume must retain `legacy-dense` or explicitly pass
+`--allow-cstm-execution-upgrade`.
 
 ### Serious profile
 
@@ -806,6 +1042,118 @@ python scripts/train_fineweb.py \
   --resume
 ```
 
+### Optimized carrier execution
+
+Integrated FineWeb training defaults to deterministic document-major static
+batches. The planner groups documents with the same TBPTT span count, takes the
+elementwise maximum bucket signature for a candidate cohort, and uses a bounded
+dynamic program plus a measured carrier cost model to decide whether fewer
+launches justify additional padding. Rows remain stable for the complete
+document. An exact ordinal receipt rejects any dropped, duplicated, or invented
+next-token target, and padding is masked through the carrier, event path,
+provenance, exact CE, and CSTM. The plan records selected cost, legacy
+exact-signature cost, invocation counts, estimated savings, and cache use.
+
+The carrier uses portable custom first-order adjoints for the complex affine
+scan and branch-simplex residual. When activation checkpointing is required,
+one reversible tensor-tree boundary checkpoints the whole carrier span instead
+of independently recomputing every layer/scale fragment. These operations run
+on CPU, MPS, and CUDA. Optional compiler execution uses AOTAutograd on CPU/MPS
+and Inductor on CUDA; it remains an additional measured candidate, not an
+assumed optimization.
+
+Activation execution is now a measured, checkpointed execution authority
+rather than a model-semantic switch. Startup compares retained graphs,
+saved-tensor-census-selected scale checkpoints, and whole-span recomputation;
+it chooses the fastest finite policy that preserves the configured live-memory
+reserve. An explicit unsafe retain/selective request fails before optimization
+unless `--allow-unsafe-activation-policy` is also supplied. If the allocator
+still reports an OOM before any optimizer mutation, the trainer restores CSTM
+statistics, coverage, RNG, gradients, and the already-fetched packed batch,
+advances one rung toward safer recomputation, and retries exactly once. It
+never retries after PC-RASL critic mutation or after reaching whole-span
+recomputation.
+
+The resolved policy is shape-conditional within that safety authority. Cohorts
+small enough to fit the measured reserve retain their graphs; larger cohorts
+use the selected checkpoint partition or whole-span boundary. Retained,
+selective, and whole-span invocation counts and the exact physical-token cutoff
+are logged and checkpoint-bound. Selective partitioning is chosen against the
+reducible saved-tensor bytes—not total irreducible storage—so it cannot
+accidentally select every scale.
+
+The nominal TBPTT length is also a ceiling, not permission to violate a hard
+token or activation-memory limit. Before document extraction, the planner
+derives the largest single-row static bucket admitted by both authorities. A
+long document is deterministically divided at that memory-safe boundary while
+its recurrent/cognitive state, document identity, source provenance, target
+ordinals, and final-span authority continue across the extra handoff. If even
+the smallest bucket cannot fit, planning fails before model execution with the
+estimated and available byte counts. This prevents a rare long FineWeb
+document from turning an otherwise valid context into an OOM or a misleading
+“token budget” error.
+
+Sampled CSTM is similarly explicit. A counter-based, checkpoint-stable
+hierarchy selects at most one physical invocation/scale substrate obligation
+per context. A second deterministic without-replacement row sampler bounds
+token-support participations and applies exact first-order inclusion weights.
+Detached predictor updates remain frequent, while the substrate duty defaults
+to 0.25. The pre-governance estimator is unbiased for dense CSTM; conflict
+projection and norm caps are intentionally nonlinear safety authorities and
+are not described as unbiased. Coverage state, row/invocation probabilities,
+predictor/substrate counts, and the one-VJP hard bound are all persisted or
+logged.
+
+The defaults can be audited or tuned with:
+
+```bash
+--document-static-batching
+--no-document-static-batching
+--document-bucket-lengths 64 128 192 ... 3968 4032 4096
+--document-batch-token-budget 8192
+--document-grouping-policy cost-aware|exact-signature
+--document-plan-cache-capacity 128
+--activation-policy auto|retain|selective|whole-span
+--activation-memory-reserve-mib 4096
+--activation-calibration
+--allow-unsafe-activation-policy
+--cstm-max-substrate-vjps 1
+--cstm-target-participation-budget 8192
+--cstm-predictor-update-interval 1
+--trackio-remote-log-interval 4
+```
+
+Run the standalone semantic/materialization acceptance with:
+
+```bash
+python3.11 scripts/run_carrier_execution_acceptance.py
+python3.11 scripts/benchmark_mrcra_training_execution.py --profile quick --steps 3
+```
+
+The benchmark runs six required eager variants and one optional compiler
+candidate in fresh processes. It retains raw step times,
+median/minimum/maximum/MAD, RSS, swap delta, resolved policy, and phase timing.
+If compilation exceeds its hard budget, the child is terminated and reaped
+and a digest-bound rejection receipt is retained; an eager result is never
+mislabelled as compiled. The quick profile validates the procedure. The actual
+8.4M/32K hardware gate is deliberately separate and expensive:
+
+```bash
+python3.11 scripts/benchmark_mrcra_training_execution.py \
+  --profile production_8p4m_32k \
+  --steps 3
+```
+
+On the retained local Mac CPU, the production repaired default measured
+802.94 tok/s versus 235.87 tok/s for the fragmented serial dense-CSTM
+reference, a 3.40× speedup. Exact target bijection passed, sampled substrate
+work remained at no more than one VJP per context, and the CPU AOT compiler
+candidate was correctly rejected after its 300-second budget. These are
+matched local results, not universal absolute target-hardware claims. The
+matrix predates the final memory-safe long-document subdivision repair, so the
+strict source-digest completion validator requires that production matrix to be
+rerun before release qualification; the current-source quick matrix passes.
+
 ### Device selection
 
 `--device auto` is the default:
@@ -814,20 +1162,27 @@ python scripts/train_fineweb.py \
   available. This is unfinished behavior, not a support guarantee.
 - The CUDA path attempts BF16 when supported and dynamically scaled FP16
   otherwise.
-- Pure carrier tensor kernels may be compiled automatically on CUDA, but the
-  complete heterogeneous cognitive training graph is not yet CUDA-qualified.
+- Pure carrier tensor kernels may be compiled automatically on CUDA. CPU/MPS
+  explicit compiler experiments use AOTAutograd, but auto mode keeps the
+  measured portable eager composites unless compilation wins after
+  amortization. The complete heterogeneous CUDA training graph is not yet
+  CUDA-qualified.
 - On Apple silicon, the integrated light model defaults to CPU because its
   heterogeneous cognitive graph is launch-bound on MPS in matched local probes.
-- Carrier activation recomputation is selected automatically from executed
-  multiscale width, TBPTT span, precision, and physical memory capacity. The
-  ultralight 4,096-token CPU path normally retains activations; larger live
-  graphs retain checkpointing when the estimate exceeds their bounded budget.
-  `--activation-checkpointing` and `--no-activation-checkpointing` override the
-  policy explicitly, and the resolved estimate and reason are written to the
-  run manifest.
-- Four CPU intra-op workers and one inter-op worker remain the measured Apple
-  integrated defaults; increasing thread count is not assumed to increase
-  throughput for this heterogeneous graph.
+  Exact CCE remains available there: the official compiled path runs on CPU or
+  MPS, the native tiled fallback runs on CPU or MPS, and the separate MLX
+  primitive runs on Metal.
+- Activation execution is selected among `retain`, selective per-scale
+  checkpointing, and one whole-span checkpoint. Auto mode runs a bounded
+  carrier forward/backward calibration, verifies identical output and input
+  adjoint digests, measures peak memory, and chooses the fastest candidate that
+  leaves the declared live-memory reserve. Estimate-plus-live-memory selection
+  is only the calibration-disabled fallback. Activation policy is execution
+  identity, not learned-model identity.
+- `--cpu-threads 0` is the default. It benchmarks 2, 4, 6, and 8 intra-op
+  workers on the actual carrier, verifies identical output, selects the fastest,
+  and records every timing. `--cpu-interop-threads 1` remains the bounded
+  inter-op default. Explicit positive thread counts bypass calibration.
 - Explicit `cpu`, `mps`, `cuda`, and indexed CUDA selectors are exposed; the
   CUDA selectors remain experimental and unfinished.
 
@@ -853,7 +1208,18 @@ python -m pip install -e '.[apple]'
 ```
 
 It imports the same learned weights and fails closed for unsupported topology.
-The complete relational cognitive authority path remains the PyTorch reference.
+`MLXMRRN.decode_latents` omits the dense output projection, while
+`MLXMRRN.routed_top_k` evaluates centroid bounds and exact candidate logits on
+Metal using an immutable content-verified index. Its results and fallback
+receipts are tested against the PyTorch dense and certified references. The
+native `mlx_exact_tiled_cross_entropy` primitive likewise evaluates the exact
+full-vocabulary log partition in bounded tiles and is differentiated by MLX on
+Metal. It exists both as a direct primitive and as
+`MLXMRRN.linear_cross_entropy`. The cached compiled
+`MLXMRRN.linear_cross_entropy_and_grad` path returns the loss plus hidden,
+classifier-weight, and classifier-bias gradients; tests compare every value
+with dense PyTorch. The complete relational cognitive authority path remains
+the PyTorch reference.
 
 ### Default data and context contract
 
@@ -866,9 +1232,11 @@ The complete relational cognitive authority path remains the PyTorch reference.
 | Carrier TBPTT span | 4,096 tokens |
 | Ultralight cognitive stride | 128 tokens (two 64-token event chunks) |
 | Cognitive TBPTT horizon | 4 event cycles |
-| Full-softmax tile | 2,048 vocabulary entries |
+| Exact training softmax | Auto: Kahan Full-C CCE on qualified CUDA; workspace-bounded compiled exact CCE on macOS/CPU; native exact tiled fallback everywhere |
+| Full-softmax fallback tile | 4,096 vocabulary entries |
+| Generation vocabulary route | Certified 16-token clusters for widths ≥32; adaptive exact dense fallback |
 | Held-out split | Stable document-ID hash: 99% train, 0.5% progress probe, 0.5% independent guard |
-| Evaluation/checkpoint interval | 25 optimizer updates |
+| Evaluation/checkpoint interval | 100 optimizer updates |
 | PC-RASL | Disabled; no progress probe, trajectory capture, critic, replay, or auxiliary gradient |
 | PC-RASL opt-in observation interval | 5 optimizer updates |
 | PC-RASL opt-in progress probe | 2 fixed batches × 4,096 tokens |
@@ -877,8 +1245,9 @@ The complete relational cognitive authority path remains the PyTorch reference.
 
 Dataset and tokenizer revisions are pinned before training. Documents are packed
 for throughput, but document transitions are excluded from next-token loss and
-reset recurrent and cognitive state. Full-vocabulary cross entropy is exact and
-tiled for memory control; it is not sampled or approximated.
+reset recurrent and cognitive state. Full-vocabulary cross entropy is exact;
+CCE, fused, and tiled modes change execution and memory behavior, not the
+training distribution.
 
 Raw FineWeb supplies language targets but no external downstream consequence,
 so the trainer never relabels instantaneous task loss as reward. PC-RASL is
@@ -908,7 +1277,20 @@ receipts cannot be reconstructed honestly after the outcome. Format 10 already
 contains exact behavior evidence, so it migrates that evidence into the bounded
 consequence-driven schedule. Its ultralight 64-token training cadence advances
 to the new measured 128-token production policy while preserving learned actor,
-optimizer, and causal replay state. Format 12 makes PC-RASL opt-in. Resuming an
+optimizer, and causal replay state. Format 12 makes PC-RASL opt-in. Format 13
+adds the CSTM head, fixed target identity, running scale statistics, schedule,
+gradient-governance contract, and supervision accounting. Format 14 binds the
+exact full-vocabulary loss backend and numerical execution policy. Format 15
+binds deterministic document-major execution. Format 16 separates the exact
+semantic/optimization contract from interchangeable execution and observation
+policies. Model, tokenizer, source, retained-target digests, objective schedule,
+and optimizer semantics still compare exactly; activation retention,
+checkpoint granularity, device placement, document scheduling, logging, and
+dashboard cadence receive separate receipts. Every resume-time execution
+change appends its effective step, old/new digest, reason, and equivalence
+contract to checkpoint history. Format-15 migration removes activation
+checkpointing from model semantics rather than pretending recomputation changes
+the learned function. Resuming an
 older PC-RASL-enabled checkpoint without the opt-in flag preserves actor and
 task-optimizer state while retiring progress authority, critic, replay, pending
 credit, and auxiliary-gradient state from subsequent training.
@@ -928,6 +1310,8 @@ diagnostics/
 
 Checkpoints include model, optimizer, scheduler, AMP scaler, stream position,
 packer buffers, retained runtime state, provenance ledger, and random state.
+They also include the active execution receipt and append-only execution-policy
+history.
 Only an explicitly PC-RASL-enabled research run additionally stores progress
 authority, delayed trajectories, replay, critic/target critic, critic optimizer,
 calibrator, and performance-guard state.
@@ -935,8 +1319,18 @@ Local run directories and weight files are excluded from Git by default.
 
 ## Trackio dashboard
 
-Trackio logging and the local dashboard are enabled by default during training.
-MRCRA adds two architecture-specific top-level tabs. The **Spectral Network**
+Trackio metric logging and spectral evidence publication are enabled by default.
+The local web dashboard is deliberately launched as a separate, opt-in observer
+so its SQLite polling and chart rendering do not contend with training for CPU
+or memory. Remote metric delivery uses a bounded background queue and
+coalesces scalar rows at a default four-step cadence; the complete finite
+metric stream is retained in a bounded buffered local `metrics.jsonl` mirror.
+That mirror flushes periodically and at alerts, backpressure, artifact, and
+shutdown boundaries. A slow remote dashboard can therefore drop only
+intermediate observer copies rather than growing RAM without bound. Artifact
+publication drains the queue and diagnostic snapshots are checkpoint-coupled.
+MRCRA adds two architecture-specific top-level tabs. The
+**Spectral Network**
 tab can display a dedicated **Learning Progress** instrument alongside the
 carrier and phase observers. PC-RASL panels receive data only during an explicit
 experimental PC-RASL run:
@@ -960,12 +1354,27 @@ PYTHONPATH=src python scripts/show_trackio_dashboard.py \
   --project mrcra-fineweb
 ```
 
-Disable UI launch while retaining or disabling logging independently:
+Or explicitly colocate it with training when the machine has spare resources:
 
 ```bash
-python scripts/train_fineweb.py --lightmodel --no-dashboard
+python scripts/train_fineweb.py --lightmodel --dashboard
+```
+
+Disable logging and the dashboard together only when no live telemetry is
+wanted:
+
+```bash
 python scripts/train_fineweb.py --lightmodel --no-trackio --no-dashboard
 ```
+
+The bundled dashboard is resource bounded: it opens on the newest run, keeps
+smoothing opt-in, polls no more frequently than every ten seconds, rejects
+overlapping refreshes, caps fetched points per run, and lazily creates charts
+only when their metric groups are expanded. Historical run comparison remains
+available by selecting additional runs explicitly. The standalone launcher
+also avoids importing PyTorch or the MRCRA model stack during ordinary viewing;
+those dependencies are loaded only when an absent Trackio project must be
+reconstructed from a retained checkpoint.
 
 Dashboard artifacts are diagnostic observers. They do not participate in model
 authority, optimization decisions, or external action permission.
@@ -1011,6 +1420,17 @@ training runs are intentionally not stored in the public repository.
 | [1.3M parameter audit](outputs/mrcra_1p3m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
 | [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
+| [CSTM implementation report](outputs/cstm_implementation_report.md) | Target mathematics, causal alignment, prediction head, loss, gradient governance, checkpointing, accounting, tests, and empirical claim boundary |
+| [CSTM empirical acceptance](outputs/cstm_empirical_acceptance.json) | Deterministic evidence for DFT equivalence, order sensitivity, boundary isolation, integrated causality, trainability, gradient caps, token accounting, geometric work, and parameter bounds |
+| [Carrier execution optimization report](outputs/carrier_execution_optimization_report.md) | Document-major batching, mask authority, custom adjoints, whole-span checkpointing, backend policy, migration, telemetry, and verification |
+| [Carrier execution empirical acceptance](outputs/carrier_execution_empirical_acceptance.json) | Float64 forward/gradient equivalence, saved-tensor reduction, autograd-node reduction, checkpoint continuity, target bijection, and physical invocation reduction |
+| [Training-execution repair plan](outputs/mrcra_training_execution_repair_implementation_plan.md) | Causal bottleneck diagnosis, invariants, workstreams, production gates, rollback rules, and definition of done |
+| [Training-execution repair report](outputs/mrcra_training_execution_repair_implementation_report.md) | Implemented policy, batching, CSTM, compilation, OOM, observability, learning, soak, and test evidence with explicit production claim boundaries |
+| [Training-execution acceptance](outputs/mrcra_training_execution_acceptance.md) | Six fresh-process eager variants plus a bounded compiler-candidate receipt, with timing distributions, throughput ratios, target authority, and CSTM VJP gates |
+| [Trackio overhead acceptance](outputs/mrcra_trackio_overhead_acceptance.json) | Null-versus-bounded-Trackio step overhead and RSS evidence |
+| [Resource-soak acceptance](outputs/mrcra_resource_soak_acceptance.json) | Source-free process-isolated midpoint resume, 100 optimizer steps, RSS slope/range, checkpoint cleanup, thread cleanup, wall-clock closure, and finite-metric evidence; the 8.4M/32K soak remains a separate gate |
+| [Learning non-regression procedure](outputs/mrcra_learning_nonregression_procedure.json) | Source-free three-seed matched dense/sampled/CE-only procedural study with resume and subsystem-participation evidence; not a FineWeb quality claim |
+| [Exact-authority softmax acceptance](outputs/vocabulary_router_empirical_acceptance.json) | Dense-reference top-k identity, fail-closed routing, content binding, production-vocabulary work reduction, official macOS CCE, native tiled CCE, and MLX loss/gradient parity |
 | [Experimental PC-RASL implementation report](outputs/progress_conditioned_rasl_implementation_report.md) | Unfinished prototype authority, delayed replay, critic/controller path, gradient governance, resources, migration, observability, and claim boundaries |
 | [PC-RASL component acceptance](outputs/pc_rasl_empirical_acceptance.json) | Isolated prototype evidence for signed pressure, guards, critic learning, controller credit, gradient firewall, and subsystem caps; not end-to-end usefulness |
 | [Acceptance manifest](outputs/mrcra_acceptance_manifest.json) | Environment, commands, source hashes, and retained verification results |
@@ -1031,19 +1451,64 @@ Run only the focused unfinished PC-RASL component gates with:
 python scripts/run_pc_rasl_acceptance.py
 ```
 
+Run the complete deterministic CSTM empirical gates with:
+
+```bash
+python scripts/run_cstm_acceptance.py
+```
+
+Run the production-vocabulary exact-authority softmax gates with:
+
+```bash
+python scripts/run_vocabulary_router_acceptance.py --production-scale
+```
+
+Run the bounded observation, resume/resource, and paired-learning procedures
+independently with:
+
+```bash
+python3.11 scripts/benchmark_trackio_overhead.py --steps 100
+python3.11 scripts/run_mrcra_resource_soak.py --profile quick --steps 100
+python3.11 scripts/run_mrcra_learning_nonregression.py \
+  --profile quick \
+  --steps 3 \
+  --total-tokens 3072 \
+  --cstm-sampling-duty-cycle 1.0
+```
+
+The authoritative learning-quality study uses real disjoint FineWeb
+partitions, the 8.4M actor, 32K contexts, at least three seeds, and a matched
+token budget:
+
+```bash
+python3.11 scripts/run_mrcra_learning_nonregression.py \
+  --profile fineweb_8p4m_32k \
+  --steps 32 \
+  --total-tokens 1048576
+```
+
+That command intentionally remains distinct from the small source-free
+procedure artifact. It requires dataset access and enough wall time for nine
+complete train/evaluate/resume arms. The resumable raw journal is
+`outputs/mrcra_learning_nonregression_procedure_runs.json`; an interrupted
+study retains completed arms but is not a passing production report.
+
 Passing these gates means the currently encoded component contracts hold. It
 does not establish that PC-RASL improves a trained model or is ready for normal
 use.
 
-The retained initial-public-release evidence records:
+The retained acceptance manifest records:
 
-- 572 passing Python tests and 1 intentionally skipped self-referential
-  hash-ledger test during manifest construction; the same ledger test passes
-  after the evidence file is rebuilt, producing 573/573 passing tests;
+- the exact current Python test count, with the hash-ledger self-check
+  intentionally skipped only while that same manifest is being replaced;
 - passing frontend tests, lint, and production build;
 - passing empirical mechanism acceptance;
 - passing integrated cognitive-path acceptance;
 - passing bounded performance acceptance;
+- passing CSTM mathematical, causal, trainability, governance, accounting, and
+  parameter-bound acceptance;
+- fresh-process execution, bounded Trackio, resource-soak, and paired-learning
+  procedure artifacts;
 - source hashes for every retained acceptance input.
 
 These results establish implemented contracts, bounded causal effects, exact
@@ -1051,9 +1516,11 @@ resume behavior, and local mechanism learnability. They do not substitute for a
 seriously trained checkpoint, broad downstream evaluation, target-hardware
 qualification, or evidence of general cognition. In particular, the retained
 PC-RASL tests establish isolated prototype contracts rather than end-to-end
-usefulness, and they do not make PC-RASL finished. The acceptance suite also
-does not qualify CUDA hardware support; that path remains unfinished and under
-active development.
+usefulness, and they do not make PC-RASL finished. The 8.4M/32K production
+execution matrix has passed locally but requires a source-current rerun after
+the final planner edge repair; the full FineWeb three-seed learning matrix and
+100-step production soak remain incomplete. CUDA qualification also remains
+unfinished.
 
 ## License
 

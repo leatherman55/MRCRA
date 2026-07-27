@@ -9,6 +9,10 @@ from mrrn.language import (
     fineweb_27m_config,
     tiny_language_config,
 )
+from mrrn.vocabulary_router import (
+    RoutedVocabularyCandidates,
+    VocabularyRouterConfig,
+)
 from mrrn.lm_training import (
     ByteTextTokenizer,
     PackedTokenStream,
@@ -92,3 +96,79 @@ def test_language_configuration_rejects_noncausal_global_or_untied_shapes():
         MRRNLanguageModel(replace(base, enable_global_head=True))
     with pytest.raises(ValueError, match="input_dim"):
         MRRNLanguageModel(replace(base, input_dim=8))
+
+
+def test_generation_prefill_and_decode_never_invoke_the_dense_output_module(monkeypatch):
+    torch.manual_seed(41)
+    config = VocabularyRouterConfig(
+        cluster_size=4,
+        clustering_iterations=2,
+        initial_refinement_clusters=2,
+        maximum_refinement_clusters=128,
+        minimum_vocabulary_size=2,
+        minimum_model_dimension=1,
+    )
+    model = MRRNLanguageModel(
+        tiny_language_config(37),
+        vocabulary_router_config=config,
+    ).eval()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("generation executed the dense output module")
+
+    monkeypatch.setattr(model.actor.output_head, "forward", forbidden)
+    monkeypatch.setattr(RoutedVocabularyCandidates, "to_dense", forbidden)
+    monkeypatch.setattr(torch, "isin", forbidden)
+    generated = model.generate(
+        torch.tensor([[1, 2, 3]]),
+        maximum_new_tokens=4,
+        temperature=0,
+        top_k=5,
+        repetition_penalty=1.2,
+    )
+    assert generated.shape == (1, 7)
+    metrics = model.vocabulary_routing_metrics()
+    assert metrics["softmax/router/queries"] == 4
+    assert metrics["softmax/router/certificate_rate"] == 1
+
+
+def test_routed_and_dense_generation_have_identical_seeded_sampling_semantics():
+    torch.manual_seed(43)
+    routed = MRRNLanguageModel(
+        tiny_language_config(41),
+        vocabulary_router_config=VocabularyRouterConfig(
+            cluster_size=5,
+            clustering_iterations=2,
+            initial_refinement_clusters=2,
+            maximum_refinement_clusters=128,
+            minimum_vocabulary_size=2,
+            minimum_model_dimension=1,
+        ),
+    ).eval()
+    dense = MRRNLanguageModel(
+        tiny_language_config(41),
+        vocabulary_router_config=VocabularyRouterConfig(enabled=False),
+    ).eval()
+    dense.load_state_dict(routed.state_dict())
+    prompt = torch.tensor([[4, 8, 15, 16, 23, 9]])
+    routed_generator = torch.Generator().manual_seed(101)
+    dense_generator = torch.Generator().manual_seed(101)
+    expected = dense.generate(
+        prompt,
+        maximum_new_tokens=8,
+        temperature=0.7,
+        top_k=11,
+        top_p=0.83,
+        repetition_penalty=1.2,
+        generator=dense_generator,
+    )
+    actual = routed.generate(
+        prompt,
+        maximum_new_tokens=8,
+        temperature=0.7,
+        top_k=11,
+        top_p=0.83,
+        repetition_penalty=1.2,
+        generator=routed_generator,
+    )
+    torch.testing.assert_close(actual, expected)

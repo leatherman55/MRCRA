@@ -5,6 +5,7 @@
   import LoadingTrackio from "../components/LoadingTrackio.svelte";
   import { getSystemLogs, getSystemLogsBatch } from "../lib/api.js";
   import {
+    createSingleFlightPoller,
     getMetricsPollIntervalMs,
     isRateLimitCooldownActive,
     isTabHidden,
@@ -15,13 +16,15 @@
     downsample,
     logsHaveNewData,
   } from "../lib/dataProcessing.js";
+  import { DEFAULT_SMOOTHING } from "../lib/resourcePolicy.js";
+  import { pruneRunCache } from "../lib/selection.js";
   import { buildColorMap } from "../lib/stores.js";
 
   let {
     project = null,
     selectedRuns = [],
     allRuns = [],
-    smoothing = 5,
+    smoothing = DEFAULT_SMOOTHING,
     appBootstrapReady = false,
     realtimeEnabled = true,
     availableDevices = $bindable([]),
@@ -40,6 +43,7 @@
 
   let rawDataCache = new Map();
   let refreshTimer = null;
+  const runSystemPoll = createSingleFlightPoller();
 
   let runColorMap = $derived(buildColorMap(allRuns.length ? allRuns : selectedRuns));
 
@@ -291,6 +295,7 @@
     selectedRuns;
     appBootstrapReady;
     rawDataCache = project ? rawDataCache : new Map();
+    pruneRunCache(rawDataCache, selectedRuns);
     fetchNewRuns();
   });
 
@@ -333,10 +338,11 @@
   });
 
   onMount(() => {
-    refreshTimer = setInterval(
-      refreshCachedRuns,
-      getMetricsPollIntervalMs(),
-    );
+    refreshTimer = setInterval(() => {
+      runSystemPoll(refreshCachedRuns).catch((error) => {
+        console.error("Failed to poll system metric logs:", error);
+      });
+    }, getMetricsPollIntervalMs());
     return () => {
       if (refreshTimer) clearInterval(refreshTimer);
     };
@@ -525,7 +531,7 @@
       {@const orderedDirect = getOrderedMetrics(directKey, group.direct)}
       {@const comparisonMetrics = comparisonMetricsByGroup.get(groupName) ?? {}}
       {@const orderedComparisons = getOrderedMetrics(compareKey, Object.keys(comparisonMetrics))}
-      <Accordion label={groupName} open={true}>
+      <Accordion label={groupName} open={false}>
         {#if orderedDirect.length > 0}
           <div class="plot-grid">
             {#each orderedDirect as metric, i}

@@ -10,6 +10,7 @@ __pycache__/
 build/
 dist/
 work/
+tmp/
 .DS_Store
 
 # Local environments, credentials, and editor state.
@@ -26,6 +27,8 @@ venv/
 outputs/*
 !outputs/*.json
 !outputs/*.md
+outputs/mrcra_training_execution_matrix_smoke.json
+outputs/mrcra_training_execution_matrix_smoke.md
 *.ckpt
 *.pt
 *.pth
