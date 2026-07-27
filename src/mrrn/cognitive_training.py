@@ -6555,6 +6555,8 @@ class MRCRANextTokenTrainer:
                     self.config,
                     self._identity(),
                     resume=continuing,
+                    initial_step=self.state.step,
+                    initial_tokens=self.state.tokens_seen,
                 )
                 if self.config.trackio_enabled else _NullReporter()
             ),

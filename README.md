@@ -725,15 +725,18 @@ The model sizes below use the GPT-2 vocabulary of 50,257 tokens.
 
 | Profile | Parameters | Carrier | Intended use | Selection |
 | --- | ---: | --- | --- | --- |
-| Integrated ultralight | 1,301,827 | 6 scales, shared learned depth, 20-wide base | Fast mechanism experiments and CPU-constrained training while preserving the complete architectural graph and CSTM head; not a serious capability scale | `--ultralightmodel` |
+| Integrated ultralight | 2,699,463 | 6 scales, shared learned depth, 36-wide base | Fast mechanism experiments and constrained training while preserving the complete architectural graph, CSTM head, and certified-router eligibility; not a serious capability scale | `--ultralightmodel` |
 | Integrated light | 8,416,803 | 5 scales, shared learned depth, 96-wide base | Local development, architecture experiments, and lower-cost training while retaining the complete cognitive substrate and CSTM head | `--lightmodel` |
 | Serious | 115,931,878 | 6 scales, unshared learned depth, 256-wide base | Full architecture and CSTM training with serious evaluation | Default |
 | Legacy sequence MRRN | 4,695,023 | Sequence-only spectral carrier | Compatibility and carrier-only ablation | `--legacy-mrrn` |
 
 The parameter counts are construction-time invariants, not rounded marketing
-targets. The ultralight actor ties its 50,257 × 20 input/output embedding,
+targets. The ultralight actor ties its 50,257 × 36 input/output embedding,
 shares learned carrier depth across six independently stateful resolution
-scales, and reduces ranks and bounded runtime capacities. It does **not**
+scales, and keeps bounded runtime capacities small. Its four heads, rank-two
+MIMO coupling, 9-to-12 resonance modes, six-mode/order spectral activation, and
+rank-eight relational adapter distribute the enlarged budget across both
+carrier and cognition. It does **not**
 delete the relational branch, event loop, workspace, memories, reconstruction,
 world model, controller, metacognition, viability, or PC-RASL interfaces.
 Reproduce the audits with:
@@ -745,7 +748,7 @@ python scripts/report_mrcra_parameters.py
 ```
 
 Detailed subsystem allocations are retained in
-[`outputs/mrcra_1p3m_parameter_report.json`](outputs/mrcra_1p3m_parameter_report.json),
+[`outputs/mrcra_2p7m_parameter_report.json`](outputs/mrcra_2p7m_parameter_report.json),
 [`outputs/mrcra_8p4m_parameter_report.json`](outputs/mrcra_8p4m_parameter_report.json)
 and
 [`outputs/mrcra_120m_parameter_report.json`](outputs/mrcra_120m_parameter_report.json).
@@ -915,12 +918,12 @@ Routing observability is available through `generated.routing_receipts` and
 rates, clusters refined, token dot products evaluated, avoided output vectors,
 bound rounds, routing time, stale-index events, and certificate margin.
 
-The 20-wide ultralight profile remains dense by default: measured projection
-savings at that width do not reliably repay routing and synchronization
-overhead. Widths 32 and above are eligible. An eligible router also disables
-further bound searches after a bounded fallback window demonstrates that the
-current checkpoint geometry is not certifying efficiently; exact dense
-projection remains available throughout.
+The 36-wide ultralight profile is now eligible for certified routing; the
+retired 20-wide profile was not. The router still disables further bound
+searches after a bounded fallback window demonstrates that the current
+checkpoint geometry is not certifying efficiently. Exact dense projection
+remains available throughout, so eligibility never converts an optimization
+heuristic into model authority.
 
 Qualifying PyTorch and inference-only MLX executors enable routing by default.
 Pass `VocabularyRouterConfig(enabled=False)` for a deliberate dense audit.
@@ -988,7 +991,7 @@ The ultralight production path uses a measured 128-token cognitive stride by
 default. This retains the 64-token event chunk as the carrier-to-cognition
 aggregation primitive while invoking the complete cognitive cycle once per two
 event chunks, avoiding the launch/control overhead that otherwise dominates a
-1.3M-parameter actor. `--cognitive-stride` remains an explicit experimental
+2.7M-parameter actor. `--cognitive-stride` remains an explicit experimental
 override.
 
 To run a matched CSTM ablation, use `--no-cstm`. This changes the checkpointed
@@ -1416,8 +1419,8 @@ training runs are intentionally not stored in the public repository.
 | --- | --- |
 | [MRCRA architecture specification](outputs/multimodal_relational_continuity_resonance_architecture.md) | Complete cognitive architecture, invariants, authority boundaries, training contracts, and acceptance criteria |
 | [MRRN mathematical specification](outputs/multiresolution_resonance_network_spec.md) | Spectral carrier equations, attention, recurrent state, activation, input/output contracts, and scaling behavior |
-| [1.3M ultralight design](outputs/mrcra_1p3m_design_report.md) | Parameter rationale, preserved mechanisms, carrier/cognitive allocations, training integration, verification, and claim boundary |
-| [1.3M parameter audit](outputs/mrcra_1p3m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
+| [2.7M ultralight design](outputs/mrcra_2p7m_design_report.md) | Parameter rationale, preserved mechanisms, carrier/cognitive allocations, training integration, verification, and claim boundary |
+| [2.7M parameter audit](outputs/mrcra_2p7m_parameter_report.json) | Exact ultralight-profile configuration and subsystem parameter allocation |
 | [8.4M parameter audit](outputs/mrcra_8p4m_parameter_report.json) | Exact light-profile configuration and subsystem parameter allocation |
 | [115.9M parameter audit](outputs/mrcra_120m_parameter_report.json) | Exact serious-profile configuration and subsystem parameter allocation |
 | [CSTM implementation report](outputs/cstm_implementation_report.md) | Target mathematics, causal alignment, prediction head, loss, gradient governance, checkpointing, accounting, tests, and empirical claim boundary |

@@ -107,7 +107,7 @@ def build_trainer(
 ) -> MRCRANextTokenTrainer:
     if profile == "quick":
         tokenizer = ByteTextTokenizer()
-        model_config = MRCRAConfig.ultralight_1p3m(
+        model_config = MRCRAConfig.ultralight_2p7m(
             output_dim=tokenizer.vocabulary_size
         )
         fixture_profile = "unit_1k"

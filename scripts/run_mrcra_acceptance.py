@@ -147,10 +147,10 @@ def source_hashes() -> dict[str, str]:
         ROOT / "outputs" / "mrcra_training_execution_completion_validation.json",
         ROOT / "outputs" / "mrcra_training_execution_repair_implementation_plan.md",
         ROOT / "outputs" / "mrcra_training_execution_repair_implementation_report.md",
-        ROOT / "outputs" / "mrcra_1p3m_parameter_report.json",
+        ROOT / "outputs" / "mrcra_2p7m_parameter_report.json",
         ROOT / "outputs" / "mrcra_8p4m_parameter_report.json",
         ROOT / "outputs" / "mrcra_120m_parameter_report.json",
-        ROOT / "outputs" / "mrcra_1p3m_design_report.md",
+        ROOT / "outputs" / "mrcra_2p7m_design_report.md",
         ROOT / "outputs" / "cstm_implementation_report.md",
         ROOT / "outputs" / "carrier_execution_optimization_report.md",
     ))

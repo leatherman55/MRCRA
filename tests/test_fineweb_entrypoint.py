@@ -8,12 +8,14 @@ import sys
 import pytest
 import torch
 
+import mrrn.language as language_module
 from mrrn.cognitive_surprise import CognitiveResonantAdjointSurpriseLearner
 from mrrn.cognitive_training import (
     MRCRATrainingConfig, MRCRA_TRAINING_FORMAT_VERSION,
     progress_conditioned_rasl_configuration,
 )
 from mrrn.language import MRCRALanguageModel
+from mrrn.vocabulary_router import VocabularyRouterConfig
 from scripts.train_mrcra_fineweb import (
     parser, production_cognitive_stride, production_configuration,
     production_profile, resolve_activation_checkpointing,
@@ -58,7 +60,7 @@ def test_lightmodel_flag_selects_the_strict_8p4m_profile():
     assert serious.actor_parameter_minimum == 110_000_000
 
 
-def test_ultralightmodel_selects_exact_complete_1p3m_profile_and_names():
+def test_ultralightmodel_selects_exact_complete_2p7m_profile_and_names():
     ultralight = production_configuration(
         50_257, lightmodel=False, ultralightmodel=True
     )
@@ -67,18 +69,18 @@ def test_ultralightmodel_selects_exact_complete_1p3m_profile_and_names():
         lightmodel=False, ultralightmodel=True, total_tokens=20_000_000
     )
 
-    assert model.parameter_count == 1_301_827
-    assert ultralight.actor_parameter_minimum == 1_290_000
-    assert ultralight.actor_parameter_maximum == 1_310_000
-    assert ultralight.carrier.model_dim == ultralight.cognitive.workspace_dim == 20
+    assert model.parameter_count == 2_699_463
+    assert ultralight.actor_parameter_minimum == 2_690_000
+    assert ultralight.actor_parameter_maximum == 2_710_000
+    assert ultralight.carrier.model_dim == ultralight.cognitive.workspace_dim == 36
     assert ultralight.carrier.scales == 6
-    assert selected.name == "mrcra_1p3m_ultralight"
-    assert selected.model_authority == "mrcra-ultralight-1p3m-fineweb-stage1"
+    assert selected.name == "mrcra_2p7m_ultralight"
+    assert selected.model_authority == "mrcra-ultralight-2p7m-fineweb-stage1"
     assert selected.output_directory.endswith(
-        "mrcra-1p3m-fineweb-20000000-tokens"
+        "mrcra-2p7m-fineweb-20000000-tokens"
     )
     assert selected.run_name == (
-        "mrcra-1p3m-ultralight-integrated-fineweb-"
+        "mrcra-2p7m-ultralight-integrated-fineweb-"
         "20000000-tokens-32k"
     )
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -89,6 +91,32 @@ def test_ultralightmodel_selects_exact_complete_1p3m_profile_and_names():
         production_profile(
             lightmodel=True, ultralightmodel=True, total_tokens=20_000_000
         )
+
+
+def test_ultralightmodel_is_eligible_for_the_default_certified_router(monkeypatch):
+    configuration = production_configuration(
+        50_257, lightmodel=False, ultralightmodel=True
+    )
+    model = MRCRALanguageModel(configuration)
+    router_config = VocabularyRouterConfig()
+    constructed: list[tuple[torch.Tensor, torch.Tensor, VocabularyRouterConfig]] = []
+    sentinel = object()
+
+    def capture_router(weight, bias, config):
+        constructed.append((weight, bias, config))
+        return sentinel
+
+    monkeypatch.setattr(
+        language_module, "CertifiedBalancedVocabularyRouter", capture_router
+    )
+    assert configuration.carrier.model_dim == 36
+    assert configuration.carrier.model_dim >= router_config.minimum_model_dimension
+    assert model.vocabulary_size >= router_config.minimum_vocabulary_size
+    assert model.build_vocabulary_router() is sentinel
+    assert len(constructed) == 1
+    assert constructed[0][0] is model.token_embedding.weight
+    assert constructed[0][1] is model.cognitive.carrier.output_head.bias
+    assert constructed[0][2] == router_config
 
 
 def test_ultralight_parameter_report_is_reproducible(tmp_path):
@@ -109,8 +137,8 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     )
     assert completed.returncode == 0, completed.stdout
     report = json.loads(output.read_text(encoding="utf-8"))
-    assert report["model_profile"] == "mrcra_1p3m_ultralight"
-    assert report["parameter_count"] == report["trainable_parameter_count"] == 1_301_827
+    assert report["model_profile"] == "mrcra_2p7m_ultralight"
+    assert report["parameter_count"] == report["trainable_parameter_count"] == 2_699_463
     assert report["declared_range"]["passed"] is True
     assert report["tied_token_and_output_weights"] is True
     assert report["configuration"]["carrier"]["scales"] == 6
@@ -118,7 +146,7 @@ def test_ultralight_parameter_report_is_reproducible(tmp_path):
     assert report["parameter_count_by_subsystem"]["cognitive.workspace_graph"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.controller"] > 0
     assert report["parameter_count_by_subsystem"]["cognitive.world_model"] > 0
-    assert report["parameter_count_by_subsystem"]["cstm_predictor"] == 2_158
+    assert report["parameter_count_by_subsystem"]["cstm_predictor"] == 2_414
 
 
 def test_lightmodel_pc_rasl_is_a_compact_nonduplicating_production_learner():
@@ -166,8 +194,8 @@ def test_ultralight_pc_rasl_remains_bounded_and_does_not_duplicate_actor():
         parameter.numel() for parameter in learner.critic.parameters()
     )
 
-    assert critic_parameters == 94_621
-    assert critic_parameters / actor.parameter_count < 0.075
+    assert critic_parameters == 104_077
+    assert critic_parameters / actor.parameter_count < 0.04
     assert learner.target_actor is None
     assert learner.target_critic is not learner.critic
 
@@ -281,13 +309,13 @@ def test_ultralight_uses_measured_stride_and_memory_aware_checkpoint_policy(
     assert production_cognitive_stride(
         ultralight, ultralightmodel=True, override=256
     ) == 256
-    assert resolved.carrier.activation_checkpointing is False
+    assert resolved.carrier.activation_checkpointing is True
     assert policy["carrier_activation_checkpointing_policy"] == (
-        "automatic_retain_within_budget"
+        "automatic_recompute_over_budget"
     )
     assert (
         policy["estimated_uncheckpointed_carrier_activation_bytes"]
-        < policy["carrier_activation_memory_budget_bytes"]
+        > policy["carrier_activation_memory_budget_bytes"]
     )
 
 
@@ -431,7 +459,7 @@ def test_canonical_smoke_forwards_compiled_cce_workspace_policy(tmp_path):
     assert manifest["runtime"]["exact_loss_backend"] == "tiled"
 
 
-def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
+def test_ultralight_smoke_runs_the_real_2p7m_actor_offline(tmp_path):
     output = tmp_path / "ultralight-fineweb-smoke"
     completed = run_entrypoint(
         "--smoke-test",
@@ -443,13 +471,13 @@ def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
         "--no-trackio",
     )
     assert completed.returncode == 0, completed.stdout
-    assert "MRCRA actor: 1,301,827 parameters" in completed.stdout
+    assert "MRCRA actor: 2,699,463 parameters" in completed.stdout
 
     manifest = json.loads(
         (output / "run_manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["model_profile"] == "mrcra_1p3m_ultralight"
-    assert manifest["model_parameters"] == 1_301_827
+    assert manifest["model_profile"] == "mrcra_2p7m_ultralight"
+    assert manifest["model_parameters"] == 2_699_463
     assert manifest["tokenizer"] == {
         "kind": "utf8-bytes-production-width-smoke",
         "vocabulary_size": 50_257,
@@ -458,12 +486,12 @@ def test_ultralight_smoke_runs_the_real_1p3m_actor_offline(tmp_path):
     }
     carrier = manifest["model_config"]["carrier"]
     cognition = manifest["model_config"]["cognitive"]
-    assert carrier["model_dim"] == cognition["workspace_dim"] == 20
+    assert carrier["model_dim"] == cognition["workspace_dim"] == 36
     assert carrier["scales"] == 6
     assert carrier["share_depth_parameters"] is True
     assert all(cognition[name] is True for name in INTEGRATED_FLAGS)
     training = manifest["training_config"]
-    assert training["run_name"] == "mrcra-1p3m-ultralight-smoke"
+    assert training["run_name"] == "mrcra-2p7m-ultralight-smoke"
     assert training["integrated_cognitive_path"] is True
     assert training["cstm_enabled"] is True
     assert manifest["cstm_effective"] is True

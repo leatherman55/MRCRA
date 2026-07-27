@@ -219,7 +219,7 @@ class _TenTokenTokenizer:
 
 def test_ultralight_short_prompt_encodes_inactive_scales_as_json_null():
     torch.manual_seed(20260722)
-    config = MRCRAConfig.ultralight_1p3m(output_dim=50_257)
+    config = MRCRAConfig.ultralight_2p7m(output_dim=50_257)
     model = MRCRALanguageModel(
         config, model_authority="ultralight-diagnostic-regression",
     )

@@ -227,7 +227,7 @@ The retained CSTM acceptance proves direct-DFT equivalence, order sensitivity,
  boundary isolation, strict integrated causality, predictor learning
 (`final/initial = 0.193`), six governed overlapping subsystems, cap ratio
 `0.99999994`, finite JSON evidence, unchanged physical-token accounting, and a
-1.3M-profile CSTM head of 2,158 parameters.
+2.7M-profile CSTM head of 2,414 parameters.
 
 ## 6. Exact vocabulary loss and tensor materialization
 

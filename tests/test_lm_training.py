@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 import sys
-from threading import Event
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -290,6 +290,8 @@ class _TrackioModule:
     def __init__(self, *, show_error=False):
         self.events = []
         self.show_error = show_error
+        self.current_run = None
+        self.persisted_run_ids = set()
         class Artifact:
             def __init__(self, name, type, description=None, metadata=None):
                 self.name, self.type = name, type
@@ -304,15 +306,50 @@ class _TrackioModule:
 
     def init(self, **kwargs):
         self.events.append(("init", kwargs))
-        return object()
+        owner = self
+
+        class Run:
+            id = "test-trackio-run-id"
+            name = kwargs["name"]
+
+            def log(self, metrics, step=None):
+                owner._record_log(metrics, step=step)
+
+        self.current_run = Run()
+        return self.current_run
+
+    def Api(self):
+        owner = self
+
+        class Api:
+            def runs(self, project):
+                if (
+                    owner.current_run is None
+                    or owner.current_run.id not in owner.persisted_run_ids
+                ):
+                    return []
+                return [
+                    SimpleNamespace(
+                        id=owner.current_run.id,
+                        name=owner.current_run.name,
+                        project=project,
+                    )
+                ]
+
+        return Api()
 
     def show(self, **kwargs):
         self.events.append(("show", kwargs))
         if self.show_error:
             raise RuntimeError("dashboard unavailable")
 
-    def log(self, metrics, *, step):
+    def _record_log(self, metrics, *, step):
         self.events.append(("log", step, metrics))
+        if self.current_run is not None:
+            self.persisted_run_ids.add(self.current_run.id)
+
+    def log(self, metrics, *, step):
+        self._record_log(metrics, step=step)
 
     def alert(self, **kwargs):
         self.events.append(("alert", kwargs))
@@ -348,7 +385,9 @@ def test_trackio_reporter_logs_jsonl_dashboard_warning_and_rejects_nonfinite(tmp
         reporter.log({"bad": float("nan")}, step=3)
     reporter.finish()
     records = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
-    assert records[0]["kind"] == "dashboard_warning"
+    assert records[0]["kind"] == "trackio_run_registration"
+    assert records[0]["visible_before_dashboard"] is True
+    assert records[1]["kind"] == "dashboard_warning"
     assert any(record["kind"] == "metrics" for record in records)
     assert any(record["kind"] == "spectral_snapshot" for record in records)
     assert any(record["kind"] == "phase_transition_trace" for record in records)
@@ -360,6 +399,9 @@ def test_trackio_reporter_logs_jsonl_dashboard_warning_and_rejects_nonfinite(tmp
     assert trackio.events[0][1]["auto_log_cpu"] is False
     show = next(event for event in trackio.events if event[0] == "show")
     assert Path(show[1]["frontend_dir"], "mrrn-spectral-view.html").is_file()
+    registration = next(event for event in trackio.events if event[0] == "log")
+    assert registration == ("log", 0, {"progress/tokens_seen": 0.0})
+    assert trackio.events.index(registration) < trackio.events.index(show)
     with pytest.raises(FileExistsError, match="already exists"):
         TrackioReporter(config, {}, resume=False)
 
@@ -370,9 +412,10 @@ def test_trackio_remote_delivery_is_bounded_and_local_stream_is_complete(
     gate = Event()
 
     class SlowTrackio(_TrackioModule):
-        def log(self, metrics, *, step):
-            gate.wait(timeout=2.0)
-            super().log(metrics, step=step)
+        def _record_log(self, metrics, *, step):
+            if "progress/tokens_seen" not in metrics:
+                gate.wait(timeout=2.0)
+            super()._record_log(metrics, step=step)
 
     trackio = SlowTrackio()
     monkeypatch.setitem(sys.modules, "trackio", trackio)
@@ -433,7 +476,7 @@ def test_trackio_coalesces_remote_scalars_but_retains_every_local_row(
     remote_steps = [
         event[1] for event in trackio.events if event[0] == "log"
     ]
-    assert remote_steps == [4, 8, 10]
+    assert remote_steps == [0, 4, 8, 10]
     records = [
         json.loads(line)
         for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
@@ -446,6 +489,45 @@ def test_trackio_coalesces_remote_scalars_but_retains_every_local_row(
     )
     assert summary["coalesced_remote_metric_rows"] == 7
     assert summary["dropped_remote_metric_rows"] == 0
+
+
+def test_trackio_writer_uses_explicit_run_outside_initializing_thread(
+    tmp_path, monkeypatch,
+):
+    initializing_thread = get_ident()
+
+    class ContextBoundTrackio(_TrackioModule):
+        def log(self, metrics, *, step):
+            if get_ident() != initializing_thread:
+                raise RuntimeError("Call trackio.init() before trackio.log().")
+            super().log(metrics, step=step)
+
+    trackio = ContextBoundTrackio()
+    monkeypatch.setitem(sys.modules, "trackio", trackio)
+    config = LMTrainingConfig(
+        output_dir=str(tmp_path),
+        total_tokens=4,
+        sequence_length=4,
+        evaluation_batches=1,
+        show_dashboard=False,
+        spectral_dashboard=False,
+        trackio_remote_log_interval=1,
+    )
+    reporter = TrackioReporter(config, {}, resume=True)
+    reporter.log({"loss": 1.0}, step=1)
+    reporter.finish()
+
+    assert ("log", 1, {"loss": 1.0}) in trackio.events
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    summaries = [
+        record
+        for record in records
+        if record["kind"] == "trackio_remote_summary"
+    ]
+    assert not summaries or summaries[-1]["error"] is None
 
 
 def test_trackio_coalesces_only_repetitive_checkpoint_info_alerts(
@@ -490,9 +572,19 @@ def test_trackio_coalesces_only_repetitive_checkpoint_info_alerts(
 class _Reporter:
     instances = []
 
-    def __init__(self, config, run_config, *, resume):
+    def __init__(
+        self,
+        config,
+        run_config,
+        *,
+        resume,
+        initial_step=0,
+        initial_tokens=0,
+    ):
         self.events = []
         self.resume = resume
+        self.initial_step = initial_step
+        self.initial_tokens = initial_tokens
         _Reporter.instances.append(self)
 
     def log(self, metrics, *, step):

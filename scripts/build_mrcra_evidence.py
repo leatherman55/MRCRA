@@ -173,8 +173,8 @@ PATHS = {
         "src/mrrn/config.py", "src/mrrn/cognitive_model.py",
         "src/mrrn/language.py", "src/mrrn/cstm.py",
         "scripts/report_mrcra_parameters.py",
-        "outputs/mrcra_1p3m_design_report.md",
-        "outputs/mrcra_1p3m_parameter_report.json",
+        "outputs/mrcra_2p7m_design_report.md",
+        "outputs/mrcra_2p7m_parameter_report.json",
         "outputs/mrcra_8p4m_parameter_report.json",
         "outputs/mrcra_120m_parameter_report.json",
     ], [

@@ -265,28 +265,32 @@ class MRRNConfig:
         return cls(input_dim=input_dim, **defaults)
 
     @classmethod
-    def mrcra_ultralight_1p3m_carrier(
-        cls, input_dim: int = 20, output_dim: int | None = None, **overrides,
+    def mrcra_ultralight_2p7m_carrier(
+        cls, input_dim: int = 36, output_dim: int | None = None, **overrides,
     ) -> "MRRNConfig":
-        """Six-scale spectral carrier for the complete 1.3M MRCRA actor.
+        """Six-scale spectral carrier for the complete 2.7M MRCRA actor.
 
         With a 50,257-token vocabulary, tied token/output weights consume most
-        of a 1.3M budget.  A 20-wide representation is the largest practical
-        width that still leaves enough capacity for every cognitive subsystem.
-        Learned depth is shared, but all six physical resolution scales retain
-        independent recurrent state.  The profile preserves explicit
-        resonance modes, spectral activation, structured mixing, local
-        attention, memory retrieval, and the relational feedback branch.
+        of a tiny actor's budget.  Width 36 is the strongest balanced allocation
+        inside a 2.7M envelope: it crosses the certified vocabulary router's
+        width threshold, leaves 890K parameters outside the tied embedding,
+        and remains divisible across four relational heads.  Learned depth is
+        shared, but all six physical resolution scales retain independent
+        recurrent state.  The profile spends the enlarged non-vocabulary
+        budget on doubled MIMO coupling, a larger resonance bank, stronger
+        spectral activation, and wider cognition rather than on duplicated
+        depth weights or runtime capacities that would defeat its ultralight
+        execution purpose.
         """
 
         defaults = dict(
-            model_dim=20,
+            model_dim=36,
             output_dim=output_dim,
             layers=6,
             scales=6,
-            heads=2,
-            modes=8,
-            mimo_rank=1,
+            heads=4,
+            modes=9,
+            mimo_rank=2,
             attention_window=32,
             attention_query_tile_size=256,
             retrieved_items=4,
@@ -298,13 +302,13 @@ class MRRNConfig:
             width_multiple=4,
             share_depth_parameters=True,
             structured_mixer_rank=8,
-            spectral_modes=5,
-            spectral_basis_order=5,
+            spectral_modes=6,
+            spectral_basis_order=6,
             spectral_triads_per_mode=1,
             enable_global_head=False,
             activation_checkpointing=True,
             relational_branch=True,
-            relational_context_dim=20,
+            relational_context_dim=36,
         )
         defaults.update(overrides)
         return cls(input_dim=input_dim, **defaults)
@@ -547,29 +551,31 @@ class MRCRAConfig:
         )
 
     @classmethod
-    def ultralight_1p3m(
-        cls, *, input_dim: int = 20, output_dim: int | None = None,
+    def ultralight_2p7m(
+        cls, *, input_dim: int = 36, output_dim: int | None = None,
         carrier_overrides: dict | None = None, cognitive_overrides: dict | None = None,
     ) -> "MRCRAConfig":
-        """Complete 1.3M-class MRCRA profile for the GPT-2 vocabulary.
+        """Complete 2.7M-class MRCRA profile for the GPT-2 vocabulary.
 
         This profile compresses dimensions, ranks, and bounded runtime
         capacities without deleting mechanisms.  It retains the six-scale
         MRRN carrier and every integrated cognitive pathway used by the light
-        and serious actors.  Its narrow declared band fails closed if tokenizer
-        width or architecture drift makes the ``1.3M`` name inaccurate.
+        and serious actors.  Width and spectral capacity increase together,
+        while bounded runtime capacities remain deliberately small.  Its
+        narrow declared band fails closed if tokenizer width or architecture
+        drift makes the ``2.7M`` name inaccurate.
         """
 
-        carrier = MRRNConfig.mrcra_ultralight_1p3m_carrier(
+        carrier = MRRNConfig.mrcra_ultralight_2p7m_carrier(
             input_dim, output_dim, **(carrier_overrides or {})
         )
         mature = {
-            "workspace_dim": 20,
+            "workspace_dim": 36,
             "provenance_features": 8,
             "uncertainty_channels": 8,
-            "relation_heads": 2,
+            "relation_heads": 4,
             "relation_modes": 8,
-            "relation_adapter_rank": 6,
+            "relation_adapter_rank": 8,
             "goal_slots": 4,
             "goal_constraint_dim": 4,
             "system_action_channels": 4,
@@ -621,8 +627,8 @@ class MRCRAConfig:
         cognitive = CognitiveConfig(**mature)
         return cls(
             carrier, cognitive,
-            actor_parameter_minimum=1_290_000,
-            actor_parameter_maximum=1_310_000,
+            actor_parameter_minimum=2_690_000,
+            actor_parameter_maximum=2_710_000,
         )
 
     def require_actor_parameter_count(self, count: int) -> None:

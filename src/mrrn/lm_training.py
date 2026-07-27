@@ -849,7 +849,17 @@ class _MetricAccumulator:
 class TrackioReporter:
     """Trackio dashboard plus an append-only JSONL metric/event mirror."""
 
-    def __init__(self, config: LMTrainingConfig, run_config: dict[str, Any], *, resume: bool) -> None:
+    def __init__(
+        self,
+        config: LMTrainingConfig,
+        run_config: dict[str, Any],
+        *,
+        resume: bool,
+        initial_step: int = 0,
+        initial_tokens: int = 0,
+    ) -> None:
+        if initial_step < 0 or initial_tokens < 0:
+            raise ValueError("initial Trackio progress cannot be negative")
         try:
             import trackio
         except ImportError as error:
@@ -915,6 +925,11 @@ class TrackioReporter:
         self._remote_log_interval = config.trackio_remote_log_interval
         self._checkpoint_alerts_seen = 0
         self._checkpoint_alerts_remotely_coalesced = 0
+        if config.trackio_space_id is None:
+            self._register_local_run_before_dashboard(
+                step=initial_step,
+                tokens_seen=initial_tokens,
+            )
 
         def remote_worker() -> None:
             while True:
@@ -923,7 +938,11 @@ class TrackioReporter:
                     if item is self._remote_stop:
                         return
                     step, metrics = item
-                    self.trackio.log(metrics, step=step)
+                    # Trackio keeps its module-level current run in a
+                    # context variable, which is not inherited by this bounded
+                    # writer thread. Address the explicit run object so every
+                    # queued point retains the initialized run identity.
+                    self.run.log(metrics, step=step)
                 except Exception as error:
                     # Trackio is observational. Preserve the first failure for
                     # a local receipt while training metrics continue to the
@@ -977,6 +996,82 @@ class TrackioReporter:
             ):
                 self._metric_handle.flush()
                 self._metric_rows_since_flush = 0
+
+    def _local_run_is_visible(self) -> bool | None:
+        """Return whether the exact initialized run reached local persistence.
+
+        Trackio 0.31 creates a run object and prints its creation notice before
+        the first metric makes the run discoverable through ``Api().runs``.
+        A missing API means a compatible test double or older Trackio version;
+        in that case visibility is unknown rather than falsely certified.
+        """
+
+        api_factory = getattr(self.trackio, "Api", None)
+        run_id = getattr(self.run, "id", None)
+        if api_factory is None or run_id is None:
+            return None
+        try:
+            records = api_factory().runs(self.config.trackio_project)
+        except ValueError:
+            # Trackio reports a not-yet-materialized local project as an
+            # exception until its first asynchronous metric write commits.
+            return False
+        for record in records:
+            record_id = (
+                record.get("id")
+                if isinstance(record, dict)
+                else getattr(record, "id", None)
+            )
+            if record_id == run_id:
+                return True
+        return False
+
+    def _register_local_run_before_dashboard(
+        self,
+        *,
+        step: int,
+        tokens_seen: int,
+        timeout_seconds: float = 2.0,
+    ) -> None:
+        """Persist initial progress before any local observer can be opened."""
+
+        error: str | None = None
+        try:
+            # This is an existing canonical metric, not a synthetic training
+            # result. It records the exact checkpoint/start position and also
+            # causes Trackio to durably register the run and its configuration.
+            self.run.log(
+                {"progress/tokens_seen": float(tokens_seen)},
+                step=step,
+            )
+            deadline = monotonic() + timeout_seconds
+            visible = self._local_run_is_visible()
+            while visible is False and monotonic() < deadline:
+                sleep(0.01)
+                visible = self._local_run_is_visible()
+        except Exception as registration_error:
+            visible = False
+            error = (
+                f"{type(registration_error).__name__}: "
+                f"{registration_error}"
+            )
+        self._write({
+            "kind": "trackio_run_registration",
+            "project": self.config.trackio_project,
+            "run": self.config.run_name,
+            "run_id": getattr(self.run, "id", None),
+            "step": step,
+            "tokens_seen": tokens_seen,
+            "visible_before_dashboard": visible,
+            "error": error,
+        })
+        if visible is False:
+            print(
+                "[TRACKIO WARN] The initialized run was not visible in the "
+                "local Trackio store before dashboard launch; the dashboard "
+                "will continue polling while training remains authoritative.",
+                flush=True,
+            )
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         cleaned = {name: float(value) for name, value in metrics.items()}
@@ -1781,7 +1876,13 @@ class NextTokenTrainer:
         if not self._resumed:
             torch.manual_seed(self.config.seed)
         run_identity = self._run_identity()
-        reporter = TrackioReporter(self.config, run_identity, resume=self._resumed)
+        reporter = TrackioReporter(
+            self.config,
+            run_identity,
+            resume=self._resumed,
+            initial_step=self.state.step,
+            initial_tokens=self.state.tokens_seen,
+        )
         wall_started = perf_counter()
         reporter.alert(
             "Training started" if not self._resumed else "Training resumed",

@@ -362,14 +362,14 @@ def benchmark_integrated_causality() -> CSTMExperiment:
 
 
 def benchmark_efficiency_and_parameter_contract() -> CSTMExperiment:
-    """Measure the geometric target-row bound and real 1.3M head allocation."""
+    """Measure the geometric target-row bound and real 2.7M head allocation."""
 
     context = 32_768
     supports = (2, 4, 8, 16, 32, 32)
     horizons_per_scale = 2
     rows = sum(context // support for support in supports) * horizons_per_scale
     row_ratio = rows / context
-    configuration = MRCRAConfig.ultralight_1p3m(output_dim=50_257)
+    configuration = MRCRAConfig.ultralight_2p7m(output_dim=50_257)
     model = MRCRALanguageModel(configuration)
     head_parameters = sum(
         parameter.numel()

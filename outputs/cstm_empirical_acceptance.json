@@ -67,16 +67,16 @@
     {
       "comparison": "at_most",
       "name": "ultralight_cstm_predictor_parameters",
-      "observed": 2158.0,
+      "observed": 2414.0,
       "passed": true,
       "threshold": 5000
     },
     {
       "comparison": "at_most",
       "name": "ultralight_actor_parameter_ceiling",
-      "observed": 1301827.0,
+      "observed": 2699463.0,
       "passed": true,
-      "threshold": 1310000.0
+      "threshold": 2710000.0
     },
     {
       "comparison": "equal",
@@ -88,7 +88,7 @@
     {
       "comparison": "at_most",
       "name": "gradient_maximum_subsystem_cap_ratio",
-      "observed": 0.9999999403953552,
+      "observed": 1.0000001192092896,
       "passed": true,
       "threshold": 1.00001
     },
@@ -109,7 +109,7 @@
     {
       "comparison": "at_least",
       "name": "cstm_head_gradient_norm",
-      "observed": 0.019601427018642426,
+      "observed": 0.020063690841197968,
       "passed": true,
       "threshold": 1e-08
     },
@@ -163,11 +163,11 @@
       "description": "Uses the production six-scale supports and real GPT-2-vocabulary ultralight actor to measure derived work and parameter overhead.",
       "metrics": {
         "context_tokens": 32768.0,
-        "cstm_predictor_parameters": 2158.0,
+        "cstm_predictor_parameters": 2414.0,
         "target_rows_per_physical_token": 2.0,
         "two_horizon_target_rows": 65536.0,
-        "ultralight_actor_parameters": 1301827.0,
-        "ultralight_parameter_maximum": 1310000.0
+        "ultralight_actor_parameters": 2699463.0,
+        "ultralight_parameter_maximum": 2710000.0
       },
       "name": "efficiency_and_parameter_contract"
     },
@@ -175,9 +175,9 @@
       "description": "Runs the real integrated trainer through CSTM target construction and a separate auxiliary backward, then inspects conflict projection, subsystem-relative caps, auxiliary-head gradients, and the unchanged physical-token counter.",
       "metrics": {
         "auxiliary_applied": 1.0,
-        "cstm_head_gradient_norm": 0.019601427018642426,
+        "cstm_head_gradient_norm": 0.020063690841197968,
         "governed_overlap_subsystems": 6.0,
-        "maximum_subsystem_cap_ratio": 0.9999999403953552,
+        "maximum_subsystem_cap_ratio": 1.0000001192092896,
         "minimum_task_auxiliary_alignment": 0.0,
         "packed_physical_tokens": 32.0,
         "physical_token_counter_delta": 0.0,

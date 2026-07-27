@@ -1684,11 +1684,14 @@ Six scales are enough for the 32K target when the coarsest coefficients have sup
 
 The 4.7M model remains a substrate and component demonstrator. It is too narrow to support the full cognitive system without displacing most carrier capacity, and its retained FineWeb run is not a trained language capability result. Small versions of the new modules may be exercised there for causal and algebraic tests, but the architecture described in this document is the serious approximately 120M target.
 
-The integrated 1.3M ultralight profile is a different object from that legacy
+The integrated 2.7M ultralight profile is a different object from that legacy
 4.7M carrier. It deliberately retains the complete MRCRA module graph and all
-authority boundaries by using a tied 20-wide token/output embedding, six
+authority boundaries by using a tied 36-wide token/output embedding, six
 independently stateful physical scales with shared learned depth, reduced
-low-rank adapters, and smaller bounded runtime capacities. It is intended for
+low-rank adapters, and smaller bounded runtime capacities. The enlarged width
+also makes exact certified vocabulary routing eligible while four heads,
+rank-two MIMO coupling, and six-mode spectral activation keep the added
+capacity distributed across the carrier and cognition. It is intended for
 fast end-to-end mechanism, causality, checkpoint, and training experiments.
 Its structural completeness must not be confused with representational
 capacity: with the GPT-2 vocabulary, most of its parameters reside in the tied

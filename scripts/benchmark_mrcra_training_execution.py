@@ -342,7 +342,7 @@ def run_worker(
     policy = variant_policy(variant)
     if profile == "quick":
         tokenizer = ByteTextTokenizer()
-        model_config = MRCRAConfig.ultralight_1p3m(
+        model_config = MRCRAConfig.ultralight_2p7m(
             output_dim=tokenizer.vocabulary_size
         )
         context_length, tbptt_length = 1_024, 256

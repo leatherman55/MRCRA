@@ -326,7 +326,7 @@ The shared CSTM head contains:
 
 | Profile | CSTM parameters | Total actor parameters |
 | --- | ---: | ---: |
-| Ultralight | 2,158 | 1,301,827 |
+| Ultralight | 2,414 | 2,699,463 |
 | Light | 3,361 | 8,416,803 |
 | Serious | 5,934 | 115,931,878 |
 

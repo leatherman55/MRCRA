@@ -97,7 +97,7 @@ def _build_quick_components(seed: int):
     )
     return (
         tokenizer,
-        MRCRAConfig.ultralight_1p3m(
+        MRCRAConfig.ultralight_2p7m(
             output_dim=tokenizer.vocabulary_size
         ),
         lambda: RepeatingPackedFixtureStream(fixture),

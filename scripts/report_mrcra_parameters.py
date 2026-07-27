@@ -30,7 +30,7 @@ def arguments() -> argparse.Namespace:
     )
     profile.add_argument(
         "--ultralightmodel", action="store_true",
-        help="Audit the integrated 1.3M ultralight profile instead of the 120M class.",
+        help="Audit the integrated 2.7M ultralight profile instead of the 120M class.",
     )
     parser.add_argument(
         "--output",
@@ -42,14 +42,14 @@ def arguments() -> argparse.Namespace:
 def main() -> None:
     args = arguments()
     profile = (
-        "mrcra_1p3m_ultralight"
+        "mrcra_2p7m_ultralight"
         if args.ultralightmodel
         else "mrcra_8p4m_light"
         if args.lightmodel
         else "mrcra_120m_serious"
     )
     config = (
-        MRCRAConfig.ultralight_1p3m(output_dim=args.vocabulary_size)
+        MRCRAConfig.ultralight_2p7m(output_dim=args.vocabulary_size)
         if args.ultralightmodel
         else MRCRAConfig.light_8p4m(output_dim=args.vocabulary_size)
         if args.lightmodel
@@ -102,7 +102,7 @@ def main() -> None:
     destination = Path(
         args.output
         or (
-            "outputs/mrcra_1p3m_parameter_report.json"
+            "outputs/mrcra_2p7m_parameter_report.json"
             if args.ultralightmodel
             else "outputs/mrcra_8p4m_parameter_report.json"
             if args.lightmodel

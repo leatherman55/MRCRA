@@ -1667,9 +1667,19 @@ def test_first_hard_event_is_alerted_artifacted_and_immediately_checkpointed(
     class FakeReporter:
         instances = []
 
-        def __init__(self, config, run_config, *, resume):
+        def __init__(
+            self,
+            config,
+            run_config,
+            *,
+            resume,
+            initial_step=0,
+            initial_tokens=0,
+        ):
             self.logs, self.alerts, self.traces = [], [], []
             self.resume = resume
+            self.initial_step = initial_step
+            self.initial_tokens = initial_tokens
             self.__class__.instances.append(self)
 
         def log(self, metrics, *, step):

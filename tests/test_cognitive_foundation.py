@@ -89,20 +89,23 @@ def test_light_8p4m_profile_preserves_integrated_cognition_and_exact_budget():
         light.require_actor_parameter_count(8_500_000)
 
 
-def test_ultralight_1p3m_profile_preserves_complete_six_scale_cognition():
-    ultralight = MRCRAConfig.ultralight_1p3m(output_dim=50_257)
+def test_ultralight_2p7m_profile_preserves_complete_six_scale_cognition():
+    ultralight = MRCRAConfig.ultralight_2p7m(output_dim=50_257)
     carrier = ultralight.carrier
     cognition = ultralight.cognitive
 
-    assert carrier.model_dim == cognition.workspace_dim == 20
+    assert carrier.model_dim == cognition.workspace_dim == 36
     assert carrier.layers == carrier.scales == 6
+    assert carrier.heads == cognition.relation_heads == 4
+    assert carrier.mimo_rank == 2
     assert carrier.share_depth_parameters is True
     assert carrier.structured_mixer_rank == 8
     assert carrier.relational_branch is True
     assert carrier.spectral_activation is True
-    assert carrier.spectral_modes == carrier.spectral_basis_order == 5
-    assert [item.width for item in carrier.scale_configs()] == [20, 24, 24, 24, 24, 24]
-    assert [item.modes for item in carrier.scale_configs()] == [8, 11, 11, 11, 11, 11]
+    assert carrier.spectral_modes == carrier.spectral_basis_order == 6
+    assert [item.width for item in carrier.scale_configs()] == [36, 44, 44, 44, 44, 44]
+    assert [item.modes for item in carrier.scale_configs()] == [9, 12, 12, 12, 12, 12]
+    assert cognition.relation_adapter_rank == 8
     assert cognition.active_event_capacity == 64
     assert cognition.pair_edge_capacity == 256
     assert cognition.hyperedge_capacity == 32
@@ -128,7 +131,7 @@ def test_ultralight_1p3m_profile_preserves_complete_six_scale_cognition():
     model = MRCRALanguageModel(
         ultralight, model_authority="ultralight-profile-test"
     )
-    assert model.parameter_count == 1_301_827
+    assert model.parameter_count == 2_699_463
     assert (
         model.token_embedding.weight
         is model.cognitive.carrier.output_head.weight
@@ -158,7 +161,7 @@ def test_ultralight_1p3m_profile_preserves_complete_six_scale_cognition():
     } <= parameter_groups
     ultralight.require_actor_parameter_count(model.parameter_count)
     with pytest.raises(ValueError):
-        ultralight.require_actor_parameter_count(1_320_000)
+        ultralight.require_actor_parameter_count(2_720_000)
 
 
 def test_node_and_relation_slots_enforce_authoritative_masks():

@@ -123,7 +123,7 @@ def production_configuration(
     if lightmodel and ultralightmodel:
         raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
     factory = (
-        MRCRAConfig.ultralight_1p3m
+        MRCRAConfig.ultralight_2p7m
         if ultralightmodel
         else MRCRAConfig.light_8p4m
         if lightmodel
@@ -247,13 +247,13 @@ def production_profile(
         raise ValueError("lightmodel and ultralightmodel are mutually exclusive")
     if ultralightmodel:
         return ProductionProfile(
-            name="mrcra_1p3m_ultralight",
-            model_authority="mrcra-ultralight-1p3m-fineweb-stage1",
+            name="mrcra_2p7m_ultralight",
+            model_authority="mrcra-ultralight-2p7m-fineweb-stage1",
             output_directory=(
-                f"outputs/mrcra-1p3m-fineweb-{total_tokens}-tokens"
+                f"outputs/mrcra-2p7m-fineweb-{total_tokens}-tokens"
             ),
             run_name=(
-                f"mrcra-1p3m-ultralight-integrated-fineweb-"
+                f"mrcra-2p7m-ultralight-integrated-fineweb-"
                 f"{total_tokens}-tokens-32k"
             ),
         )
@@ -289,7 +289,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--output-dir",
         help=(
-            "Run directory; defaults to the selected 120M, 8.4M, or 1.3M "
+            "Run directory; defaults to the selected 120M, 8.4M, or 2.7M "
             "FineWeb profile directory."
         ),
     )
@@ -304,7 +304,7 @@ def parser() -> argparse.ArgumentParser:
     size.add_argument(
         "--ultralightmodel", action="store_true",
         help=(
-            "Train the complete six-scale 1.3M MRCRA profile instead of the "
+            "Train the complete six-scale 2.7M MRCRA profile instead of the "
             "default 120M-class actor."
         ),
     )
@@ -883,7 +883,7 @@ def main() -> None:
                 model_authority=selected_profile.model_authority,
             )
             model.config.require_actor_parameter_count(model.parameter_count)
-            smoke_run_name = "mrcra-1p3m-ultralight-smoke"
+            smoke_run_name = "mrcra-2p7m-ultralight-smoke"
             smoke_vocabulary_tile_size = 2_048
         else:
             model_profile = "mrcra_tiny_smoke"
